@@ -1,0 +1,81 @@
+apiVersion: lightning.ir/v1alpha1
+kind: Runbook
+metadata:
+  name: ecs-service-restart
+  title: Restart unhealthy ECS service
+  description: Forces a new deployment when tasks repeatedly fail health checks.
+  team: platform
+  tags: [ecs, restart]
+spec:
+  parameters:
+    cluster:
+      type: string
+      required: true
+      from: alert.labels.cluster
+      pattern: "^[A-Za-z0-9_-]{1,255}$"
+    service:
+      type: string
+      required: true
+      from: alert.labels.service
+      pattern: "^[A-Za-z0-9_-]{1,255}$"
+  target:
+    agentSelector:
+      env: prod
+  triggers:
+    - type: alert
+      services: [checkout-api]
+      match: 'alert.source == "cloudwatch" && alert.labels.alarm_name.startsWith("ecs-unhealthy-")'
+      mode: auto
+      beforePaging: true
+      cooldown: 15m
+      maxRunsPerHour: 2
+    - type: manual
+  policy:
+    allowedRoles: [Responder, Admin]
+    timeout: 15m
+    concurrency: 1
+  steps:
+    - id: context
+      name: What this does
+      type: note
+      markdown: |
+        Forces a new ECS deployment for the service, which replaces all tasks.
+        If tasks keep failing after this, the problem is likely the image or a dependency.
+    - id: before
+      name: Capture current state
+      type: aws
+      service: ecs
+      action: DescribeServices
+      input:
+        cluster: ${{ params.cluster }}
+        services: ["${{ params.service }}"]
+      outputs:
+        running: result.services[0].runningCount
+        desired: result.services[0].desiredCount
+    - id: restart
+      name: Force new deployment
+      type: aws
+      service: ecs
+      action: UpdateService
+      input:
+        cluster: ${{ params.cluster }}
+        service: ${{ params.service }}
+        forceNewDeployment: true
+    - id: wait-stable
+      name: Wait for service to stabilize
+      type: wait
+      interval: 2s
+      timeout: 2m
+      check:
+        aws:
+          service: ecs
+          action: DescribeServices
+          input:
+            cluster: ${{ params.cluster }}
+            services: ["${{ params.service }}"]
+      until: >
+        result.services[0].deployments.size() == 1 &&
+        result.services[0].runningCount == result.services[0].desiredCount
+  onFailure:
+    action: escalate
+    message: "Auto-restart of ${{ params.service }} did not stabilize; paging on-call."
