@@ -421,13 +421,6 @@ Secrets never appear in either. Output is capped at 1 MiB per step attempt.
 
 **Rollback.** There is no `rollback:` step list in v1. Failures use `onFailure`, which normally escalates to a human.
 
-## 9. Open questions
-
-1. **Reusable steps.** Shared step libraries such as `uses: nightfix/ecs-restart@v1`. Deferred; needs its own signing and versioning story.
-2. **Large output.** Spill output beyond 1 MiB to S3? Deferred until a customer needs it.
-
----
-
 ## 9. Approval semantics (built Oct 20, 2026)
 
 How `approval` steps behave, as implemented in `internal/controlplane/approvals.go`:
@@ -439,3 +432,8 @@ How `approval` steps behave, as implemented in `internal/controlplane/approvals.
 - **Slack.** Approval requests go to the service's Slack targets with Approve/Reject buttons when the org has registered a Slack app (`POST /v1/slack-apps`), otherwise with API instructions. Button clicks are authenticated by Slack's v0 signature with a 5-minute timestamp window, and the workspace is pinned when `team_id` is set. Replies go only to Slack's `response_url` host. A Slack user is linked to a Nightfix user only by redeeming a one-time code (60 bits, 10 minutes, shown only to that Slack user) while signed in, never by profile email. Slack decisions use the member's last-synced teams, so they require a Nightfix sign-in within 7 days.
 - **Trust boundary.** Approvals are enforced by the control plane. The agent doesn't yet verify signed approval evidence before running later steps; that's a candidate follow-up that pairs with customer co-signing.
 - **Not yet built.** Runs outside an incident aren't announced in Slack (`GET /v1/approvals` lists them). Approver groups other than roles, and `manual` checklist steps, come later.
+
+## 10. Open questions
+
+1. **Reusable steps.** Shared step libraries such as `uses: nightfix/ecs-restart@v1`. Deferred; needs its own signing and versioning story.
+2. **Large output.** Spill output beyond 1 MiB to S3? Deferred until a customer needs it.

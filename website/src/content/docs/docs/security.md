@@ -19,7 +19,7 @@ The agent makes **outbound connections only**, over HTTPS on port 443. You open 
 
 Nightfix never holds credentials to your infrastructure, or the secrets your runbooks use. Runbooks refer to secrets by name, such as `secret://aws-sm/prod/db-password`. The agent reads them from Secrets Manager or SSM Parameter Store when a step runs and scrubs them, including base64 and URL-encoded forms, from all output.
 
-The only credentials Nightfix stores are for sending notifications: your PagerDuty routing key, your Slack webhook or bot token, and the secret that signs your webhook alerts. Each is encrypted per organization, never shown again after you save it, and can't reach your infrastructure.
+The only credentials Nightfix stores are for notifications and Slack buttons: your PagerDuty routing key, your Slack webhook or bot token, your Slack app's signing secret, and the secret that signs your webhook alerts. Each is encrypted per organization, never shown again after you save it, and can't reach your infrastructure.
 
 ## How the agent proves who it is
 
