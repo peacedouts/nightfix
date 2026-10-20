@@ -2,3 +2,6 @@
 /.state/
 *.test
 coverage.out
+website/node_modules/
+website/dist/
+website/.astro/
