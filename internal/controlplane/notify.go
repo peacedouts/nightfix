@@ -11,8 +11,8 @@ import (
 	neturl "net/url"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/ids"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/ids"
 )
 
 // PagerDutyEventsURL is the Events API v2 endpoint.
@@ -26,7 +26,7 @@ const maxNotifyAttempts = 8
 func (s *Server) DeliverNotifications(ctx context.Context) (int, error) {
 	n := 0
 	for {
-		claimed, err := s.DB.Claim(ctx, "lir_claim_notification", func(tx *db.Tx, id string) error {
+		claimed, err := s.DB.Claim(ctx, "nfx_claim_notification", func(tx *db.Tx, id string) error {
 			var kind, typ string
 			var payload db.JSON[map[string]any]
 			var cfg db.JSON[map[string]string]
@@ -92,7 +92,7 @@ func (s *Server) send(ctx context.Context, typ, kind, secret string, cfg map[str
 		case "page":
 			ev["payload"] = map[string]any{
 				"summary":  truncate(fmt.Sprintf("#%v %v", p["incident_number"], p["title"]), 1024),
-				"source":   fmt.Sprintf("lightning-ir/%v", p["service"]),
+				"source":   fmt.Sprintf("nightfix/%v", p["service"]),
 				"severity": pagerDutySeverity(fmt.Sprint(p["severity"])),
 				"custom_details": map[string]any{
 					"reason": p["reason"], "service": p["service"], "incident": ids.Encode("inc", incID),

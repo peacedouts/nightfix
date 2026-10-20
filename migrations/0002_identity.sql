@@ -1,7 +1,7 @@
 -- Identity: users (global), org membership, teams, scoped role bindings,
 -- the Auth0 org link, and single-use challenges for IAM agent enrollment.
 
-SET ROLE lir_owner;
+SET ROLE nfx_owner;
 
 -- Users are global (one person can belong to several orgs). The app role has
 -- no direct access to this table; it goes through the SECURITY DEFINER
@@ -81,30 +81,30 @@ BEGIN
   FOREACH t IN ARRAY ARRAY['org_members','teams','team_members','role_bindings'] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
-    EXECUTE format('CREATE POLICY tenant_isolation ON %I USING (org_id = lir_org()) WITH CHECK (org_id = lir_org())', t);
+    EXECUTE format('CREATE POLICY tenant_isolation ON %I USING (org_id = nfx_org()) WITH CHECK (org_id = nfx_org())', t);
   END LOOP;
 END $$;
 -- Challenges are only reached through the functions below.
 ALTER TABLE enrollment_challenges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE enrollment_challenges FORCE ROW LEVEL SECURITY;
 
-GRANT SELECT, INSERT, UPDATE ON org_members, teams, team_members TO lir_app;
-GRANT DELETE ON team_members TO lir_app;
-GRANT SELECT, INSERT, DELETE ON role_bindings TO lir_app;
+GRANT SELECT, INSERT, UPDATE ON org_members, teams, team_members TO nfx_app;
+GRANT DELETE ON team_members TO nfx_app;
+GRANT SELECT, INSERT, DELETE ON role_bindings TO nfx_app;
 
 -- ---------------------------------------------------------------------------
 -- Functions
 -- ---------------------------------------------------------------------------
 
 -- Map an Auth0 Organization to our org.
-CREATE FUNCTION lir_route_auth0_org(p_auth0_org text)
+CREATE FUNCTION nfx_route_auth0_org(p_auth0_org text)
 RETURNS TABLE (org_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT o.id FROM orgs o WHERE o.auth0_org_id = p_auth0_org
 $$;
 
 -- Create or refresh a user from a verified token. Returns the user id.
-CREATE FUNCTION lir_upsert_user(p_sub text, p_email text, p_name text)
+CREATE FUNCTION nfx_upsert_user(p_sub text, p_email text, p_name text)
 RETURNS uuid
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 DECLARE v_id uuid;
@@ -118,23 +118,23 @@ BEGIN
 END $$;
 
 -- Members of the current org only.
-CREATE FUNCTION lir_org_users()
+CREATE FUNCTION nfx_org_users()
 RETURNS TABLE (id uuid, email text, name text, status text, last_login_at timestamptz)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT u.id, u.email, u.name, m.status, u.last_login_at
   FROM users u JOIN org_members m ON m.user_id = u.id
-  WHERE m.org_id = lir_org()
+  WHERE m.org_id = nfx_org()
 $$;
 
-CREATE FUNCTION lir_org_user_by_email(p_email text)
+CREATE FUNCTION nfx_org_user_by_email(p_email text)
 RETURNS TABLE (id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT u.id FROM users u JOIN org_members m ON m.user_id = u.id
-  WHERE m.org_id = lir_org() AND m.status = 'active' AND lower(u.email) = lower(p_email)
+  WHERE m.org_id = nfx_org() AND m.status = 'active' AND lower(u.email) = lower(p_email)
 $$;
 
 -- Issue a challenge for an org that exists. The caller stores only the hash.
-CREATE FUNCTION lir_create_enroll_challenge(p_org uuid, p_nonce_hash bytea, p_ttl interval)
+CREATE FUNCTION nfx_create_enroll_challenge(p_org uuid, p_nonce_hash bytea, p_ttl interval)
 RETURNS boolean
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 BEGIN
@@ -147,7 +147,7 @@ BEGIN
 END $$;
 
 -- Consume a challenge exactly once; returns its org if still valid.
-CREATE FUNCTION lir_consume_enroll_challenge(p_nonce_hash bytea)
+CREATE FUNCTION nfx_consume_enroll_challenge(p_nonce_hash bytea)
 RETURNS TABLE (org_id uuid)
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
   DELETE FROM enrollment_challenges c WHERE c.nonce_hash = p_nonce_hash AND c.expires_at > now()
@@ -155,8 +155,8 @@ LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 $$;
 
 GRANT EXECUTE ON FUNCTION
-  lir_route_auth0_org(text), lir_upsert_user(text, text, text), lir_org_users(), lir_org_user_by_email(text),
-  lir_create_enroll_challenge(uuid, bytea, interval), lir_consume_enroll_challenge(bytea)
-TO lir_app;
+  nfx_route_auth0_org(text), nfx_upsert_user(text, text, text), nfx_org_users(), nfx_org_user_by_email(text),
+  nfx_create_enroll_challenge(uuid, bytea, interval), nfx_consume_enroll_challenge(bytea)
+TO nfx_app;
 
 RESET ROLE;

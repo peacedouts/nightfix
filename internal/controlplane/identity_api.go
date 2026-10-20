@@ -5,8 +5,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/ids"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/ids"
 )
 
 // display is how a principal appears in timelines and messages.
@@ -119,7 +119,7 @@ func (s *Server) apiAddTeamMember(r *http.Request, p principal) (any, error) {
 			return err
 		}
 		var userID string
-		if err := tx.QueryRow(`SELECT id FROM lir_org_user_by_email($1)`, req.Email).Scan(&userID); err != nil {
+		if err := tx.QueryRow(`SELECT id FROM nfx_org_user_by_email($1)`, req.Email).Scan(&userID); err != nil {
 			return httpError{404, "no member with that email has logged in yet"}
 		}
 		if _, err := tx.Exec(`INSERT INTO team_members (org_id, team_id, user_id, source) VALUES ($1,$2,$3,'manual')
@@ -143,7 +143,7 @@ func (s *Server) teamIDBySlug(tx *db.Tx, slug string) (string, error) {
 func (s *Server) apiListMembers(r *http.Request, p principal) (any, error) {
 	out := []map[string]any{}
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
-		rows, err := tx.Query(`SELECT id, email, name, status FROM lir_org_users() ORDER BY email`)
+		rows, err := tx.Query(`SELECT id, email, name, status FROM nfx_org_users() ORDER BY email`)
 		if err != nil {
 			return err
 		}
@@ -188,7 +188,7 @@ func (s *Server) apiCreateBinding(r *http.Request, p principal) (any, error) {
 		var err error
 		switch req.SubjectType {
 		case "user":
-			err = tx.QueryRow(`SELECT id FROM lir_org_user_by_email($1)`, req.Subject).Scan(&subjectID)
+			err = tx.QueryRow(`SELECT id FROM nfx_org_user_by_email($1)`, req.Subject).Scan(&subjectID)
 			if err != nil {
 				return httpError{404, "no member with that email has logged in yet"}
 			}
@@ -221,7 +221,7 @@ func (s *Server) apiListBindings(r *http.Request, p principal) (any, error) {
 				COALESCE(t.slug, u.email, b.subject_id::text)
 			FROM role_bindings b
 			LEFT JOIN teams t ON b.subject_type = 'team' AND t.id = b.subject_id
-			LEFT JOIN lir_org_users() u ON b.subject_type = 'user' AND u.id = b.subject_id
+			LEFT JOIN nfx_org_users() u ON b.subject_type = 'user' AND u.id = b.subject_id
 			ORDER BY b.created_at`)
 		if err != nil {
 			return err

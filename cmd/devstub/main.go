@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/devstub"
+	"github.com/peacedouts/nightfix/internal/devstub"
 )
 
 func main() {
@@ -18,7 +18,7 @@ func main() {
 	iamKey := flag.String("iam-access-key", "AKIDEXAMPLE", "access key the fake STS recognizes")
 	iamSecret := flag.String("iam-secret", "example-secret", "its secret key")
 	iamAccount := flag.String("iam-account", "123456789012", "account it belongs to")
-	iamRole := flag.String("iam-role", "lightning-agent", "role it reports as assumed")
+	iamRole := flag.String("iam-role", "nightfix-agent", "role it reports as assumed")
 	flag.Parse()
 	s := devstub.New(*healAfter)
 	s.AddIAMIdentity(devstub.IAMIdentity{AccessKey: *iamKey, Secret: *iamSecret, Account: *iamAccount, Role: *iamRole})

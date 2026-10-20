@@ -30,7 +30,7 @@ type Issuer struct {
 // New starts a fake tenant whose JWKS is served at Srv.URL.
 func New(t testing.TB) *Issuer {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
-	is := &Issuer{Key: key, Kid: "test-key-1", Issuer: "https://tenant.example/", Audience: "https://api.lightning.ir"}
+	is := &Issuer{Key: key, Kid: "test-key-1", Issuer: "https://tenant.example/", Audience: "https://api.nightfix.dev"}
 	is.Srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
 			"kty": "RSA", "kid": is.Kid, "use": "sig", "alg": "RS256",
@@ -56,6 +56,6 @@ func (is *Issuer) UserToken(sub, email, auth0Org string, groups ...string) strin
 	return is.Mint("RS256", map[string]any{
 		"iss": is.Issuer, "aud": []string{is.Audience}, "sub": sub, "org_id": auth0Org,
 		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
-		"https://lightning.ir/email": email, "https://lightning.ir/groups": groups,
+		"https://nightfix.dev/email": email, "https://nightfix.dev/groups": groups,
 	})
 }

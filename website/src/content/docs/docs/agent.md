@@ -31,7 +31,7 @@ Labels always come from the rule, never from the agent. A runbook that targets `
 As an ECS service, a Kubernetes deployment, or a systemd unit on EC2:
 
 ```sh
-nightfix-agent --endpoint https://agent.<your-region>.nightfix.example --org org_…
+nightfix-agent --endpoint https://agent.nightfix.dev --org org_…
 ```
 
 The agent needs outbound HTTPS to Nightfix and the AWS APIs it calls. It works through an HTTPS proxy.

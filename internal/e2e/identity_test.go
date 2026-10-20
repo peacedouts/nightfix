@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/agent"
-	"github.com/peacedouts/lightning_ir/internal/agent/awscall"
-	"github.com/peacedouts/lightning_ir/internal/agentapi"
-	"github.com/peacedouts/lightning_ir/internal/devstub"
+	"github.com/peacedouts/nightfix/internal/agent"
+	"github.com/peacedouts/nightfix/internal/agent/awscall"
+	"github.com/peacedouts/nightfix/internal/agentapi"
+	"github.com/peacedouts/nightfix/internal/devstub"
 )
 
 // gw posts to the agent gateway without a client certificate (enrollment).
@@ -165,7 +165,7 @@ func (e *env) userCall(token, method, path string, body any) (int, string) {
 	return resp.StatusCode, string(out)
 }
 
-const paymentsRunbook = `apiVersion: lightning.ir/v1alpha1
+const paymentsRunbook = `apiVersion: nightfix.dev/v1alpha1
 kind: Runbook
 metadata:
   name: payments-describe
@@ -242,7 +242,7 @@ func TestScopedRBACThroughAuth0(t *testing.T) {
 	expect("eve", stranger, "GET", "/v1/me", nil, 401, "not linked")
 	// Neither does a token for a different API.
 	wrongAud := e.auth0.Mint("RS256", map[string]any{"iss": e.auth0.Issuer, "aud": "https://other.api", "sub": "auth0|alice",
-		"org_id": "org_acme", "exp": time.Now().Add(time.Hour).Unix(), "https://lightning.ir/email": "alice@acme.dev"})
+		"org_id": "org_acme", "exp": time.Now().Add(time.Hour).Unix(), "https://nightfix.dev/email": "alice@acme.dev"})
 	expect("wrong-aud", wrongAud, "GET", "/v1/me", nil, 401, "audience")
 
 	// Removing alice from the IdP group removes her team membership on next login.

@@ -50,4 +50,4 @@ Each customer's data is isolated in the database itself, not only in application
 
 ## Reporting a vulnerability
 
-Email the security address on our contact page. We'll acknowledge within two business days.
+Email [security@nightfix.dev](mailto:security@nightfix.dev). We'll acknowledge within two business days. Our [security.txt](/.well-known/security.txt) has the details.

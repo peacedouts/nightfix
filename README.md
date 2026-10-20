@@ -1,4 +1,4 @@
-# Lightning IR
+# Nightfix
 
 Incident response for startups on AWS: alerts, paging, and runbooks that actually run. The control plane is hosted; a lightweight agent runs in the customer's VPC under the customer's own IAM role, makes outbound connections only, and never sends infrastructure secrets anywhere.
 
@@ -51,8 +51,8 @@ These are scoped out of the skeleton, not changes of direction:
 ## Layout
 
 ```
-cmd/lightning          control plane: migrate | org create | serve
-cmd/lightning-agent    customer-side agent
+cmd/nightfix          control plane: migrate | org create | serve
+cmd/nightfix-agent    customer-side agent
 cmd/devstub            simulated ECS, SNS, Slack, PagerDuty (local only)
 internal/controlplane  ingest, incidents, runs, dispatch, notifications, API, agent gateway
 internal/agent         agent loop, verification, executors, redaction; awscall/ signs AWS calls
@@ -68,15 +68,15 @@ internal/e2e           end-to-end tests of the whole loop
 
 ## Running against real AWS
 
-1. Postgres: `LIR_ADMIN_DATABASE_URL=… LIR_APP_DB_PASSWORD=… lightning migrate`, then run `lightning serve` with `LIR_DATABASE_URL` pointing at `lir_app`. See `cmd/lightning/main.go` for every setting. Expose `LIR_INGEST_ADDR` for SNS (HTTPS in front of it) and `LIR_AGENT_ADDR` for agents.
-2. `lightning org create --name Acme --slug acme` prints an owner API key.
+1. Postgres: `NIGHTFIX_ADMIN_DATABASE_URL=… NIGHTFIX_APP_DB_PASSWORD=… nightfix migrate`, then run `nightfix serve` with `NIGHTFIX_DATABASE_URL` pointing at `nfx_app`. See `cmd/nightfix/main.go` for every setting. Expose `NIGHTFIX_INGEST_ADDR` for SNS (HTTPS in front of it) and `NIGHTFIX_AGENT_ADDR` for agents.
+2. `nightfix org create --name Acme --slug acme` prints an owner API key.
 3. Create a service, escalation targets and a `cloudwatch` integration via the API (the demo script shows each call). Subscribe the integration's ingest URL to your SNS topic; the subscription is confirmed automatically after its signature is verified.
 4. Create an IAM enrollment rule for the agent's role, then run the agent in your VPC under that role. The role needs whatever your runbooks call — for the example, `ecs:DescribeServices` and `ecs:UpdateService` on the target service. `sts:GetCallerIdentity` needs no permission.
    ```bash
    curl -X POST $API/v1/enrollment-rules -H "Authorization: Bearer $KEY" \
-     -d '{"method":"iam","role_arn":"arn:aws:iam::<account>:role/lightning-agent","labels":{"env":"prod"},"max_agents":2}'
+     -d '{"method":"iam","role_arn":"arn:aws:iam::<account>:role/nightfix-agent","labels":{"env":"prod"},"max_agents":2}'
 
-   lightning-agent --endpoint https://<gateway>:8443 --ca-file ca.crt --org org_… \
+   nightfix-agent --endpoint https://<gateway>:8443 --ca-file ca.crt --org org_… \
      --required-signers <your org signing key id>
    ```
    Rules match on account + role name (STS's assumed-role ARN doesn't carry the role's path). For hosts without an IAM role, use `"method":"token"` and `--enroll-method token --enroll-token …`.
@@ -84,16 +84,16 @@ internal/e2e           end-to-end tests of the whole loop
 
 ## User login with Auth0
 
-1. In Auth0, create an **API** whose identifier is your audience (e.g. `https://api.lightning.ir`), and enable **Organizations**. Create an Auth0 Organization per customer.
+1. In Auth0, create an **API** whose identifier is your audience (e.g. `https://api.nightfix.dev`), and enable **Organizations**. Create an Auth0 Organization per customer.
 2. Add a post-login **Action** that puts the user's email and groups into the access token:
    ```js
    exports.onExecutePostLogin = async (event, api) => {
-     api.accessToken.setCustomClaim("https://lightning.ir/email", event.user.email);
-     api.accessToken.setCustomClaim("https://lightning.ir/groups", event.user.app_metadata.groups || []);
+     api.accessToken.setCustomClaim("https://nightfix.dev/email", event.user.email);
+     api.accessToken.setCustomClaim("https://nightfix.dev/groups", event.user.app_metadata.groups || []);
    };
    ```
    (Source groups from wherever your IdP provides them; `app_metadata.groups` is just an example.)
-3. Run the control plane with `LIR_AUTH0_DOMAIN=<tenant>.us.auth0.com` and `LIR_AUTH0_AUDIENCE=https://api.lightning.ir`.
+3. Run the control plane with `NIGHTFIX_AUTH0_DOMAIN=<tenant>.us.auth0.com` and `NIGHTFIX_AUTH0_AUDIENCE=https://api.nightfix.dev`.
 4. With the owner API key: link the org (`PUT /v1/org/auth0 {"auth0_org_id":"org_…"}`), create teams mapped to groups (`POST /v1/teams {"slug":"payments","auth0_group":"payments-eng"}`), and grant roles:
    ```json
    POST /v1/role-bindings
@@ -105,7 +105,7 @@ internal/e2e           end-to-end tests of the whole loop
 ## Tests
 
 ```bash
-make test   # starts a throwaway Postgres on :54329 unless LIR_TEST_ADMIN_DSN is set
+make test   # starts a throwaway Postgres on :54329 unless NIGHTFIX_TEST_ADMIN_DSN is set
 ```
 
 The end-to-end tests cover: IAM enrollment (and its rejection of an unmatched role, a replayed nonce, an org/nonce that isn't inside the signature, a different STS action, and a forged signature), token enrollment as a fallback, scoped RBAC through Auth0 tokens (including republish takeover, privilege escalation, unlinked orgs, wrong audience, and group removal), auto-remediation with no page, a failed fix that pages and then auto-resolves upstream, an injection attempt in alert labels (refused by the parameter pattern; no ECS call is made), and forged or wrong-topic SNS messages (rejected before anything is stored). The database tests cover RLS isolation, cross-org write rejection, fail-closed queries without an org, composite foreign keys, and the audit chain.

@@ -1,4 +1,4 @@
-# Lightning IR — Agent Job Protocol (Draft v1alpha1)
+# Nightfix — Agent Job Protocol (Draft v1alpha1)
 
 Status: draft for discussion. Defines how a customer-deployed agent enrolls, connects to the control plane, receives work, executes runbook steps, and reports results. Companion to `runbook-schema.md`.
 
@@ -6,7 +6,7 @@ Status: draft for discussion. Defines how a customer-deployed agent enrolls, con
 
 ## 1. Design principles
 
-1. **Outbound only.** The agent opens a single TLS connection to `agent.lightning.ir:443`. Customers open no inbound ports, and the agent works through an HTTPS proxy.
+1. **Outbound only.** The agent opens a single TLS connection to `agent.nightfix.dev:443`. Customers open no inbound ports, and the agent works through an HTTPS proxy.
 2. **Mutual TLS identity.** Every agent has its own short-lived client certificate. The control plane always knows exactly which agent it's talking to, and the agent always verifies it's talking to us.
 3. **The control plane is not trusted blindly.** Signed runbooks aren't enough on their own: the agent also verifies a signed *dispatch envelope* that binds the run, step, parameters, target agent and expiry. A replayed, redirected or tampered job is rejected.
 4. **The agent is nearly stateless.** The control plane owns run state, pauses (`manual`, `approval`) and orchestration. The agent executes one step at a time and reports back. Restarting or replacing an agent is safe.
@@ -30,13 +30,13 @@ Status: draft for discussion. Defines how a customer-deployed agent enrolls, con
 
 Decision confirmed Oct 20, 2026. The agent proves its AWS identity instead of presenting a long-lived secret. This is the same pattern as Vault's AWS IAM auth method.
 
-1. An org Admin registers an **enrollment rule** in the UI, CLI or Terraform. The rule maps an AWS account and IAM role ARN to the agent's labels, e.g. `arn:aws:iam::123456789012:role/lightning-agent` → `env=prod, region=us-east-1`. The rule also sets a max agent count.
+1. An org Admin registers an **enrollment rule** in the UI, CLI or Terraform. The rule maps an AWS account and IAM role ARN to the agent's labels, e.g. `arn:aws:iam::123456789012:role/nightfix-agent` → `env=prod, region=us-east-1`. The rule also sets a max agent count.
 2. The customer deploys the agent with that IAM role (an ECS task role, IRSA on EKS, or an EC2 instance profile). There is no token to store.
 3. On start, the agent generates an **Ed25519 key pair locally**. The private key never leaves the agent.
-4. The agent builds an **SigV4-signed `sts:GetCallerIdentity` request** but does not send it to AWS. The signed headers include `X-Lightning-Org: <org_id>` and a server-issued nonce from a `GetEnrollChallenge` call, so the request can't be replayed against another org or reused later.
+4. The agent builds an **SigV4-signed `sts:GetCallerIdentity` request** but does not send it to AWS. The signed headers include `X-Nightfix-Org: <org_id>` and a server-issued nonce from a `GetEnrollChallenge` call, so the request can't be replayed against another org or reused later.
 5. The agent calls `Enroll` with the signed request and a CSR.
 6. The control plane forwards the signed request to STS. STS returns the caller's account and role ARN. The control plane checks them against the org's enrollment rules and issues:
-   - A **client certificate** with identity `spiffe://lightning.ir/org/<org_id>/agent/<agent_id>`, valid for 24h.
+   - A **client certificate** with identity `spiffe://nightfix.dev/org/<org_id>/agent/<agent_id>`, valid for 24h.
    - The org's **trust config**: signing public keys and the required signer list (see 3.3).
    - The agent's ID and the labels from the matched rule. Labels always come from the rule, never from the agent.
 7. Nothing needs persistent disk. A Fargate agent simply re-enrolls on restart with its role.
@@ -241,7 +241,7 @@ Continuing a running step during a disconnect is deliberate. Killing a failover 
 
 - **Cancel a run:** the control plane sends `Cancel { attempt_id, reason }`. The agent sends SIGTERM, waits 10s, then SIGKILL (or stops the ECS task or K8s Job), and reports `cancelled`. Remaining steps are never dispatched.
 - **Org kill switch:** the control plane sends `Freeze { scope: org }` to every agent in the org. Agents cancel in-flight attempts and reject all new dispatches until they receive an `Unfreeze` signed by the org key. Freezing also stops all dispatching at the control plane.
-- **Local kill switch:** the customer can set `LIGHTNING_AGENT_FREEZE=true` (or a config flag) on the agent. It then connects for visibility only and refuses all work, regardless of what the control plane says. This is the customer's override if they ever distrust us.
+- **Local kill switch:** the customer can set `NIGHTFIX_AGENT_FREEZE=true` (or a config flag) on the agent. It then connects for visibility only and refuses all work, regardless of what the control plane says. This is the customer's override if they ever distrust us.
 
 ---
 
@@ -250,21 +250,21 @@ Continuing a running step during a disconnect is deliberate. Killing a failover 
 Configured via environment variables or a YAML file:
 
 ```yaml
-endpoint: agent.lightning.ir:443
+endpoint: agent.nightfix.dev:443
 org_id: org_7Hq2...
 enrollment:
   method: iam        # iam (default) | token
-  # token_secret: secret://aws-sm/lightning/agent-token   # only for method: token
+  # token_secret: secret://aws-sm/nightfix/agent-token   # only for method: token
 signing:
   required_signers:  # pinned locally; overrides the control plane's list
-    - lightning-org-kms-1
+    - nightfix-org-kms-1
     # - acme-ci-signer-1   # add to require customer co-signing
 slots: 4
 proxy: http://proxy.internal:3128      # optional
 allowlist:
   mode: enforce      # off | warn | enforce
   source: file       # file | s3
-  path: /etc/lightning/allowlist.yaml
+  path: /etc/nightfix/allowlist.yaml
 freeze: false
 ```
 
@@ -284,7 +284,7 @@ runbooks:
 
 ```proto
 syntax = "proto3";
-package lightning.agent.v1;
+package nightfix.agent.v1;
 
 service AgentService {
   rpc GetEnrollChallenge(EnrollChallengeRequest) returns (EnrollChallenge); // nonce for IAM enrollment

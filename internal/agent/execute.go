@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/agentapi"
-	"github.com/peacedouts/lightning_ir/internal/expr"
-	"github.com/peacedouts/lightning_ir/internal/runbook"
+	"github.com/peacedouts/nightfix/internal/agentapi"
+	"github.com/peacedouts/nightfix/internal/expr"
+	"github.com/peacedouts/nightfix/internal/runbook"
 )
 
 // stepVars is the CEL context a step sees on the agent.
@@ -222,7 +222,7 @@ func (a *Agent) runWait(ctx context.Context, v *verified, out *streamer) (map[st
 
 func (a *Agent) runShell(ctx context.Context, v *verified, secrets map[string]any, out *streamer) (map[string]any, *int, error) {
 	vars := a.stepVars(v, secrets)
-	dir, err := os.MkdirTemp("", "lir-step-")
+	dir, err := os.MkdirTemp("", "nfx-step-")
 	if err != nil {
 		return nil, nil, err
 	}

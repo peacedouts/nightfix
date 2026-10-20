@@ -1,4 +1,4 @@
-module github.com/peacedouts/lightning_ir
+module github.com/peacedouts/nightfix
 
 go 1.24
 

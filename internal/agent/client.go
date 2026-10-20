@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/agentapi"
-	"github.com/peacedouts/lightning_ir/internal/signing"
+	"github.com/peacedouts/nightfix/internal/agentapi"
+	"github.com/peacedouts/nightfix/internal/signing"
 )
 
 // identity is what enrollment produced. The private key is generated here and
@@ -142,7 +142,7 @@ func newKeyAndCSR() (keyPEM, csrPEM string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "lightning-agent"}}, priv)
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "nightfix-agent"}}, priv)
 	if err != nil {
 		return "", "", err
 	}

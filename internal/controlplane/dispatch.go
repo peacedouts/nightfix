@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/agentapi"
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/ids"
-	"github.com/peacedouts/lightning_ir/internal/signing"
+	"github.com/peacedouts/nightfix/internal/agentapi"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/ids"
+	"github.com/peacedouts/nightfix/internal/signing"
 )
 
 // agentIdentity is an authenticated agent (from its mTLS certificate).
@@ -35,7 +35,7 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 			return nil, httpError{400, "iam enrollment needs a challenge nonce"}
 		}
 		// Consume the nonce first: a request gets one chance, success or not.
-		if err := s.DB.QueryRowContext(ctx, `SELECT org_id FROM lir_consume_enroll_challenge($1)`, hashSecret(req.Nonce)).
+		if err := s.DB.QueryRowContext(ctx, `SELECT org_id FROM nfx_consume_enroll_challenge($1)`, hashSecret(req.Nonce)).
 			Scan(&orgID); err != nil {
 			return nil, httpError{401, "unknown, used or expired enrollment challenge"}
 		}
@@ -67,7 +67,7 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 			return nil, httpError{403, fmt.Sprintf("no IAM enrollment rule matches role %s in account %s", id.RoleName, id.Account)}
 		}
 	case "token":
-		if err := s.DB.QueryRowContext(ctx, `SELECT org_id, rule_id FROM lir_route_enrollment_token($1)`, hashSecret(req.Token)).
+		if err := s.DB.QueryRowContext(ctx, `SELECT org_id, rule_id FROM nfx_route_enrollment_token($1)`, hashSecret(req.Token)).
 			Scan(&orgID, &ruleID); err != nil {
 			return nil, httpError{401, "invalid or expired enrollment token"}
 		}

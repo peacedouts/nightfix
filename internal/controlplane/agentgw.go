@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/peacedouts/lightning_ir/internal/agentapi"
+	"github.com/peacedouts/nightfix/internal/agentapi"
 )
 
 // AgentHandler serves the agent gateway. It must be served with the TLS
@@ -98,7 +98,7 @@ func (s *Server) authenticateAgent(r *http.Request) (agentIdentity, error) {
 	}
 	cert := r.TLS.VerifiedChains[0][0]
 	var a agentIdentity
-	if err := s.DB.QueryRowContext(r.Context(), `SELECT org_id, agent_id FROM lir_route_agent($1)`, SerialHex(cert.SerialNumber)).
+	if err := s.DB.QueryRowContext(r.Context(), `SELECT org_id, agent_id FROM nfx_route_agent($1)`, SerialHex(cert.SerialNumber)).
 		Scan(&a.OrgID, &a.AgentID); err != nil {
 		return a, errors.New("unknown or revoked agent certificate")
 	}

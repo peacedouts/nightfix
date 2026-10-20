@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/expr"
-	"github.com/peacedouts/lightning_ir/internal/ids"
-	"github.com/peacedouts/lightning_ir/internal/runbook"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/expr"
+	"github.com/peacedouts/nightfix/internal/ids"
+	"github.com/peacedouts/nightfix/internal/runbook"
 )
 
 type startRunOpts struct {
@@ -320,7 +320,7 @@ func (s *Server) onAttemptFinished(ctx context.Context, tx *db.Tx, attemptID str
 func (s *Server) ProcessExpiredLeases(ctx context.Context) (int, error) {
 	n := 0
 	for {
-		claimed, err := s.DB.Claim(ctx, "lir_claim_expired_lease", func(tx *db.Tx, id string) error {
+		claimed, err := s.DB.Claim(ctx, "nfx_claim_expired_lease", func(tx *db.Tx, id string) error {
 			var state string
 			if err := tx.QueryRow(`SELECT state FROM step_attempts WHERE id = $1`, id).Scan(&state); err != nil {
 				return err
@@ -351,7 +351,7 @@ func (s *Server) ProcessExpiredLeases(ctx context.Context) (int, error) {
 func (s *Server) ProcessOverdueRuns(ctx context.Context) (int, error) {
 	n := 0
 	for {
-		claimed, err := s.DB.Claim(ctx, "lir_claim_overdue_run", func(tx *db.Tx, id string) error {
+		claimed, err := s.DB.Claim(ctx, "nfx_claim_overdue_run", func(tx *db.Tx, id string) error {
 			run, err := s.loadRun(tx, id, false)
 			if err != nil {
 				return err

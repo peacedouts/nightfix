@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	APIVersion = "lightning.ir/v1alpha1"
+	APIVersion = "nightfix.dev/v1alpha1"
 	Kind       = "Runbook"
 )
 

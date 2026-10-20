@@ -8,9 +8,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/peacedouts/lightning_ir/internal/auth0"
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/ids"
+	"github.com/peacedouts/nightfix/internal/auth0"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/ids"
 )
 
 // Authorization model (data-model.md §5): org → teams → roles → scopes.
@@ -177,8 +177,8 @@ type Auth0Config struct {
 }
 
 func (c Auth0Config) orgClaim() string    { return or(c.OrgClaim, "org_id") }
-func (c Auth0Config) emailClaim() string  { return or(c.EmailClaim, "https://lightning.ir/email") }
-func (c Auth0Config) groupsClaim() string { return or(c.GroupsClaim, "https://lightning.ir/groups") }
+func (c Auth0Config) emailClaim() string  { return or(c.EmailClaim, "https://nightfix.dev/email") }
+func (c Auth0Config) groupsClaim() string { return or(c.GroupsClaim, "https://nightfix.dev/groups") }
 
 func or(s, def string) string {
 	if s == "" {
@@ -190,19 +190,19 @@ func or(s, def string) string {
 func (s *Server) authenticate(r *http.Request) (principal, error) {
 	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	switch {
-	case ok && strings.HasPrefix(tok, "lir_"):
+	case ok && strings.HasPrefix(tok, "nfx_"):
 		return s.authAPIKey(r.Context(), tok)
 	case ok && auth0.LooksLikeJWT(tok) && s.Cfg.Auth0.Verifier != nil:
 		return s.authUser(r.Context(), tok)
 	default:
-		return principal{}, fmt.Errorf("missing credentials (Authorization: Bearer <Auth0 access token or lir_ API key>)")
+		return principal{}, fmt.Errorf("missing credentials (Authorization: Bearer <Auth0 access token or nfx_ API key>)")
 	}
 }
 
 func (s *Server) authAPIKey(ctx context.Context, tok string) (principal, error) {
 	p := principal{Kind: "api_key"}
 	var role string
-	if err := s.DB.QueryRowContext(ctx, `SELECT org_id, key_id, role FROM lir_route_api_key($1)`, hashSecret(tok)).
+	if err := s.DB.QueryRowContext(ctx, `SELECT org_id, key_id, role FROM nfx_route_api_key($1)`, hashSecret(tok)).
 		Scan(&p.OrgID, &p.KeyID, &role); err != nil {
 		return p, fmt.Errorf("invalid API key")
 	}
@@ -229,8 +229,8 @@ func (s *Server) authUser(ctx context.Context, tok string) (principal, error) {
 		return principal{}, fmt.Errorf("token has no %s claim; log in through your organization", cfg.orgClaim())
 	}
 	p := principal{Kind: "user"}
-	if err := s.DB.QueryRowContext(ctx, `SELECT org_id FROM lir_route_auth0_org($1)`, authOrg).Scan(&p.OrgID); err != nil {
-		return p, fmt.Errorf("this Auth0 organization is not linked to a Lightning IR org")
+	if err := s.DB.QueryRowContext(ctx, `SELECT org_id FROM nfx_route_auth0_org($1)`, authOrg).Scan(&p.OrgID); err != nil {
+		return p, fmt.Errorf("this Auth0 organization is not linked to a Nightfix org")
 	}
 	email := claims.String(cfg.emailClaim())
 	if email == "" {
@@ -243,7 +243,7 @@ func (s *Server) authUser(ctx context.Context, tok string) (principal, error) {
 	groups := claims.Strings(cfg.groupsClaim())
 
 	err = s.DB.WithOrg(ctx, p.OrgID, func(tx *db.Tx) error {
-		if err := tx.QueryRow(`SELECT lir_upsert_user($1,$2,$3)`, claims.String("sub"), email, claims.String("name")).Scan(&p.UserID); err != nil {
+		if err := tx.QueryRow(`SELECT nfx_upsert_user($1,$2,$3)`, claims.String("sub"), email, claims.String("name")).Scan(&p.UserID); err != nil {
 			return err
 		}
 		var status string

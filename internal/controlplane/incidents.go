@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/expr"
-	"github.com/peacedouts/lightning_ir/internal/ids"
-	"github.com/peacedouts/lightning_ir/internal/runbook"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/expr"
+	"github.com/peacedouts/nightfix/internal/ids"
+	"github.com/peacedouts/nightfix/internal/runbook"
 )
 
 type incidentRow struct {
@@ -521,7 +521,7 @@ func (s *Server) enqueue(tx *db.Tx, inc incidentRow, kind string, types []string
 func (s *Server) ProcessDueIncidents(ctx context.Context) (int, error) {
 	n := 0
 	for {
-		claimed, err := s.DB.Claim(ctx, "lir_claim_due_incident", func(tx *db.Tx, id string) error {
+		claimed, err := s.DB.Claim(ctx, "nfx_claim_due_incident", func(tx *db.Tx, id string) error {
 			inc, err := s.loadIncident(tx, id, false)
 			if err != nil {
 				return err

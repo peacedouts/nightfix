@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/expr"
-	"github.com/peacedouts/lightning_ir/internal/ids"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/expr"
+	"github.com/peacedouts/nightfix/internal/ids"
 )
 
 // ProcessAlertEvents drains unprocessed alert events. Each event is claimed
@@ -20,7 +20,7 @@ import (
 func (s *Server) ProcessAlertEvents(ctx context.Context) (int, error) {
 	n := 0
 	for {
-		claimed, err := s.DB.Claim(ctx, "lir_claim_alert_event", func(tx *db.Tx, id string) error {
+		claimed, err := s.DB.Claim(ctx, "nfx_claim_alert_event", func(tx *db.Tx, id string) error {
 			perr := s.processEvent(ctx, tx, id)
 			msg := sql.NullString{}
 			if perr != nil && !errors.Is(perr, errIgnore) {

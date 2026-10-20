@@ -19,18 +19,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/agent"
-	"github.com/peacedouts/lightning_ir/internal/agent/awscall"
-	"github.com/peacedouts/lightning_ir/internal/auth0"
-	"github.com/peacedouts/lightning_ir/internal/auth0/auth0test"
-	"github.com/peacedouts/lightning_ir/internal/controlplane"
-	"github.com/peacedouts/lightning_ir/internal/devstub"
-	"github.com/peacedouts/lightning_ir/internal/ids"
-	"github.com/peacedouts/lightning_ir/internal/signing"
-	"github.com/peacedouts/lightning_ir/internal/testdb"
+	"github.com/peacedouts/nightfix/internal/agent"
+	"github.com/peacedouts/nightfix/internal/agent/awscall"
+	"github.com/peacedouts/nightfix/internal/auth0"
+	"github.com/peacedouts/nightfix/internal/auth0/auth0test"
+	"github.com/peacedouts/nightfix/internal/controlplane"
+	"github.com/peacedouts/nightfix/internal/devstub"
+	"github.com/peacedouts/nightfix/internal/ids"
+	"github.com/peacedouts/nightfix/internal/signing"
+	"github.com/peacedouts/nightfix/internal/testdb"
 )
 
-const topic = "arn:aws:sns:us-east-1:123456789012:lightning-alarms"
+const topic = "arn:aws:sns:us-east-1:123456789012:nightfix-alarms"
 
 type env struct {
 	t      *testing.T
@@ -48,7 +48,7 @@ type env struct {
 
 const (
 	awsAccount = "123456789012"
-	agentRole  = "lightning-agent"
+	agentRole  = "nightfix-agent"
 )
 
 func setup(t *testing.T, runbookYAML string) *env {
@@ -126,8 +126,8 @@ func setup(t *testing.T, runbookYAML string) *env {
 		Account: awsAccount, Role: agentRole})
 
 	// The agent uses the real SigV4 AWS client, pointed at the simulated ECS and STS.
-	t.Setenv("LIR_AWS_ENDPOINT_URL", stubSrv.URL+"/aws")
-	t.Setenv("LIR_STS_ENDPOINT_URL", stubSrv.URL+"/sts/")
+	t.Setenv("NIGHTFIX_AWS_ENDPOINT_URL", stubSrv.URL+"/aws")
+	t.Setenv("NIGHTFIX_STS_ENDPOINT_URL", stubSrv.URL+"/sts/")
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY")
 	t.Setenv("AWS_REGION", "us-east-1")

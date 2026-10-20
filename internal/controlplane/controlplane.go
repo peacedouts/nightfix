@@ -1,4 +1,4 @@
-// Package controlplane is the hosted side of Lightning IR: alert ingest, the
+// Package controlplane is the hosted side of Nightfix: alert ingest, the
 // incident engine, runbook runs, agent dispatch, notifications and the REST
 // API. It runs as one binary (a modular monolith) with each role on its own
 // listener.
@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/ids"
-	"github.com/peacedouts/lightning_ir/internal/signing"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/ids"
+	"github.com/peacedouts/nightfix/internal/signing"
 )
 
 // Config holds runtime settings.
@@ -93,17 +93,17 @@ type NewOrg struct {
 // service and an owner API key.
 func (s *Server) CreateOrg(ctx context.Context, name, slug string) (*NewOrg, error) {
 	orgID := ids.NewString()
-	if _, err := s.DB.ExecContext(ctx, "SELECT lir_create_org($1,$2,$3)", orgID, name, slug); err != nil {
+	if _, err := s.DB.ExecContext(ctx, "SELECT nfx_create_org($1,$2,$3)", orgID, name, slug); err != nil {
 		if db.IsUniqueViolation(err) {
 			return nil, fmt.Errorf("an org with slug %q already exists", slug)
 		}
 		return nil, err
 	}
-	key, err := signing.GenerateKey("lir-" + slug)
+	key, err := signing.GenerateKey("nfx-" + slug)
 	if err != nil {
 		return nil, err
 	}
-	apiKey, prefix, hash := newSecret("lir")
+	apiKey, prefix, hash := newSecret("nfx")
 	err = s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
 		sealed, err := s.Sealer.Seal(key.Private, orgID)
 		if err != nil {

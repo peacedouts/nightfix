@@ -3,9 +3,8 @@ import starlight from '@astrojs/starlight';
 import { brand } from './brand.mjs';
 
 export default defineConfig({
-  // Set SITE_URL in Cloudflare Pages once the domain is live; it's used for
-  // canonical URLs and the sitemap.
-  site: process.env.SITE_URL,
+  // Canonical URLs and the sitemap. Override with SITE_URL for preview builds.
+  site: process.env.SITE_URL ?? `https://${brand.domain}`,
   integrations: [
     starlight({
       title: brand.name,

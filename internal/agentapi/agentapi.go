@@ -8,7 +8,7 @@
 // protocol's; swapping the transport for gRPC later doesn't change them.
 package agentapi
 
-import "github.com/peacedouts/lightning_ir/internal/signing"
+import "github.com/peacedouts/nightfix/internal/signing"
 
 // ProtocolVersion is sent in Hello.
 const ProtocolVersion = 1
@@ -28,8 +28,8 @@ type EnrollRequest struct {
 // the org and a single-use nonce into the signature means the request can't
 // be replayed later or used to enroll into a different org.
 const (
-	HeaderOrg   = "X-Lightning-Org"
-	HeaderNonce = "X-Lightning-Nonce"
+	HeaderOrg   = "X-Nightfix-Org"
+	HeaderNonce = "X-Nightfix-Nonce"
 )
 
 // STSBody is the exact GetCallerIdentity request body the control plane accepts.

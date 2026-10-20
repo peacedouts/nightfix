@@ -1,23 +1,23 @@
--- Lightning IR — initial schema for the walking-skeleton slice.
+-- Nightfix — initial schema for the walking-skeleton slice.
 --
 -- Roles:
---   lir_owner  NOLOGIN, owns every table and the SECURITY DEFINER lookup/claim
+--   nfx_owner  NOLOGIN, owns every table and the SECURITY DEFINER lookup/claim
 --              functions. BYPASSRLS so those functions can find the org for an
 --              incoming request or a due background job.
---   lir_app    LOGIN, what the application connects as. Not an owner, so RLS
+--   nfx_app    LOGIN, what the application connects as. Not an owner, so RLS
 --              always applies. Append-only tables get INSERT/SELECT only.
 --
 -- Every tenant table carries org_id, has RLS forced on, and references other
 -- tenant rows through composite (org_id, id) foreign keys.
 
-SET ROLE lir_owner;
+SET ROLE nfx_owner;
 
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
 
 -- Current org for RLS. Errors (fails closed) if the app forgot to set it.
-CREATE FUNCTION lir_org() RETURNS uuid
+CREATE FUNCTION nfx_org() RETURNS uuid
 LANGUAGE sql STABLE AS $$ SELECT current_setting('app.org_id')::uuid $$;
 
 -- ---------------------------------------------------------------------------
@@ -440,7 +440,7 @@ CREATE TABLE audit_events (
 -- Partitions: daily partitions for the time-partitioned tables.
 -- ---------------------------------------------------------------------------
 
-CREATE FUNCTION lir_ensure_partitions(days_ahead int DEFAULT 3) RETURNS void
+CREATE FUNCTION nfx_ensure_partitions(days_ahead int DEFAULT 3) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   t text;
@@ -456,12 +456,12 @@ BEGIN
                        pname, t, d, d + 1);
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', pname);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', pname);
-        EXECUTE format('CREATE POLICY tenant_isolation ON %I USING (org_id = lir_org()) WITH CHECK (org_id = lir_org())', pname);
+        EXECUTE format('CREATE POLICY tenant_isolation ON %I USING (org_id = nfx_org()) WITH CHECK (org_id = nfx_org())', pname);
         IF t = 'alert_events' THEN
-          EXECUTE format('GRANT SELECT, INSERT ON %I TO lir_app', pname);
-          EXECUTE format('GRANT UPDATE (processed_at, error) ON %I TO lir_app', pname);
+          EXECUTE format('GRANT SELECT, INSERT ON %I TO nfx_app', pname);
+          EXECUTE format('GRANT UPDATE (processed_at, error) ON %I TO nfx_app', pname);
         ELSE
-          EXECUTE format('GRANT SELECT, INSERT ON %I TO lir_app', pname);
+          EXECUTE format('GRANT SELECT, INSERT ON %I TO nfx_app', pname);
         END IF;
       END IF;
     END LOOP;
@@ -469,7 +469,7 @@ BEGIN
 END $$;
 
 -- Drop partitions older than the retention period.
-CREATE FUNCTION lir_drop_expired_partitions(alert_event_days int DEFAULT 30, output_days int DEFAULT 90)
+CREATE FUNCTION nfx_drop_expired_partitions(alert_event_days int DEFAULT 30, output_days int DEFAULT 90)
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   r record;
@@ -492,7 +492,7 @@ BEGIN
   RETURN dropped;
 END $$;
 
-SELECT lir_ensure_partitions();
+SELECT nfx_ensure_partitions();
 
 -- ---------------------------------------------------------------------------
 -- Row-level security on every tenant table.
@@ -510,32 +510,32 @@ BEGIN
   ] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
-    EXECUTE format('CREATE POLICY tenant_isolation ON %I USING (org_id = lir_org()) WITH CHECK (org_id = lir_org())', t);
+    EXECUTE format('CREATE POLICY tenant_isolation ON %I USING (org_id = nfx_org()) WITH CHECK (org_id = nfx_org())', t);
   END LOOP;
 END $$;
 
 ALTER TABLE orgs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orgs FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON orgs USING (id = lir_org()) WITH CHECK (id = lir_org());
+CREATE POLICY tenant_isolation ON orgs USING (id = nfx_org()) WITH CHECK (id = nfx_org());
 
 -- ---------------------------------------------------------------------------
--- Grants. lir_app never owns anything.
+-- Grants. nfx_app never owns anything.
 -- ---------------------------------------------------------------------------
 
-GRANT SELECT, UPDATE ON orgs TO lir_app;
+GRANT SELECT, UPDATE ON orgs TO nfx_app;
 GRANT SELECT, INSERT, UPDATE ON
   org_counters, api_keys, enrollment_rules, agents, services, escalation_targets, integrations,
   routing_rules, alerts, incidents, incident_alerts, notifications, runbooks, runbook_triggers,
   runbook_runs, step_attempts, org_trust_config
-TO lir_app;
-GRANT DELETE ON runbook_triggers, routing_rules TO lir_app;
-GRANT SELECT, INSERT ON signing_keys TO lir_app;
+TO nfx_app;
+GRANT DELETE ON runbook_triggers, routing_rules TO nfx_app;
+GRANT SELECT, INSERT ON signing_keys TO nfx_app;
 -- Append-only.
-GRANT SELECT, INSERT ON runbook_versions, runbook_signatures, incident_timeline, step_output_chunks, audit_events TO lir_app;
-GRANT SELECT, INSERT ON alert_events TO lir_app;
-GRANT UPDATE (processed_at, error) ON alert_events TO lir_app;
-GRANT USAGE ON SEQUENCE incident_timeline_id_seq TO lir_app;
-GRANT EXECUTE ON FUNCTION lir_org() TO lir_app;
+GRANT SELECT, INSERT ON runbook_versions, runbook_signatures, incident_timeline, step_output_chunks, audit_events TO nfx_app;
+GRANT SELECT, INSERT ON alert_events TO nfx_app;
+GRANT UPDATE (processed_at, error) ON alert_events TO nfx_app;
+GRANT USAGE ON SEQUENCE incident_timeline_id_seq TO nfx_app;
+GRANT EXECUTE ON FUNCTION nfx_org() TO nfx_app;
 
 -- ---------------------------------------------------------------------------
 -- SECURITY DEFINER functions: the only way to cross the tenant boundary.
@@ -544,33 +544,33 @@ GRANT EXECUTE ON FUNCTION lir_org() TO lir_app;
 -- due background job. The caller then sets app.org_id and continues under RLS.
 -- ---------------------------------------------------------------------------
 
-CREATE FUNCTION lir_route_api_key(p_hash bytea)
+CREATE FUNCTION nfx_route_api_key(p_hash bytea)
 RETURNS TABLE (org_id uuid, key_id uuid, role text)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT k.org_id, k.id, k.role FROM api_keys k WHERE k.hash = p_hash AND k.revoked_at IS NULL
 $$;
 
-CREATE FUNCTION lir_route_integration(p_id uuid)
+CREATE FUNCTION nfx_route_integration(p_id uuid)
 RETURNS TABLE (org_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT i.org_id FROM integrations i WHERE i.id = p_id AND i.archived_at IS NULL
 $$;
 
-CREATE FUNCTION lir_route_enrollment_token(p_hash bytea)
+CREATE FUNCTION nfx_route_enrollment_token(p_hash bytea)
 RETURNS TABLE (org_id uuid, rule_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT r.org_id, r.id FROM enrollment_rules r
   WHERE r.token_hash = p_hash AND r.revoked_at IS NULL AND (r.expires_at IS NULL OR r.expires_at > now())
 $$;
 
-CREATE FUNCTION lir_route_agent(p_serial text)
+CREATE FUNCTION nfx_route_agent(p_serial text)
 RETURNS TABLE (org_id uuid, agent_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT a.org_id, a.id FROM agents a WHERE a.cert_serial = p_serial AND a.revoked_at IS NULL
 $$;
 
 -- Claim one unprocessed alert event (row lock held until the caller's tx ends).
-CREATE FUNCTION lir_claim_alert_event()
+CREATE FUNCTION nfx_claim_alert_event()
 RETURNS TABLE (org_id uuid, id uuid, received_at timestamptz)
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
   SELECT e.org_id, e.id, e.received_at FROM alert_events e
@@ -581,7 +581,7 @@ LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 $$;
 
 -- Claim one due notification.
-CREATE FUNCTION lir_claim_notification()
+CREATE FUNCTION nfx_claim_notification()
 RETURNS TABLE (org_id uuid, id uuid)
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
   SELECT n.org_id, n.id FROM notifications n
@@ -592,7 +592,7 @@ LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 $$;
 
 -- Claim one remediating incident whose hold or verification deadline passed.
-CREATE FUNCTION lir_claim_due_incident()
+CREATE FUNCTION nfx_claim_due_incident()
 RETURNS TABLE (org_id uuid, id uuid)
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
   SELECT i.org_id, i.id FROM incidents i
@@ -603,7 +603,7 @@ LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 $$;
 
 -- Claim one step attempt whose lease expired.
-CREATE FUNCTION lir_claim_expired_lease()
+CREATE FUNCTION nfx_claim_expired_lease()
 RETURNS TABLE (org_id uuid, id uuid)
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
   SELECT a.org_id, a.id FROM step_attempts a
@@ -613,7 +613,7 @@ LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 $$;
 
 -- Claim one run past its overall deadline.
-CREATE FUNCTION lir_claim_overdue_run()
+CREATE FUNCTION nfx_claim_overdue_run()
 RETURNS TABLE (org_id uuid, id uuid)
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
   SELECT r.org_id, r.id FROM runbook_runs r
@@ -623,7 +623,7 @@ LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 $$;
 
 -- Mark agents offline that have gone quiet.
-CREATE FUNCTION lir_mark_stale_agents(p_after interval DEFAULT '45 seconds')
+CREATE FUNCTION nfx_mark_stale_agents(p_after interval DEFAULT '45 seconds')
 RETURNS int LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
   WITH u AS (
     UPDATE agents SET status = 'offline'
@@ -634,12 +634,12 @@ $$;
 
 -- Append a hash-chained audit event for the current org. The counter row lock
 -- serializes appends per org so the chain has no forks.
-CREATE FUNCTION lir_audit(p_actor_type text, p_actor_id text, p_action text,
+CREATE FUNCTION nfx_audit(p_actor_type text, p_actor_id text, p_action text,
                           p_resource_type text, p_resource_id text, p_data jsonb)
 RETURNS bigint
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
-  v_org uuid := lir_org();
+  v_org uuid := nfx_org();
   v_seq bigint;
   v_prev bytea;
   v_hash bytea;
@@ -660,14 +660,14 @@ BEGIN
 END $$;
 
 -- Re-verify an org's audit chain. Returns the first broken seq, or NULL if intact.
-CREATE FUNCTION lir_verify_audit_chain()
+CREATE FUNCTION nfx_verify_audit_chain()
 RETURNS bigint LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   r record;
   v_prev bytea := NULL;
   v_expect bigint := 1;
 BEGIN
-  FOR r IN SELECT * FROM audit_events WHERE org_id = lir_org() ORDER BY seq LOOP
+  FOR r IN SELECT * FROM audit_events WHERE org_id = nfx_org() ORDER BY seq LOOP
     IF r.seq <> v_expect OR r.prev_hash IS DISTINCT FROM v_prev OR r.hash <> sha256(
          coalesce(v_prev, ''::bytea) ||
          convert_to(concat_ws('|', r.org_id::text, r.seq::text, r.at::text, r.actor_type, r.actor_id,
@@ -681,17 +681,17 @@ BEGIN
 END $$;
 
 -- Create an org. Called by the bootstrap CLI before any org exists.
-CREATE FUNCTION lir_create_org(p_id uuid, p_name text, p_slug text)
+CREATE FUNCTION nfx_create_org(p_id uuid, p_name text, p_slug text)
 RETURNS void LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
   INSERT INTO orgs (id, name, slug) VALUES (p_id, p_name, p_slug)
 $$;
 
 GRANT EXECUTE ON FUNCTION
-  lir_route_api_key(bytea), lir_route_integration(uuid), lir_route_enrollment_token(bytea),
-  lir_route_agent(text), lir_claim_alert_event(), lir_claim_notification(), lir_claim_due_incident(),
-  lir_claim_expired_lease(), lir_claim_overdue_run(), lir_mark_stale_agents(interval),
-  lir_audit(text, text, text, text, text, jsonb), lir_verify_audit_chain(), lir_create_org(uuid, text, text),
-  lir_ensure_partitions(int), lir_drop_expired_partitions(int, int)
-TO lir_app;
+  nfx_route_api_key(bytea), nfx_route_integration(uuid), nfx_route_enrollment_token(bytea),
+  nfx_route_agent(text), nfx_claim_alert_event(), nfx_claim_notification(), nfx_claim_due_incident(),
+  nfx_claim_expired_lease(), nfx_claim_overdue_run(), nfx_mark_stale_agents(interval),
+  nfx_audit(text, text, text, text, text, jsonb), nfx_verify_audit_chain(), nfx_create_org(uuid, text, text),
+  nfx_ensure_partitions(int), nfx_drop_expired_partitions(int, int)
+TO nfx_app;
 
 RESET ROLE;

@@ -10,7 +10,7 @@ A runbook is a YAML file with typed parameters, a target, triggers, and steps th
 This runbook restarts an unhealthy ECS service before anyone is paged:
 
 ```yaml
-apiVersion: nightfix/v1alpha1
+apiVersion: nightfix.dev/v1alpha1
 kind: Runbook
 metadata:
   name: ecs-service-restart

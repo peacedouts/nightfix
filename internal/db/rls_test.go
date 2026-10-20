@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/ids"
-	"github.com/peacedouts/lightning_ir/internal/testdb"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/ids"
+	"github.com/peacedouts/nightfix/internal/testdb"
 )
 
 func addService(t *testing.T, pool *db.DB, org, name string) string {
@@ -123,7 +123,7 @@ func TestAuditIsAppendOnlyAndChained(t *testing.T) {
 	// The chain verifies.
 	var broken sql.NullInt64
 	pool.WithOrg(ctx, a, func(tx *db.Tx) error {
-		return tx.QueryRow(`SELECT lir_verify_audit_chain()`).Scan(&broken)
+		return tx.QueryRow(`SELECT nfx_verify_audit_chain()`).Scan(&broken)
 	})
 	if broken.Valid {
 		t.Fatalf("audit chain broken at seq %d", broken.Int64)
@@ -158,7 +158,7 @@ func TestClaimScopesToClaimedOrg(t *testing.T) {
 		return err
 	})
 
-	claimed, err := pool.Claim(ctx, "lir_claim_alert_event", func(tx *db.Tx, id string) error {
+	claimed, err := pool.Claim(ctx, "nfx_claim_alert_event", func(tx *db.Tx, id string) error {
 		if tx.OrgID != a {
 			t.Fatalf("claimed under org %s, want %s", tx.OrgID, a)
 		}
@@ -168,7 +168,7 @@ func TestClaimScopesToClaimedOrg(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("claim: %v %v", claimed, err)
 	}
-	again, _ := pool.Claim(ctx, "lir_claim_alert_event", func(*db.Tx, string) error { return nil })
+	again, _ := pool.Claim(ctx, "nfx_claim_alert_event", func(*db.Tx, string) error { return nil })
 	if again {
 		t.Fatal("processed event was claimed twice")
 	}

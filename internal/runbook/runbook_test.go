@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/peacedouts/lightning_ir/internal/expr"
+	"github.com/peacedouts/nightfix/internal/expr"
 )
 
 func load(t *testing.T) []byte {

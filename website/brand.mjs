@@ -5,7 +5,9 @@
 export const brand = {
   name: 'Nightfix',
   tagline: 'Runbooks that fix the alert before anyone is paged.',
-  contactEmail: process.env.PUBLIC_CONTACT_EMAIL ?? 'founders@example.com',
+  domain: 'nightfix.dev',
+  contactEmail: process.env.PUBLIC_CONTACT_EMAIL ?? 'hello@nightfix.dev',
+  securityEmail: process.env.PUBLIC_SECURITY_EMAIL ?? 'security@nightfix.dev',
   // A form backend that accepts a normal HTML POST (Formspree, Tally, Basin…).
   // Leave unset to show the email address instead of the form.
   formEndpoint: process.env.PUBLIC_FORM_ENDPOINT ?? '',

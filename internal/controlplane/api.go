@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/expr"
-	"github.com/peacedouts/lightning_ir/internal/ids"
-	"github.com/peacedouts/lightning_ir/internal/runbook"
-	"github.com/peacedouts/lightning_ir/internal/signing"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/expr"
+	"github.com/peacedouts/nightfix/internal/ids"
+	"github.com/peacedouts/nightfix/internal/runbook"
+	"github.com/peacedouts/nightfix/internal/signing"
 )
 
 // APIHandler serves the REST API under /v1.
@@ -406,7 +406,7 @@ func (s *Server) apiCreateEnrollmentRule(r *http.Request, p principal) (any, err
 			if err != nil {
 				return err
 			}
-			token, _, hash := newSecret("lirenroll")
+			token, _, hash := newSecret("nfxenroll")
 			if _, err := tx.Exec(`INSERT INTO enrollment_rules (id, org_id, method, token_hash, labels, max_agents, expires_at)
 				VALUES ($1,$2,'token',$3,$4,$5, now() + $6::interval)`,
 				id, p.OrgID, hash, db.JSON[map[string]string]{V: req.Labels}, req.MaxAgents, pgInterval(exp)); err != nil {
@@ -966,7 +966,7 @@ func (s *Server) apiAudit(r *http.Request, p principal) (any, error) {
 	out := []map[string]any{}
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
 		var broken sql.NullInt64
-		if err := tx.QueryRow(`SELECT lir_verify_audit_chain()`).Scan(&broken); err != nil {
+		if err := tx.QueryRow(`SELECT nfx_verify_audit_chain()`).Scan(&broken); err != nil {
 			return err
 		}
 		if broken.Valid {

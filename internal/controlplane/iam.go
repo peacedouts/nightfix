@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/agentapi"
-	"github.com/peacedouts/lightning_ir/internal/ids"
+	"github.com/peacedouts/nightfix/internal/agentapi"
+	"github.com/peacedouts/nightfix/internal/ids"
 )
 
 // IAM enrollment (agent-protocol.md §3.1, decision #21). The agent proves its
@@ -37,7 +37,7 @@ func (s *Server) Challenge(ctx context.Context, req agentapi.ChallengeRequest) (
 	rand.Read(b)
 	nonce := base64.RawURLEncoding.EncodeToString(b)
 	var ok bool
-	if err := s.DB.QueryRowContext(ctx, `SELECT lir_create_enroll_challenge($1, $2, $3::interval)`,
+	if err := s.DB.QueryRowContext(ctx, `SELECT nfx_create_enroll_challenge($1, $2, $3::interval)`,
 		orgID, hashSecret(nonce), pgInterval(challengeTTL)).Scan(&ok); err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (s *Server) verifyIAM(ctx context.Context, orgAPIID, nonce string, r *agent
 			signed = ";" + v + ";"
 		}
 	}
-	for _, need := range []string{"host", "x-lightning-org", "x-lightning-nonce"} {
+	for _, need := range []string{"host", "x-nightfix-org", "x-nightfix-nonce"} {
 		if !strings.Contains(signed, ";"+need+";") {
 			return nil, fmt.Errorf("header %s must be covered by the signature", need)
 		}
@@ -151,7 +151,7 @@ func (s *Server) verifyIAM(ctx context.Context, orgAPIID, nonce string, r *agent
 		return nil, errors.New("unexpected STS response")
 	}
 	id := &callerIdentity{Arn: out.Result.Arn, Account: out.Result.Account, UserID: out.Result.UserID}
-	// arn:aws:sts::123456789012:assumed-role/lightning-agent/<session>
+	// arn:aws:sts::123456789012:assumed-role/nightfix-agent/<session>
 	parts := strings.SplitN(out.Result.Arn, ":", 6)
 	if len(parts) != 6 || parts[2] != "sts" || !strings.HasPrefix(parts[5], "assumed-role/") {
 		return nil, fmt.Errorf("agents must enroll with an IAM role (got %s)", out.Result.Arn)

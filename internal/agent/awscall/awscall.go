@@ -61,13 +61,13 @@ func New(ctx context.Context) (*Client, error) {
 	return &Client{cfg: cfg, http: &http.Client{Timeout: 60 * time.Second}, signer: v4.NewSigner()}, nil
 }
 
-// endpoint returns the service URL. LIR_AWS_ENDPOINT_URL (or a per-service
-// LIR_AWS_ENDPOINT_URL_ECS etc.) overrides it, for local testing.
+// endpoint returns the service URL. NIGHTFIX_AWS_ENDPOINT_URL (or a per-service
+// NIGHTFIX_AWS_ENDPOINT_URL_ECS etc.) overrides it, for local testing.
 func (c *Client) endpoint(service string) string {
-	if u := os.Getenv("LIR_AWS_ENDPOINT_URL_" + strings.ToUpper(service)); u != "" {
+	if u := os.Getenv("NIGHTFIX_AWS_ENDPOINT_URL_" + strings.ToUpper(service)); u != "" {
 		return u
 	}
-	if u := os.Getenv("LIR_AWS_ENDPOINT_URL"); u != "" {
+	if u := os.Getenv("NIGHTFIX_AWS_ENDPOINT_URL"); u != "" {
 		return u
 	}
 	return fmt.Sprintf("https://%s.%s.amazonaws.com/", service, c.cfg.Region)
@@ -149,10 +149,10 @@ func (c *Client) Call(ctx context.Context, service, action string, input map[str
 func (c *Client) Region() string { return c.cfg.Region }
 
 // STSEndpoint is where the control plane will send the signed
-// GetCallerIdentity request. LIR_STS_ENDPOINT_URL overrides it for local
+// GetCallerIdentity request. NIGHTFIX_STS_ENDPOINT_URL overrides it for local
 // testing; the control plane must be configured with the same value.
 func (c *Client) STSEndpoint() string {
-	if u := os.Getenv("LIR_STS_ENDPOINT_URL"); u != "" {
+	if u := os.Getenv("NIGHTFIX_STS_ENDPOINT_URL"); u != "" {
 		return u
 	}
 	return fmt.Sprintf("https://sts.%s.amazonaws.com/", c.cfg.Region)

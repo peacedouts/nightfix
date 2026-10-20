@@ -17,9 +17,9 @@ import (
 
 	"github.com/goccy/go-yaml"
 
-	"github.com/peacedouts/lightning_ir/internal/agentapi"
-	"github.com/peacedouts/lightning_ir/internal/runbook"
-	"github.com/peacedouts/lightning_ir/internal/signing"
+	"github.com/peacedouts/nightfix/internal/agentapi"
+	"github.com/peacedouts/nightfix/internal/runbook"
+	"github.com/peacedouts/nightfix/internal/signing"
 )
 
 // Version is reported to the control plane.
@@ -32,7 +32,7 @@ type AWSCaller interface {
 
 // Config configures an agent.
 type Config struct {
-	Endpoint string // https://agent.lightning.ir:443
+	Endpoint string // https://agent.nightfix.dev:443
 	CAPEM    []byte // CA to trust for the gateway (and enrollment)
 
 	// Enrollment: "iam" (default) proves the agent's AWS role; "token" uses

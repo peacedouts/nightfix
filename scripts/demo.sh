@@ -28,27 +28,27 @@ GOFLAGS="${GOFLAGS:-}" go build -o bin/ ./cmd/...
 
 say "Starting Postgres and migrating a fresh database"
 ADMIN="$(scripts/dev-postgres.sh start)"
-psql "$ADMIN" -qc "DROP DATABASE IF EXISTS lightning_demo WITH (FORCE)" -c "CREATE DATABASE lightning_demo" >/dev/null
-DEMO_ADMIN="${ADMIN/\/postgres\?/\/lightning_demo?}"
-LIR_ADMIN_DATABASE_URL="$DEMO_ADMIN" LIR_APP_DB_PASSWORD=demo bin/lightning migrate
-export LIR_DATABASE_URL="${DEMO_ADMIN/postgres@/lir_app:demo@}"
-export LIR_STATE_DIR="$WORK/state"
-export LIR_API_ADDR=127.0.0.1:18080 LIR_INGEST_ADDR=127.0.0.1:18081 LIR_AGENT_ADDR=127.0.0.1:18443
-export LIR_PUBLIC_INGEST_URL=http://127.0.0.1:18081
-export LIR_SNS_DEV_CERT_PREFIX="$STUB/sns/"   # trust devstub's SNS signing cert (local only)
-export LIR_STS_DEV_ENDPOINT="$STUB/sts/"       # devstub plays STS for IAM enrollment (local only)
+psql "$ADMIN" -qc "DROP DATABASE IF EXISTS nightfix_demo WITH (FORCE)" -c "CREATE DATABASE nightfix_demo" >/dev/null
+DEMO_ADMIN="${ADMIN/\/postgres\?/\/nightfix_demo?}"
+NIGHTFIX_ADMIN_DATABASE_URL="$DEMO_ADMIN" NIGHTFIX_APP_DB_PASSWORD=demo bin/nightfix migrate
+export NIGHTFIX_DATABASE_URL="${DEMO_ADMIN/postgres@/nfx_app:demo@}"
+export NIGHTFIX_STATE_DIR="$WORK/state"
+export NIGHTFIX_API_ADDR=127.0.0.1:18080 NIGHTFIX_INGEST_ADDR=127.0.0.1:18081 NIGHTFIX_AGENT_ADDR=127.0.0.1:18443
+export NIGHTFIX_PUBLIC_INGEST_URL=http://127.0.0.1:18081
+export NIGHTFIX_SNS_DEV_CERT_PREFIX="$STUB/sns/"   # trust devstub's SNS signing cert (local only)
+export NIGHTFIX_STS_DEV_ENDPOINT="$STUB/sts/"       # devstub plays STS for IAM enrollment (local only)
 
 say "Starting devstub (simulated ECS, SNS, Slack, PagerDuty)"
 bin/devstub --heal-after 4s > "$WORK/devstub.log" 2>&1 & PIDS+=($!)
 
 say "Creating org"
-ORG_OUT="$(bin/lightning org create --name "Acme" --slug acme)"
+ORG_OUT="$(bin/nightfix org create --name "Acme" --slug acme)"
 echo "$ORG_OUT"
 KEY="$(echo "$ORG_OUT" | awk '/api key/ {print $3}')"
 ORG="$(echo "$ORG_OUT" | awk '/^org:/ {print $2}')"
 
 say "Starting the control plane"
-bin/lightning serve > "$WORK/controlplane.log" 2>&1 & PIDS+=($!)
+bin/nightfix serve > "$WORK/controlplane.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 50); do curl -fsS "$API/healthz" >/dev/null 2>&1 && break; sleep 0.2; done
 
 say "Configuring: service, Slack + PagerDuty targets, CloudWatch integration"
@@ -56,7 +56,7 @@ api -X POST "$API/v1/services" -d '{"name":"checkout-api","max_hold":"2m","verif
 api -X POST "$API/v1/services/checkout-api/escalation-targets" -d "{\"type\":\"slack\",\"url\":\"$STUB/slack\"}" >/dev/null
 api -X POST "$API/v1/services/checkout-api/escalation-targets" \
   -d "{\"type\":\"pagerduty\",\"routing_key\":\"demo-routing-key\",\"events_url\":\"$STUB/pagerduty\"}" >/dev/null
-TOPIC=arn:aws:sns:us-east-1:123456789012:lightning-alarms
+TOPIC=arn:aws:sns:us-east-1:123456789012:nightfix-alarms
 INGEST="$(api -X POST "$API/v1/integrations" \
   -d "{\"type\":\"cloudwatch\",\"name\":\"prod alarms\",\"default_service\":\"checkout-api\",\"topic_arn\":\"$TOPIC\"}" | json 'd["ingest_url"]')"
 echo "ingest URL: $INGEST"
@@ -70,11 +70,11 @@ api -X PUT "$API/v1/runbooks/ecs-service-restart" --data-binary @"$RB" | json '"
 
 say "Enrolling an agent by its IAM role (signed STS GetCallerIdentity → 24h mTLS cert; labels come from the rule)"
 api -X POST "$API/v1/enrollment-rules" \
-  -d '{"method":"iam","role_arn":"arn:aws:iam::123456789012:role/lightning-agent","labels":{"env":"prod"},"max_agents":1}' \
+  -d '{"method":"iam","role_arn":"arn:aws:iam::123456789012:role/nightfix-agent","labels":{"env":"prod"},"max_agents":1}' \
   | json '"rule: role %s in account %s → labels env=prod" % (d["role_name"], d["aws_account_id"])'
-LIR_AWS_ENDPOINT_URL="$STUB/aws" LIR_STS_ENDPOINT_URL="$STUB/sts/" \
+NIGHTFIX_AWS_ENDPOINT_URL="$STUB/aws" NIGHTFIX_STS_ENDPOINT_URL="$STUB/sts/" \
 AWS_ACCESS_KEY_ID=AKIDEXAMPLE AWS_SECRET_ACCESS_KEY=example-secret AWS_REGION=us-east-1 AWS_EC2_METADATA_DISABLED=true \
-  bin/lightning-agent --endpoint https://127.0.0.1:18443 --ca-file "$LIR_STATE_DIR/ca.crt" \
+  bin/nightfix-agent --endpoint https://127.0.0.1:18443 --ca-file "$NIGHTFIX_STATE_DIR/ca.crt" \
     --org "$ORG" --state-dir "$WORK/agent" > "$WORK/agent.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 50); do
   [ "$(api "$API/v1/agents" | json 'd[0]["status"] if d else ""' 2>/dev/null)" = online ] && break; sleep 0.3

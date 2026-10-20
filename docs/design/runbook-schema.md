@@ -1,4 +1,4 @@
-# Lightning IR — Runbook Schema (Draft v1alpha1)
+# Nightfix — Runbook Schema (Draft v1alpha1)
 
 Status: draft for discussion. Defines the format customers write runbooks in, what the control plane validates and signs, and what the agent executes.
 
@@ -19,7 +19,7 @@ Status: draft for discussion. Defines the format customers write runbooks in, wh
 ## 2. Top-level structure
 
 ```yaml
-apiVersion: lightning.ir/v1alpha1
+apiVersion: nightfix.dev/v1alpha1
 kind: Runbook
 metadata: {...}     # identity, ownership, discovery
 spec:
@@ -206,7 +206,7 @@ Context available to expressions:
 ## 5. Example: auto-remediate an unhealthy ECS service before paging
 
 ```yaml
-apiVersion: lightning.ir/v1alpha1
+apiVersion: nightfix.dev/v1alpha1
 kind: Runbook
 metadata:
   name: ecs-service-restart
@@ -294,7 +294,7 @@ spec:
 ## 6. Example: Aurora failover with checklist, approval and secrets
 
 ```yaml
-apiVersion: lightning.ir/v1alpha1
+apiVersion: nightfix.dev/v1alpha1
 kind: Runbook
 metadata:
   name: aurora-failover
@@ -402,7 +402,7 @@ spec:
 
 ## 8. Authoring, runtime and retention (decided Oct 20, 2026)
 
-**Authoring.** The publish API is the single write path. The Terraform provider (`lightning_runbook` resource), Git sync and the UI all call it, so every route gets the same validation, linting and signing. The v1 UI includes a YAML editor with schema-aware autocomplete and live lint results from the publish linter, plus a "dry run" that resolves parameters against a sample alert without executing anything. There is no visual editor.
+**Authoring.** The publish API is the single write path. The Terraform provider (`nightfix_runbook` resource), Git sync and the UI all call it, so every route gets the same validation, linting and signing. The v1 UI includes a YAML editor with schema-aware autocomplete and live lint results from the publish linter, plus a "dry run" that resolves parameters against a sample alert without executing anything. There is no visual editor.
 
 **Script runtime.** `shell` and `python` steps run with the tools in the agent image:
 - **Default image:** `aws` CLI v2, `psql`, `mysql`, `redis-cli`, `jq`, `curl`, Python 3 with `boto3`.
@@ -423,5 +423,5 @@ Secrets never appear in either. Output is capped at 1 MiB per step attempt.
 
 ## 9. Open questions
 
-1. **Reusable steps.** Shared step libraries such as `uses: lightning/ecs-restart@v1`. Deferred; needs its own signing and versioning story.
+1. **Reusable steps.** Shared step libraries such as `uses: nightfix/ecs-restart@v1`. Deferred; needs its own signing and versioning story.
 2. **Large output.** Spill output beyond 1 MiB to S3? Deferred until a customer needs it.

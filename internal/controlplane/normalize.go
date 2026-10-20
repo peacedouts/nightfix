@@ -212,7 +212,7 @@ func normalizeWebhook(integrationID string, body []byte, dedupeKeys []string) (A
 }
 
 // WebhookSignatureHeader carries "t=<unix>,v1=<hex hmac>".
-const WebhookSignatureHeader = "X-Lightning-Signature"
+const WebhookSignatureHeader = "X-Nightfix-Signature"
 
 // SignWebhook produces the header value for body (used by tests and senders).
 func SignWebhook(secret string, body []byte, t time.Time) string {

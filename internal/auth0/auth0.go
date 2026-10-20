@@ -23,7 +23,7 @@ import (
 // Verifier checks tokens for one Auth0 API (audience) on one tenant (issuer).
 type Verifier struct {
 	Issuer   string // https://<tenant>.us.auth0.com/
-	Audience string // the API identifier, e.g. https://api.lightning.ir
+	Audience string // the API identifier, e.g. https://api.nightfix.dev
 	JWKSURL  string // defaults to <issuer>.well-known/jwks.json
 	Client   *http.Client
 	Leeway   time.Duration

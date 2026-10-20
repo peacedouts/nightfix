@@ -9,7 +9,7 @@ import (
 
 	"github.com/goccy/go-yaml"
 
-	"github.com/peacedouts/lightning_ir/internal/canonical"
+	"github.com/peacedouts/nightfix/internal/canonical"
 )
 
 // Parse decodes a YAML runbook. Unknown fields are rejected so typos don't

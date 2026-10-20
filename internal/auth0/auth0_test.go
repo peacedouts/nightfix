@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/auth0"
-	"github.com/peacedouts/lightning_ir/internal/auth0/auth0test"
+	"github.com/peacedouts/nightfix/internal/auth0"
+	"github.com/peacedouts/nightfix/internal/auth0/auth0test"
 )
 
 func TestVerify(t *testing.T) {
 	is := auth0test.New(t)
 	v := &auth0.Verifier{Issuer: is.Issuer, Audience: is.Audience, JWKSURL: is.Srv.URL}
 	base := func() map[string]any {
-		return map[string]any{"iss": "https://tenant.example/", "aud": []string{"https://api.lightning.ir", "other"},
+		return map[string]any{"iss": "https://tenant.example/", "aud": []string{"https://api.nightfix.dev", "other"},
 			"sub": "auth0|u1", "exp": time.Now().Add(time.Hour).Unix(), "org_id": "org_abc"}
 	}
 	ctx := context.Background()

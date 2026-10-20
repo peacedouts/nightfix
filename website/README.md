@@ -20,8 +20,9 @@ Everything brand-related lives in `brand.mjs`, so a rename is a one-line change.
 
 | Variable | What it does |
 |---|---|
-| `SITE_URL` | Your domain, e.g. `https://nightfix.dev`. Used for canonical URLs and the sitemap |
-| `PUBLIC_CONTACT_EMAIL` | Shown when no form backend is set, and in the footer |
+| `SITE_URL` | Defaults to `https://nightfix.dev`. Override only for preview builds |
+| `PUBLIC_CONTACT_EMAIL` | Defaults to `hello@nightfix.dev`. Shown when no form backend is set, and in the footer |
+| `PUBLIC_SECURITY_EMAIL` | Defaults to `security@nightfix.dev` |
 | `PUBLIC_FORM_ENDPOINT` | A form backend that accepts a normal HTML POST (Formspree, Tally, Basin). When set, the design-partner form appears |
 | `PUBLIC_GITHUB_URL` | Adds a GitHub link to the docs header |
 
@@ -34,9 +35,21 @@ Everything brand-related lives in `brand.mjs`, so a rename is a one-line change.
    - Build command: `npm run build`
    - Output directory: `dist`
 3. Under **Settings → Variables and Secrets**, add the variables above for Production.
-4. Under **Custom domains**, add your domain. With DNS already on Cloudflare, the record and certificate are created for you.
+4. Under **Custom domains**, add `nightfix.dev`. With DNS already on Cloudflare, the record and certificate are created for you.
 
 Every pull request gets its own preview URL.
+
+## Redirect nightfix.io and www
+
+In the Cloudflare dashboard, open **Rules → Redirect Rules** (for the `nightfix.io` zone; it needs a proxied DNS record such as `A @ 192.0.2.1`, proxied, so requests reach Cloudflare):
+
+- When the hostname is `nightfix.io` or `www.nightfix.io`, redirect with a **301** to `https://nightfix.dev` + the original path, preserving the query string.
+
+Do the same on the `nightfix.dev` zone for `www.nightfix.dev` → `https://nightfix.dev`, with a proxied `www` record (e.g. `AAAA www 100::`).
+
+## Email on the domain
+
+Until you set up a mailbox provider, **Cloudflare Email Routing** (free) can forward `hello@`, `security@` and `support@nightfix.dev` to your personal inbox. Turn it on under the `nightfix.dev` zone → **Email → Email Routing**, and Cloudflare adds the MX and SPF records. To *send* from the domain later, use Google Workspace or Fastmail and add their DKIM and DMARC records.
 
 ## Design notes
 
