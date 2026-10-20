@@ -73,7 +73,11 @@ func TestRLSRejectsWritesIntoAnotherOrg(t *testing.T) {
 
 func TestQueriesFailClosedWithoutOrg(t *testing.T) {
 	pool := testdb.New(t)
-	testdb.CreateOrg(t, pool, "acme")
+	org := testdb.CreateOrg(t, pool, "acme")
+	// With a row present the policy must be evaluated, and without app.org_id
+	// it errors. (On an empty table Postgres may never evaluate the policy and
+	// simply return zero rows, which leaks nothing but proves nothing.)
+	addService(t, pool, org, "checkout-api")
 	var n int
 	err := pool.QueryRow(`SELECT count(*) FROM services`).Scan(&n)
 	if err == nil {

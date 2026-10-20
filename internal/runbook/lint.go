@@ -271,6 +271,9 @@ func lintStep(path string, s Step, rb *Runbook, add func(string, string, ...any)
 		}
 	case "aws":
 		lintAWSCall(path, s.Service, s.Action, s.Input, add)
+		if s.AssumeRole != "" {
+			add(path+".assumeRole", "assumeRole is not supported in this build yet")
+		}
 	case "wait":
 		if s.Check == nil || (s.Check.AWS == nil && s.Check.HTTP == nil) {
 			add(path+".check", "wait steps need an aws or http check")

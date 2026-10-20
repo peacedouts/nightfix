@@ -124,6 +124,38 @@ func (s *Stub) Handler() http.Handler {
 	mux.HandleFunc("POST /ecs/heals", func(w http.ResponseWriter, r *http.Request) {
 		s.SetHeals(r.URL.Query().Get("value") != "false")
 	})
+	mux.HandleFunc("POST /ecs/services", func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Cluster, Service string }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Cluster == "" || req.Service == "" {
+			http.Error(w, "cluster and service are required", http.StatusBadRequest)
+			return
+		}
+		s.AddService(req.Cluster, req.Service)
+		fmt.Printf("[ecs] %s/%s is unhealthy (1 of 2 tasks running)\n", req.Cluster, req.Service)
+	})
+	// Simulates CloudWatch publishing an alarm state change to SNS, which
+	// delivers a signed notification to the integration's ingest URL.
+	mux.HandleFunc("POST /sns/publish", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			IngestURL string `json:"ingest_url"`
+			TopicArn  string `json:"topic_arn"`
+			Alarm     string `json:"alarm"`
+			State     string `json:"state"`
+			Cluster   string `json:"cluster"`
+			Service   string `json:"service"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		code, err := s.Publish(req.IngestURL, req.TopicArn, CloudWatchAlarm(req.Alarm, req.State, req.Cluster, req.Service))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		fmt.Printf("[sns] delivered %s %s -> ingest returned %d\n", req.Alarm, req.State, code)
+		json.NewEncoder(w).Encode(map[string]int{"ingest_status": code})
+	})
 	return mux
 }
 

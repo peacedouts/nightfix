@@ -598,7 +598,10 @@ func (s *Server) onRunFinished(ctx context.Context, tx *db.Tx, run runRow, rb *r
 	reason := msg
 	if rb.Spec.OnFailure != nil && rb.Spec.OnFailure.Message != "" {
 		if m, err := expr.RenderString(rb.Spec.OnFailure.Message, expr.Vars{"params": run.Params}); err == nil {
-			reason = fmt.Sprint(m) + " (" + describeRunOutcome(run) + ")"
+			reason = fmt.Sprint(m)
+			if run.Error.Valid {
+				reason += " (" + run.Error.String + ")"
+			}
 		}
 	}
 	if held || action == "escalate" || run.Status == "needs_human" {
@@ -617,10 +620,11 @@ func describeRunOutcome(r runRow) string {
 	case "needs_human":
 		return "needs a human: " + r.Error.String
 	default:
+		out := strings.ReplaceAll(r.Status, "_", " ")
 		if r.Error.Valid {
-			return r.Error.String
+			out += " (" + r.Error.String + ")"
 		}
-		return r.Status
+		return out
 	}
 }
 

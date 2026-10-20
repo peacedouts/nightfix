@@ -164,13 +164,11 @@ func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 		return fmt.Errorf("unexpected admin role name %q", me)
 	}
 	setup := []string{
+		// Roles are cluster-wide, so migrators of different databases can race
+		// here; a duplicate is fine.
 		`DO $$ BEGIN
-		   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lir_owner') THEN
-		     CREATE ROLE lir_owner NOLOGIN BYPASSRLS;
-		   END IF;
-		   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lir_app') THEN
-		     CREATE ROLE lir_app LOGIN;
-		   END IF;
+		   BEGIN CREATE ROLE lir_owner NOLOGIN BYPASSRLS; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END;
+		   BEGIN CREATE ROLE lir_app LOGIN; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END;
 		 END $$`,
 		"GRANT lir_owner TO " + me,
 		"GRANT USAGE, CREATE ON SCHEMA public TO lir_owner",
@@ -179,7 +177,16 @@ func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 		   name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
 	}
 	for _, s := range setup {
-		if _, err := conn.ExecContext(ctx, s); err != nil {
+		var err error
+		for attempt := 0; attempt < 5; attempt++ {
+			// "tuple concurrently updated" when another database's migrator
+			// grants the same role at the same moment: retry.
+			if _, err = conn.ExecContext(ctx, s); err == nil || !strings.Contains(err.Error(), "concurrently") {
+				break
+			}
+			time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
+		}
+		if err != nil {
 			return fmt.Errorf("migration setup: %w", err)
 		}
 	}
