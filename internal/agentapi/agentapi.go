@@ -15,10 +15,46 @@ const ProtocolVersion = 1
 
 // EnrollRequest is sent once, before the agent has a certificate.
 type EnrollRequest struct {
-	Method  string `json:"method"` // token (iam is designed but not in this build)
-	Token   string `json:"token,omitempty"`
-	CSRPEM  string `json:"csr_pem"`
-	Version string `json:"agent_version"`
+	Method  string      `json:"method"` // iam (default) | token
+	Token   string      `json:"token,omitempty"`
+	OrgID   string      `json:"org_id,omitempty"` // iam: the org the agent is joining
+	Nonce   string      `json:"nonce,omitempty"`  // iam: from ChallengeResponse
+	IAM     *IAMRequest `json:"iam,omitempty"`
+	CSRPEM  string      `json:"csr_pem"`
+	Version string      `json:"agent_version"`
+}
+
+// Headers the agent must include in, and sign into, its STS request. Binding
+// the org and a single-use nonce into the signature means the request can't
+// be replayed later or used to enroll into a different org.
+const (
+	HeaderOrg   = "X-Lightning-Org"
+	HeaderNonce = "X-Lightning-Nonce"
+)
+
+// STSBody is the exact GetCallerIdentity request body the control plane accepts.
+const STSBody = "Action=GetCallerIdentity&Version=2011-06-15"
+
+// IAMRequest is a SigV4-signed sts:GetCallerIdentity request that the agent
+// built but did not send. The control plane sends it to STS itself; STS
+// verifies the signature and answers with the caller's identity. The control
+// plane builds the STS URL from Region — it never fetches a URL the agent
+// supplies.
+type IAMRequest struct {
+	Region  string              `json:"region"`
+	Headers map[string][]string `json:"headers"`
+	Body    string              `json:"body"`
+}
+
+// ChallengeRequest asks for an enrollment nonce.
+type ChallengeRequest struct {
+	OrgID string `json:"org_id"`
+}
+
+// ChallengeResponse carries a single-use nonce valid for a few minutes.
+type ChallengeResponse struct {
+	Nonce     string `json:"nonce"`
+	ExpiresAt string `json:"expires_at"`
 }
 
 // EnrollResponse carries the agent's identity and trust configuration.

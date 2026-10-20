@@ -36,6 +36,7 @@ export LIR_STATE_DIR="$WORK/state"
 export LIR_API_ADDR=127.0.0.1:18080 LIR_INGEST_ADDR=127.0.0.1:18081 LIR_AGENT_ADDR=127.0.0.1:18443
 export LIR_PUBLIC_INGEST_URL=http://127.0.0.1:18081
 export LIR_SNS_DEV_CERT_PREFIX="$STUB/sns/"   # trust devstub's SNS signing cert (local only)
+export LIR_STS_DEV_ENDPOINT="$STUB/sts/"       # devstub plays STS for IAM enrollment (local only)
 
 say "Starting devstub (simulated ECS, SNS, Slack, PagerDuty)"
 bin/devstub --heal-after 4s > "$WORK/devstub.log" 2>&1 & PIDS+=($!)
@@ -44,6 +45,7 @@ say "Creating org"
 ORG_OUT="$(bin/lightning org create --name "Acme" --slug acme)"
 echo "$ORG_OUT"
 KEY="$(echo "$ORG_OUT" | awk '/api key/ {print $3}')"
+ORG="$(echo "$ORG_OUT" | awk '/^org:/ {print $2}')"
 
 say "Starting the control plane"
 bin/lightning serve > "$WORK/controlplane.log" 2>&1 & PIDS+=($!)
@@ -66,12 +68,14 @@ if [ "$SCENARIO" = fail ]; then
 fi
 api -X PUT "$API/v1/runbooks/ecs-service-restart" --data-binary @"$RB" | json '"version %s  %s  signed by %s" % (d["version"], d["digest"][:23]+"…", ", ".join(d["signed_by"]))'
 
-say "Enrolling an agent (token → CSR → 24h mTLS certificate; labels come from the rule)"
-TOKEN="$(api -X POST "$API/v1/enrollment-rules" -d '{"labels":{"env":"prod"},"max_agents":1}' | json 'd["token"]')"
-LIR_AWS_ENDPOINT_URL="$STUB/aws" AWS_ACCESS_KEY_ID=AKIDEXAMPLE AWS_SECRET_ACCESS_KEY=example AWS_REGION=us-east-1 \
-AWS_EC2_METADATA_DISABLED=true \
+say "Enrolling an agent by its IAM role (signed STS GetCallerIdentity → 24h mTLS cert; labels come from the rule)"
+api -X POST "$API/v1/enrollment-rules" \
+  -d '{"method":"iam","role_arn":"arn:aws:iam::123456789012:role/lightning-agent","labels":{"env":"prod"},"max_agents":1}' \
+  | json '"rule: role %s in account %s → labels env=prod" % (d["role_name"], d["aws_account_id"])'
+LIR_AWS_ENDPOINT_URL="$STUB/aws" LIR_STS_ENDPOINT_URL="$STUB/sts/" \
+AWS_ACCESS_KEY_ID=AKIDEXAMPLE AWS_SECRET_ACCESS_KEY=example-secret AWS_REGION=us-east-1 AWS_EC2_METADATA_DISABLED=true \
   bin/lightning-agent --endpoint https://127.0.0.1:18443 --ca-file "$LIR_STATE_DIR/ca.crt" \
-    --enroll-token "$TOKEN" --state-dir "$WORK/agent" > "$WORK/agent.log" 2>&1 & PIDS+=($!)
+    --org "$ORG" --state-dir "$WORK/agent" > "$WORK/agent.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 50); do
   [ "$(api "$API/v1/agents" | json 'd[0]["status"] if d else ""' 2>/dev/null)" = online ] && break; sleep 0.3
 done

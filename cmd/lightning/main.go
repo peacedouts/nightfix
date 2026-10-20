@@ -17,6 +17,11 @@
 //	LIR_AGENT_TLS_HOSTS     names/IPs on the gateway certificate (default localhost,127.0.0.1)
 //	LIR_PUBLIC_INGEST_URL   base URL returned for integrations (default http://127.0.0.1:8081)
 //	LIR_SNS_DEV_CERT_PREFIX extra allowed SNS SigningCertURL prefix — local development only
+//	LIR_STS_DEV_ENDPOINT    STS URL for IAM enrollment instead of sts.<region>.amazonaws.com — local development only
+//	LIR_AUTH0_DOMAIN        Auth0 tenant domain (e.g. acme.us.auth0.com); enables user login
+//	LIR_AUTH0_AUDIENCE      Auth0 API identifier (e.g. https://api.lightning.ir)
+//	LIR_AUTH0_EMAIL_CLAIM   custom claim carrying the user's email (default https://lightning.ir/email)
+//	LIR_AUTH0_GROUPS_CLAIM  custom claim carrying IdP groups (default https://lightning.ir/groups)
 package main
 
 import (
@@ -35,8 +40,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/peacedouts/lightning_ir/internal/auth0"
 	"github.com/peacedouts/lightning_ir/internal/controlplane"
 	"github.com/peacedouts/lightning_ir/internal/db"
+	"github.com/peacedouts/lightning_ir/internal/ids"
 	"github.com/peacedouts/lightning_ir/internal/signing"
 )
 
@@ -136,10 +143,22 @@ func newServer(ctx context.Context) (*controlplane.Server, error) {
 		return nil, err
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	return controlplane.New(pool, sl, ca, controlplane.Config{
+	cfg := controlplane.Config{
 		PublicIngestURL:    env("LIR_PUBLIC_INGEST_URL", "http://127.0.0.1:8081"),
 		SNSCertURLPrefixes: []string{os.Getenv("LIR_SNS_DEV_CERT_PREFIX")},
-	}, log), nil
+		STSEndpoint:        os.Getenv("LIR_STS_DEV_ENDPOINT"),
+	}
+	if d := os.Getenv("LIR_AUTH0_DOMAIN"); d != "" {
+		cfg.Auth0 = controlplane.Auth0Config{
+			Verifier:    auth0.New(d, mustEnv("LIR_AUTH0_AUDIENCE")),
+			EmailClaim:  os.Getenv("LIR_AUTH0_EMAIL_CLAIM"),
+			GroupsClaim: os.Getenv("LIR_AUTH0_GROUPS_CLAIM"),
+		}
+	}
+	if cfg.STSEndpoint != "" {
+		log.Warn("LIR_STS_DEV_ENDPOINT is set: IAM enrollment trusts a non-AWS STS. Local development only.")
+	}
+	return controlplane.New(pool, sl, ca, cfg, log), nil
 }
 
 func orgCmd(ctx context.Context, args []string) error {
@@ -161,7 +180,7 @@ func orgCmd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("org:         %s\nsigning key: %s\napi key:     %s   (shown once)\n", o.OrgID, o.SigningID, o.APIKey)
+	fmt.Printf("org:         %s\nsigning key: %s\napi key:     %s   (shown once)\n", ids.Encode("org", o.OrgID), o.SigningID, o.APIKey)
 	return nil
 }
 

@@ -28,10 +28,14 @@ type Config struct {
 	// SNSCertURLPrefixes, if set, are extra allowed SigningCertURL prefixes.
 	// For local development only; production accepts only sns.*.amazonaws.com.
 	SNSCertURLPrefixes []string
-	LeaseDuration      time.Duration
-	EnvelopeTTL        time.Duration
-	PollWait           time.Duration
-	HTTPClient         *http.Client // for notifications and SNS
+	// STSEndpoint overrides the regional STS URL for IAM enrollment. Local
+	// development and tests only.
+	STSEndpoint   string
+	Auth0         Auth0Config
+	LeaseDuration time.Duration
+	EnvelopeTTL   time.Duration
+	PollWait      time.Duration
+	HTTPClient    *http.Client // for notifications and SNS
 }
 
 func (c *Config) defaults() {

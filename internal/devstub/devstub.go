@@ -43,6 +43,8 @@ type Stub struct {
 
 	snsKey  *rsa.PrivateKey
 	snsCert []byte
+
+	iam map[string]IAMIdentity
 }
 
 type ecsService struct {
@@ -88,6 +90,7 @@ func (s *Stub) Snapshot() (calls, slack []string, pd []map[string]any) {
 // Handler serves every stub endpoint.
 func (s *Stub) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sts/", s.handleSTS)
 	mux.HandleFunc("POST /aws", s.handleAWS)
 	mux.HandleFunc("POST /aws/", s.handleAWS)
 	mux.HandleFunc("GET /sns/cert.pem", func(w http.ResponseWriter, _ *http.Request) { w.Write(s.snsCert) })

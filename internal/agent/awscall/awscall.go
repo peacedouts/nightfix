@@ -144,3 +144,39 @@ func (c *Client) Call(ctx context.Context, service, action string, input map[str
 	}
 	return out, nil
 }
+
+// Region is the configured AWS region.
+func (c *Client) Region() string { return c.cfg.Region }
+
+// STSEndpoint is where the control plane will send the signed
+// GetCallerIdentity request. LIR_STS_ENDPOINT_URL overrides it for local
+// testing; the control plane must be configured with the same value.
+func (c *Client) STSEndpoint() string {
+	if u := os.Getenv("LIR_STS_ENDPOINT_URL"); u != "" {
+		return u
+	}
+	return fmt.Sprintf("https://sts.%s.amazonaws.com/", c.cfg.Region)
+}
+
+// SignGetCallerIdentity builds and signs, but does not send, an
+// sts:GetCallerIdentity request carrying extra headers (the enrollment org
+// and nonce), which the signature then covers. Returns the headers to forward.
+func (c *Client) SignGetCallerIdentity(ctx context.Context, body string, extra map[string]string) (map[string][]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.STSEndpoint(), strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+	for k, v := range extra {
+		req.Header.Set(k, v)
+	}
+	creds, err := c.cfg.Credentials.Retrieve(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("AWS credentials: %w", err)
+	}
+	sum := sha256.Sum256([]byte(body))
+	if err := c.signer.SignHTTP(ctx, creds, req, hex.EncodeToString(sum[:]), "sts", c.cfg.Region, time.Now()); err != nil {
+		return nil, err
+	}
+	return map[string][]string(req.Header), nil
+}

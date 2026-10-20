@@ -3,7 +3,8 @@
 // It needs outbound HTTPS to the control plane only. AWS credentials come
 // from the standard chain (ECS task role, IRSA, instance profile, env).
 //
-//	lightning-agent --endpoint https://agent.lightning.ir:443 --enroll-token lirenroll_…
+//	lightning-agent --endpoint https://agent.lightning.ir:443 --org org_…            (IAM enrollment)
+//	lightning-agent --endpoint … --enroll-method token --enroll-token lirenroll_…   (fallback)
 package main
 
 import (
@@ -24,7 +25,9 @@ import (
 func main() {
 	endpoint := flag.String("endpoint", env("LIR_ENDPOINT", "https://127.0.0.1:8443"), "agent gateway URL")
 	caFile := flag.String("ca-file", os.Getenv("LIR_CA_FILE"), "CA certificate for the gateway (PEM)")
-	token := flag.String("enroll-token", os.Getenv("LIR_ENROLL_TOKEN"), "enrollment token (first start only)")
+	method := flag.String("enroll-method", env("LIR_ENROLL_METHOD", "iam"), "iam (prove the agent's AWS role) | token")
+	orgID := flag.String("org", os.Getenv("LIR_ORG_ID"), "org id (org_…), required for iam enrollment")
+	token := flag.String("enroll-token", os.Getenv("LIR_ENROLL_TOKEN"), "enrollment token (token method only)")
 	stateDir := flag.String("state-dir", os.Getenv("LIR_AGENT_STATE_DIR"), "where to keep identity; empty re-enrolls on every start")
 	signers := flag.String("required-signers", os.Getenv("LIR_REQUIRED_SIGNERS"), "comma-separated signer key ids to pin locally (overrides the control plane)")
 	allowlist := flag.String("allowlist", os.Getenv("LIR_ALLOWLIST_FILE"), "allowlist file")
@@ -56,7 +59,7 @@ func main() {
 		}
 	}
 	a, err := agent.New(agent.Config{
-		Endpoint: *endpoint, CAPEM: caPEM, EnrollToken: *token, StateDir: *stateDir,
+		Endpoint: *endpoint, CAPEM: caPEM, EnrollMethod: *method, OrgID: *orgID, IAM: aws, EnrollToken: *token, StateDir: *stateDir,
 		RequiredSigners: pinned, AllowlistFile: *allowlist, AllowlistMode: *allowMode,
 		Freeze: *freeze, Slots: *slots, AWS: aws, Log: log,
 	})

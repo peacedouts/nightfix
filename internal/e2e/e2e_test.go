@@ -21,8 +21,11 @@ import (
 
 	"github.com/peacedouts/lightning_ir/internal/agent"
 	"github.com/peacedouts/lightning_ir/internal/agent/awscall"
+	"github.com/peacedouts/lightning_ir/internal/auth0"
+	"github.com/peacedouts/lightning_ir/internal/auth0/auth0test"
 	"github.com/peacedouts/lightning_ir/internal/controlplane"
 	"github.com/peacedouts/lightning_ir/internal/devstub"
+	"github.com/peacedouts/lightning_ir/internal/ids"
 	"github.com/peacedouts/lightning_ir/internal/signing"
 	"github.com/peacedouts/lightning_ir/internal/testdb"
 )
@@ -36,7 +39,17 @@ type env struct {
 	key    string
 	stub   *devstub.Stub
 	ingest string
+	orgID  string // org_…
+	gwURL  string
+	caPEM  []byte
+	auth0  *auth0test.Issuer
+	aws    *awscall.Client
 }
+
+const (
+	awsAccount = "123456789012"
+	agentRole  = "lightning-agent"
+)
 
 func setup(t *testing.T, runbookYAML string) *env {
 	t.Helper()
@@ -58,6 +71,7 @@ func setup(t *testing.T, runbookYAML string) *env {
 	t.Cleanup(stubSrv.Close)
 	stub.BaseURL = stubSrv.URL
 
+	idp := auth0test.New(t)
 	var srv *controlplane.Server
 	ingestSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { srv.IngestHandler().ServeHTTP(w, r) }))
 	t.Cleanup(ingestSrv.Close)
@@ -65,6 +79,9 @@ func setup(t *testing.T, runbookYAML string) *env {
 		PublicIngestURL:    ingestSrv.URL,
 		SNSCertURLPrefixes: []string{stubSrv.URL + "/sns/"},
 		PollWait:           2 * time.Second,
+		STSEndpoint:        stubSrv.URL + "/sts/",
+		Auth0: controlplane.Auth0Config{Verifier: &auth0.Verifier{
+			Issuer: idp.Issuer, Audience: idp.Audience, JWKSURL: idp.Srv.URL}},
 	}, log)
 	apiSrv := httptest.NewServer(srv.APIHandler())
 	t.Cleanup(apiSrv.Close)
@@ -82,7 +99,8 @@ func setup(t *testing.T, runbookYAML string) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{t: t, ctx: ctx, api: apiSrv.URL, key: org.APIKey, stub: stub}
+	e := &env{t: t, ctx: ctx, api: apiSrv.URL, key: org.APIKey, stub: stub, orgID: ids.Encode("org", org.OrgID),
+		gwURL: gw.URL, caPEM: ca.CertPEM, auth0: idp}
 
 	e.call("POST", "/v1/services", map[string]any{"name": "checkout-api", "max_hold": "1m", "verification_window": "20s"}, nil)
 	e.call("POST", "/v1/services/checkout-api/escalation-targets", map[string]any{"type": "slack", "url": stubSrv.URL + "/slack"}, nil)
@@ -99,11 +117,17 @@ func setup(t *testing.T, runbookYAML string) *env {
 		t.Fatalf("publish: %v", pub)
 	}
 
-	var enr map[string]string
-	e.call("POST", "/v1/enrollment-rules", map[string]any{"labels": map[string]string{"env": "prod"}, "max_agents": 1}, &enr)
+	// IAM enrollment (the default): the agent's role, not a token, is what
+	// gets it in. Labels come from this rule.
+	e.call("POST", "/v1/enrollment-rules", map[string]any{"method": "iam",
+		"role_arn": "arn:aws:iam::" + awsAccount + ":role/platform/" + agentRole,
+		"labels":   map[string]string{"env": "prod"}, "max_agents": 1}, nil)
+	stub.AddIAMIdentity(devstub.IAMIdentity{AccessKey: "AKIDEXAMPLE", Secret: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+		Account: awsAccount, Role: agentRole})
 
-	// The agent uses the real SigV4 AWS client, pointed at the simulated ECS.
+	// The agent uses the real SigV4 AWS client, pointed at the simulated ECS and STS.
 	t.Setenv("LIR_AWS_ENDPOINT_URL", stubSrv.URL+"/aws")
+	t.Setenv("LIR_STS_ENDPOINT_URL", stubSrv.URL+"/sts/")
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY")
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -112,7 +136,8 @@ func setup(t *testing.T, runbookYAML string) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ag, err := agent.New(agent.Config{Endpoint: gw.URL, CAPEM: ca.CertPEM, EnrollToken: enr["token"],
+	e.aws = aws
+	ag, err := agent.New(agent.Config{Endpoint: gw.URL, CAPEM: ca.CertPEM, EnrollMethod: "iam", OrgID: e.orgID, IAM: aws,
 		StateDir: t.TempDir(), AWS: aws, Log: log})
 	if err != nil {
 		t.Fatal(err)
@@ -317,8 +342,10 @@ func TestInjectionInAlertLabelsIsRefused(t *testing.T) {
 		return len(pd) == 1
 	})
 	calls, _, _ := e.stub.Snapshot()
-	if len(calls) != 0 {
-		t.Fatalf("no AWS call should have been made, got %v", calls)
+	for _, c := range calls {
+		if strings.HasPrefix(c, "ecs:") {
+			t.Fatalf("no ECS call should have been made, got %v", calls)
+		}
 	}
 	found := false
 	for _, l := range e.timeline(1) {

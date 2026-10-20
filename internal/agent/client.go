@@ -197,6 +197,42 @@ func (c *client) enroll(ctx context.Context, token, version string) (*identity, 
 		CertPEM: resp.CertPEM, CAPEM: resp.CAPEM, KeyPEM: keyPEM}, nil
 }
 
+// IAMSigner signs an sts:GetCallerIdentity request without sending it.
+type IAMSigner interface {
+	Region() string
+	SignGetCallerIdentity(ctx context.Context, body string, extra map[string]string) (map[string][]string, error)
+}
+
+// enrollIAM proves the agent's AWS identity (agent-protocol.md §3.1): get a
+// single-use nonce, sign a GetCallerIdentity request that covers the org and
+// the nonce, and let the control plane have STS verify it.
+func (c *client) enrollIAM(ctx context.Context, orgID string, signer IAMSigner, version string) (*identity, error) {
+	var ch agentapi.ChallengeResponse
+	if err := c.post(ctx, "/agent/v1/enroll/challenge", agentapi.ChallengeRequest{OrgID: orgID}, &ch); err != nil {
+		return nil, fmt.Errorf("enrollment challenge: %w", err)
+	}
+	headers, err := signer.SignGetCallerIdentity(ctx, agentapi.STSBody, map[string]string{
+		agentapi.HeaderOrg: orgID, agentapi.HeaderNonce: ch.Nonce,
+	})
+	if err != nil {
+		return nil, err
+	}
+	keyPEM, csrPEM, err := newKeyAndCSR()
+	if err != nil {
+		return nil, err
+	}
+	var resp agentapi.EnrollResponse
+	err = c.post(ctx, "/agent/v1/enroll", agentapi.EnrollRequest{
+		Method: "iam", OrgID: orgID, Nonce: ch.Nonce, CSRPEM: csrPEM, Version: version,
+		IAM: &agentapi.IAMRequest{Region: signer.Region(), Headers: headers, Body: agentapi.STSBody},
+	}, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("enroll: %w", err)
+	}
+	return &identity{AgentID: resp.AgentID, OrgID: resp.OrgID, Labels: resp.Labels, Trust: resp.TrustConfig,
+		CertPEM: resp.CertPEM, CAPEM: resp.CAPEM, KeyPEM: keyPEM}, nil
+}
+
 func (c *client) renew(ctx context.Context) (certPEM, keyPEM string, err error) {
 	keyPEM, csrPEM, err := newKeyAndCSR()
 	if err != nil {

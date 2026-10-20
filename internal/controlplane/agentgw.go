@@ -23,6 +23,14 @@ func (s *Server) AgentHandler() http.Handler {
 		resp, err := s.Enroll(r.Context(), req)
 		s.reply(w, resp, err)
 	})
+	mux.HandleFunc("POST /agent/v1/enroll/challenge", func(w http.ResponseWriter, r *http.Request) {
+		var req agentapi.ChallengeRequest
+		if !decodeBody(w, r, &req) {
+			return
+		}
+		resp, err := s.Challenge(r.Context(), req)
+		s.reply(w, resp, err)
+	})
 	authed := func(pattern string, fn func(w http.ResponseWriter, r *http.Request, a agentIdentity)) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			a, err := s.authenticateAgent(r)
