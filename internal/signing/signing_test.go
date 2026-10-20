@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/runbook"
+	"github.com/peacedouts/nightfix/internal/runbook"
 )
 
 func bundleFor(t *testing.T, keys ...Key) Bundle {
@@ -37,7 +37,7 @@ func trust(required []string, keys ...Key) TrustConfig {
 }
 
 func TestBundleVerification(t *testing.T) {
-	cp, _ := GenerateKey("lightning-org")
+	cp, _ := GenerateKey("nightfix-org")
 	cust, _ := GenerateKey("customer-ci")
 
 	b := bundleFor(t, cp)
@@ -70,7 +70,7 @@ func TestBundleVerification(t *testing.T) {
 }
 
 func TestEnvelope(t *testing.T) {
-	cp, _ := GenerateKey("lightning-org")
+	cp, _ := GenerateKey("nightfix-org")
 	tc := trust([]string{cp.ID}, cp)
 	now := time.Now()
 	e := Envelope{AttemptID: "a1", RunID: "r1", StepID: "restart", AgentID: "agent-1",

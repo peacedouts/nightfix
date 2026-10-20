@@ -66,7 +66,7 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          randSerial(),
-		Subject:               pkix.Name{CommonName: "Lightning IR Agent CA"},
+		Subject:               pkix.Name{CommonName: "Nightfix Agent CA"},
 		NotBefore:             time.Now().Add(-time.Minute),
 		NotAfter:              time.Now().AddDate(5, 0, 0),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -100,7 +100,7 @@ func randSerial() *big.Int {
 
 // AgentURI is the SPIFFE-style identity embedded in agent certificates.
 func AgentURI(orgID, agentID string) string {
-	return fmt.Sprintf("spiffe://lightning.ir/org/%s/agent/%s", orgID, agentID)
+	return fmt.Sprintf("spiffe://nightfix.dev/org/%s/agent/%s", orgID, agentID)
 }
 
 // IssueAgentCert signs a CSR for an agent. The private key never leaves the
@@ -149,7 +149,7 @@ func (ca *CA) ServerTLS(hosts []string) (*tls.Config, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: randSerial(),
-		Subject:      pkix.Name{CommonName: "lightning agent gateway"},
+		Subject:      pkix.Name{CommonName: "nightfix agent gateway"},
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().AddDate(1, 0, 0),
 		KeyUsage:     x509.KeyUsageDigitalSignature,

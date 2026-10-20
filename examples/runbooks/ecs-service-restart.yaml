@@ -1,4 +1,4 @@
-apiVersion: lightning.ir/v1alpha1
+apiVersion: nightfix.dev/v1alpha1
 kind: Runbook
 metadata:
   name: ecs-service-restart

@@ -10,7 +10,7 @@
 set -euo pipefail
 
 PGPORT="${PGPORT:-54329}"
-DATA="${LIR_PGDATA:-${TMPDIR:-/tmp}/lightning-ir-pg}"
+DATA="${NIGHTFIX_PGDATA:-${TMPDIR:-/tmp}/nightfix-pg}"
 
 find_bin() {
   if command -v pg_ctl >/dev/null 2>&1; then dirname "$(command -v pg_ctl)"; return; fi

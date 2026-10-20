@@ -12,44 +12,29 @@ import (
 	"strings"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/expr"
-	"github.com/peacedouts/lightning_ir/internal/ids"
-	"github.com/peacedouts/lightning_ir/internal/runbook"
-	"github.com/peacedouts/lightning_ir/internal/signing"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/expr"
+	"github.com/peacedouts/nightfix/internal/ids"
+	"github.com/peacedouts/nightfix/internal/runbook"
+	"github.com/peacedouts/nightfix/internal/signing"
 )
-
-// principal is an authenticated API caller. This build authenticates API
-// keys only; Auth0 user tokens and scoped role bindings come next
-// (data-model.md §5).
-type principal struct {
-	OrgID string
-	KeyID string
-	Role  string
-}
-
-func (p principal) actor() string { return ids.Encode("key", p.KeyID) }
-
-var roleRank = map[string]int{"viewer": 1, "responder": 2, "admin": 3, "owner": 4}
-
-func (p principal) atLeast(role string) error {
-	if roleRank[p.Role] < roleRank[role] {
-		return httpError{http.StatusForbidden, "requires the " + role + " role"}
-	}
-	return nil
-}
 
 // APIHandler serves the REST API under /v1.
 func (s *Server) APIHandler() http.Handler {
 	mux := http.NewServeMux()
-	route := func(pattern, minRole string, fn func(r *http.Request, p principal) (any, error)) {
+	var route routeFn = func(pattern, minRole string, fn func(r *http.Request, p principal) (any, error)) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			p, err := s.authenticate(r)
 			if err != nil {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 				return
 			}
-			if err := p.atLeast(minRole); err != nil {
+			// Don't reassign minRole: it's shared by every request on this route.
+			need, check := minRole, p.atLeast
+			if r, ok := strings.CutSuffix(minRole, "*"); ok {
+				need, check = r, p.atLeastSomewhere // resource-scoped; the handler calls p.can
+			}
+			if err := check(need); err != nil {
 				s.reply(w, nil, err)
 				return
 			}
@@ -59,8 +44,13 @@ func (s *Server) APIHandler() http.Handler {
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	route("GET /v1/me", "viewer", func(_ *http.Request, p principal) (any, error) {
-		return map[string]string{"org": ids.Encode("org", p.OrgID), "key": p.actor(), "role": p.Role}, nil
+		out := map[string]any{"org": ids.Encode("org", p.OrgID), "principal": p.actor(), "kind": p.Kind, "bindings": p.Bindings}
+		if p.Kind == "user" {
+			out["email"], out["teams"] = p.Email, p.Teams
+		}
+		return out, nil
 	})
+	s.identityRoutes(route)
 	route("POST /v1/services", "admin", s.apiCreateService)
 	route("GET /v1/services", "viewer", s.apiListServices)
 	route("POST /v1/services/{name}/escalation-targets", "admin", s.apiCreateTarget)
@@ -68,33 +58,20 @@ func (s *Server) APIHandler() http.Handler {
 	route("PUT /v1/routing-rules", "admin", s.apiPutRoutingRules)
 	route("POST /v1/enrollment-rules", "admin", s.apiCreateEnrollmentRule)
 	route("GET /v1/agents", "viewer", s.apiListAgents)
-	route("POST /v1/runbooks/validate", "responder", s.apiValidateRunbook)
-	route("PUT /v1/runbooks/{name}", "responder", s.apiPublishRunbook)
+	route("POST /v1/runbooks/validate", "responder*", s.apiValidateRunbook)
+	route("PUT /v1/runbooks/{name}", "responder*", s.apiPublishRunbook)
 	route("GET /v1/runbooks/{name}", "viewer", s.apiGetRunbook)
-	route("POST /v1/runs", "responder", s.apiStartRun)
+	route("POST /v1/runs", "responder*", s.apiStartRun)
 	route("GET /v1/runs/{id}", "viewer", s.apiGetRun)
 	route("GET /v1/incidents", "viewer", s.apiListIncidents)
 	route("GET /v1/incidents/{number}", "viewer", s.apiGetIncident)
 	route("GET /v1/incidents/{number}/timeline", "viewer", s.apiTimeline)
-	route("POST /v1/incidents/{number}/acknowledge", "responder", s.apiAck)
-	route("POST /v1/incidents/{number}/resolve", "responder", s.apiResolve)
+	route("POST /v1/incidents/{number}/acknowledge", "responder*", s.apiAck)
+	route("POST /v1/incidents/{number}/resolve", "responder*", s.apiResolve)
 	route("POST /v1/org/freeze", "admin", func(r *http.Request, p principal) (any, error) { return s.setFrozen(r.Context(), p, true) })
 	route("POST /v1/org/unfreeze", "admin", func(r *http.Request, p principal) (any, error) { return s.setFrozen(r.Context(), p, false) })
 	route("GET /v1/audit-events", "admin", s.apiAudit)
 	return mux
-}
-
-func (s *Server) authenticate(r *http.Request) (principal, error) {
-	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || !strings.HasPrefix(tok, "lir_") {
-		return principal{}, fmt.Errorf("missing API key (Authorization: Bearer lir_…)")
-	}
-	var p principal
-	if err := s.DB.QueryRowContext(r.Context(), `SELECT org_id, key_id, role FROM lir_route_api_key($1)`, hashSecret(tok)).
-		Scan(&p.OrgID, &p.KeyID, &p.Role); err != nil {
-		return p, fmt.Errorf("invalid API key")
-	}
-	return p, nil
 }
 
 func readJSON(r *http.Request, v any) error {
@@ -175,7 +152,7 @@ func (s *Server) apiCreateService(r *http.Request, p principal) (any, error) {
 			}
 			return err
 		}
-		return tx.Audit(r.Context(), "api_key", p.actor(), "service.create", "service", id, req)
+		return tx.Audit(r.Context(), p.actorType(), p.actor(), "service.create", "service", id, req)
 	})
 	return map[string]string{"id": ids.Encode("svc", id), "name": req.Name}, err
 }
@@ -254,7 +231,7 @@ func (s *Server) apiCreateTarget(r *http.Request, p principal) (any, error) {
 			return err
 		}
 		// The credential itself is never logged or returned.
-		return tx.Audit(r.Context(), "api_key", p.actor(), "escalation_target.create", "escalation_target", id,
+		return tx.Audit(r.Context(), p.actorType(), p.actor(), "escalation_target.create", "escalation_target", id,
 			map[string]string{"type": req.Type, "service": r.PathValue("name")})
 	})
 	return map[string]string{"id": ids.Encode("tgt", id), "type": req.Type}, err
@@ -313,7 +290,7 @@ func (s *Server) apiCreateIntegration(r *http.Request, p principal) (any, error)
 			db.JSON[map[string]string]{V: req.SeverityMap}, stringArray(req.DedupeKeys), db.JSON[map[string]string]{V: cfg}, sealed); err != nil {
 			return err
 		}
-		return tx.Audit(r.Context(), "api_key", p.actor(), "integration.create", "integration", id,
+		return tx.Audit(r.Context(), p.actorType(), p.actor(), "integration.create", "integration", id,
 			map[string]string{"type": req.Type, "name": req.Name, "default_service": svcName})
 	})
 	if err != nil {
@@ -365,16 +342,20 @@ func (s *Server) apiPutRoutingRules(r *http.Request, p principal) (any, error) {
 				return err
 			}
 		}
-		return tx.Audit(r.Context(), "api_key", p.actor(), "routing_rules.replace", "routing_rules", "org", req)
+		return tx.Audit(r.Context(), p.actorType(), p.actor(), "routing_rules.replace", "routing_rules", "org", req)
 	})
 	return map[string]int{"rules": len(req)}, err
 }
 
 func (s *Server) apiCreateEnrollmentRule(r *http.Request, p principal) (any, error) {
 	var req struct {
-		Labels    map[string]string `json:"labels"`
-		MaxAgents int               `json:"max_agents"`
-		ExpiresIn string            `json:"expires_in"`
+		Method       string            `json:"method"` // iam (default) | token
+		RoleArn      string            `json:"role_arn"`
+		AWSAccountID string            `json:"aws_account_id"`
+		RoleName     string            `json:"role_name"`
+		Labels       map[string]string `json:"labels"`
+		MaxAgents    int               `json:"max_agents"`
+		ExpiresIn    string            `json:"expires_in"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		return nil, err
@@ -385,22 +366,61 @@ func (s *Server) apiCreateEnrollmentRule(r *http.Request, p principal) (any, err
 	if req.MaxAgents <= 0 {
 		req.MaxAgents = 2
 	}
-	exp, err := parseDur("expires_in", req.ExpiresIn, time.Hour)
-	if err != nil {
-		return nil, err
+	if req.Method == "" {
+		req.Method = "iam"
 	}
-	token, _, hash := newSecret("lirenroll")
 	id := ids.NewString()
-	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
-		if _, err := tx.Exec(`INSERT INTO enrollment_rules (id, org_id, method, token_hash, labels, max_agents, expires_at)
-			VALUES ($1,$2,'token',$3,$4,$5, now() + $6::interval)`,
-			id, p.OrgID, hash, db.JSON[map[string]string]{V: req.Labels}, req.MaxAgents, pgInterval(exp)); err != nil {
-			return err
+	out := map[string]string{"id": ids.Encode("enr", id), "method": req.Method, "org": ids.Encode("org", p.OrgID)}
+	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		switch req.Method {
+		case "iam":
+			account, name := req.AWSAccountID, req.RoleName
+			if req.RoleArn != "" {
+				a, n, err := roleNameFromARN(req.RoleArn)
+				if err != nil {
+					return httpError{400, err.Error()}
+				}
+				account, name = a, n
+			}
+			if !regexp.MustCompile(`^\d{12}$`).MatchString(account) || name == "" {
+				return httpError{400, "iam rules need role_arn (arn:aws:iam::<12-digit account>:role/<name>), or aws_account_id and role_name"}
+			}
+			var exp sql.NullString
+			if req.ExpiresIn != "" {
+				d, err := parseDur("expires_in", req.ExpiresIn, 0)
+				if err != nil {
+					return err
+				}
+				exp = sql.NullString{String: pgInterval(d), Valid: true}
+			}
+			if _, err := tx.Exec(`INSERT INTO enrollment_rules (id, org_id, method, aws_account_id, role_name, labels, max_agents, expires_at)
+				VALUES ($1,$2,'iam',$3,$4,$5,$6, now() + $7::interval)`,
+				id, p.OrgID, account, name, db.JSON[map[string]string]{V: req.Labels}, req.MaxAgents, exp); err != nil {
+				return err
+			}
+			out["aws_account_id"], out["role_name"] = account, name
+			return tx.Audit(r.Context(), p.actorType(), p.actor(), "enrollment_rule.create", "enrollment_rule", id,
+				map[string]any{"labels": req.Labels, "max_agents": req.MaxAgents, "method": "iam", "account": account, "role": name})
+		case "token":
+			exp, err := parseDur("expires_in", req.ExpiresIn, time.Hour)
+			if err != nil {
+				return err
+			}
+			token, _, hash := newSecret("nfxenroll")
+			if _, err := tx.Exec(`INSERT INTO enrollment_rules (id, org_id, method, token_hash, labels, max_agents, expires_at)
+				VALUES ($1,$2,'token',$3,$4,$5, now() + $6::interval)`,
+				id, p.OrgID, hash, db.JSON[map[string]string]{V: req.Labels}, req.MaxAgents, pgInterval(exp)); err != nil {
+				return err
+			}
+			out["token"] = token
+			out["note"] = "token shown once; expires in " + exp.String()
+			return tx.Audit(r.Context(), p.actorType(), p.actor(), "enrollment_rule.create", "enrollment_rule", id,
+				map[string]any{"labels": req.Labels, "max_agents": req.MaxAgents, "method": "token"})
+		default:
+			return httpError{400, "method must be iam or token"}
 		}
-		return tx.Audit(r.Context(), "api_key", p.actor(), "enrollment_rule.create", "enrollment_rule", id,
-			map[string]any{"labels": req.Labels, "max_agents": req.MaxAgents, "method": "token"})
 	})
-	return map[string]string{"id": ids.Encode("enr", id), "token": token, "note": "token shown once; expires in " + exp.String()}, err
+	return out, err
 }
 
 func (s *Server) apiListAgents(r *http.Request, p principal) (any, error) {
@@ -491,9 +511,24 @@ func (s *Server) apiPublishRunbook(r *http.Request, p principal) (any, error) {
 			b, _ := json.Marshal(is)
 			return httpError{422, "runbook is not publishable: " + string(b)}
 		}
+		// The publisher must be allowed on the new content...
+		if err := p.can("responder", runbookResource(rb.Metadata.Team, rb.Metadata.Tags, selector(rb))); err != nil {
+			return err
+		}
 		var rbID string
 		var latest int
 		err := tx.QueryRow(`SELECT id, latest_version FROM runbooks WHERE name = $1 FOR UPDATE`, rb.Metadata.Name).Scan(&rbID, &latest)
+		if err == nil && latest > 0 {
+			// ...and on the version it replaces, so nobody can take over
+			// another team's runbook by republishing it under their own scope.
+			prev, _, _, err := s.loadVersion(tx, rbID, latest)
+			if err != nil {
+				return err
+			}
+			if err := p.can("responder", runbookResource(prev.Metadata.Team, prev.Metadata.Tags, selector(prev))); err != nil {
+				return err
+			}
+		}
 		if isNoRows(err) {
 			rbID = ids.NewString()
 			_, err = tx.Exec(`INSERT INTO runbooks (id, org_id, name, title, team, tags) VALUES ($1,$2,$3,$4,NULLIF($5,''),$6)`,
@@ -553,7 +588,7 @@ func (s *Server) apiPublishRunbook(r *http.Request, p principal) (any, error) {
 			}
 		}
 		out = map[string]any{"name": rb.Metadata.Name, "version": version, "digest": digest, "signed_by": []string{sig.KeyID}}
-		return tx.Audit(r.Context(), "api_key", p.actor(), "runbook.publish", "runbook", rb.Metadata.Name,
+		return tx.Audit(r.Context(), p.actorType(), p.actor(), "runbook.publish", "runbook", rb.Metadata.Name,
 			map[string]any{"version": version, "digest": digest})
 	})
 	return out, err
@@ -608,6 +643,9 @@ func (s *Server) apiStartRun(r *http.Request, p principal) (any, error) {
 		if err != nil {
 			return err
 		}
+		if err := p.can("responder", runbookResource(rb.Metadata.Team, rb.Metadata.Tags, selector(rb))); err != nil {
+			return err
+		}
 		allowed := false
 		for _, t := range rb.Spec.Triggers {
 			if t.Type == "manual" || t.Type == "api" {
@@ -618,7 +656,7 @@ func (s *Server) apiStartRun(r *http.Request, p principal) (any, error) {
 			return httpError{403, "runbook has no manual or api trigger"}
 		}
 		opts := startRunOpts{VersionID: vid, Digest: digest, Runbook: rb, TriggerType: "api", Mode: "manual",
-			RequestedByType: "api_key", RequestedByID: p.actor()}
+			RequestedByType: p.actorType(), RequestedByID: p.actor()}
 		vars := expr.Vars{}
 		if req.Incident > 0 {
 			inc, err := s.incidentByNumber(tx, req.Incident)
@@ -841,13 +879,16 @@ func (s *Server) apiAck(r *http.Request, p principal) (any, error) {
 		if err != nil {
 			return err
 		}
+		if err := p.can("responder", s.incidentResource(tx, inc)); err != nil {
+			return err
+		}
 		if inc.Status == "resolved" {
 			return httpError{409, "incident is resolved"}
 		}
 		if _, err := tx.Exec(`UPDATE incidents SET status = 'acknowledged', ack_at = now(), hold_until = NULL, verify_until = NULL WHERE id = $1`, inc.ID); err != nil {
 			return err
 		}
-		return s.timeline(tx, inc.ID, "incident.acknowledged", "api_key", p.actor(), "Acknowledged", nil)
+		return s.timeline(tx, inc.ID, "incident.acknowledged", p.actorType(), p.actor(), "Acknowledged", nil)
 	})
 	return map[string]bool{"ok": err == nil}, err
 }
@@ -862,6 +903,9 @@ func (s *Server) apiResolve(r *http.Request, p principal) (any, error) {
 		if err != nil {
 			return err
 		}
+		if err := p.can("responder", s.incidentResource(tx, inc)); err != nil {
+			return err
+		}
 		if inc.Status == "resolved" {
 			return nil
 		}
@@ -870,7 +914,7 @@ func (s *Server) apiResolve(r *http.Request, p principal) (any, error) {
 			WHERE ia.alert_id = a.id AND ia.incident_id = $1 AND a.status = 'firing' AND ia.detached_at IS NULL`, inc.ID); err != nil {
 			return err
 		}
-		return s.resolveIncident(r.Context(), tx, inc, "human", "Resolved by "+p.actor())
+		return s.resolveIncident(r.Context(), tx, inc, "human", "Resolved by "+p.display())
 	})
 	return map[string]bool{"ok": err == nil}, err
 }
@@ -902,7 +946,7 @@ func (s *Server) setFrozen(ctx context.Context, p principal, frozen bool) (any, 
 				if err != nil {
 					return err
 				}
-				if err := s.finishRun(ctx, tx, run, rb, "cancelled", "org frozen by "+p.actor()); err != nil {
+				if err := s.finishRun(ctx, tx, run, rb, "cancelled", "org frozen by "+p.display()); err != nil {
 					return err
 				}
 			}
@@ -913,7 +957,7 @@ func (s *Server) setFrozen(ctx context.Context, p principal, frozen bool) (any, 
 		if frozen {
 			action = "org.freeze"
 		}
-		return tx.Audit(ctx, "api_key", p.actor(), action, "org", p.OrgID, nil)
+		return tx.Audit(ctx, p.actorType(), p.actor(), action, "org", p.OrgID, nil)
 	})
 	return map[string]bool{"frozen": frozen}, err
 }
@@ -922,7 +966,7 @@ func (s *Server) apiAudit(r *http.Request, p principal) (any, error) {
 	out := []map[string]any{}
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
 		var broken sql.NullInt64
-		if err := tx.QueryRow(`SELECT lir_verify_audit_chain()`).Scan(&broken); err != nil {
+		if err := tx.QueryRow(`SELECT nfx_verify_audit_chain()`).Scan(&broken); err != nil {
 			return err
 		}
 		if broken.Valid {

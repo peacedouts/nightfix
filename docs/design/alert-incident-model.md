@@ -1,4 +1,4 @@
-# Lightning IR — Alert-to-Incident Model (Draft v1alpha1)
+# Nightfix — Alert-to-Incident Model (Draft v1alpha1)
 
 Status: draft for discussion. Defines how alerts arrive, how they're deduplicated and routed, how they become incidents, and how auto-remediation runs before anyone is paged. Companion to `runbook-schema.md` and `agent-protocol.md`.
 
@@ -45,7 +45,7 @@ Integration ──► Alert ──(routing rules)──► Service ──(groupi
 | **Generic webhook** | HMAC-SHA256 signature header with a per-integration secret, plus timestamp (5-minute replay window) | `dedup_key` field if present, else configured label hash |
 | **PagerDuty / incident.io inbound** | Their webhook signature schemes | Their incident or alert ID |
 
-Each integration gets a unique URL: `https://ingest.lightning.ir/v1/i/<integration_id>`. The integration ID identifies the org; the credential proves the sender.
+Each integration gets a unique URL: `https://ingest.nightfix.dev/v1/i/<integration_id>`. The integration ID identifies the org; the credential proves the sender.
 
 ### 3.2 The ingest path
 

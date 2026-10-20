@@ -16,10 +16,10 @@ import (
 
 	_ "github.com/lib/pq" // Postgres driver
 
-	"github.com/peacedouts/lightning_ir/migrations"
+	"github.com/peacedouts/nightfix/migrations"
 )
 
-// DB is the application's connection pool. It connects as lir_app, which
+// DB is the application's connection pool. It connects as nfx_app, which
 // does not own any table, so RLS always applies.
 type DB struct {
 	*sql.DB
@@ -111,7 +111,7 @@ func (t *Tx) Audit(ctx context.Context, actorType, actorID, action, resourceType
 	if err != nil {
 		return err
 	}
-	_, err = t.ExecContext(ctx, "SELECT lir_audit($1,$2,$3,$4,$5,$6)", actorType, actorID, action, resourceType, resourceID, js)
+	_, err = t.ExecContext(ctx, "SELECT nfx_audit($1,$2,$3,$4,$5,$6)", actorType, actorID, action, resourceType, resourceID, js)
 	return err
 }
 
@@ -132,8 +132,8 @@ func (t *Tx) NextCounter(ctx context.Context, name string) (int64, error) {
 var identRe = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
 // Migrate applies pending migrations using an administrative connection
-// (one that can create roles). It creates the lir_owner and lir_app roles if
-// needed and sets lir_app's password.
+// (one that can create roles). It creates the nfx_owner and nfx_app roles if
+// needed and sets nfx_app's password.
 func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 	sqldb, err := sql.Open("postgres", adminDSN)
 	if err != nil {
@@ -167,12 +167,12 @@ func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 		// Roles are cluster-wide, so migrators of different databases can race
 		// here; a duplicate is fine.
 		`DO $$ BEGIN
-		   BEGIN CREATE ROLE lir_owner NOLOGIN BYPASSRLS; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END;
-		   BEGIN CREATE ROLE lir_app LOGIN; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END;
+		   BEGIN CREATE ROLE nfx_owner NOLOGIN BYPASSRLS; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END;
+		   BEGIN CREATE ROLE nfx_app LOGIN; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END;
 		 END $$`,
-		"GRANT lir_owner TO " + me,
-		"GRANT USAGE, CREATE ON SCHEMA public TO lir_owner",
-		"GRANT USAGE ON SCHEMA public TO lir_app",
+		"GRANT nfx_owner TO " + me,
+		"GRANT USAGE, CREATE ON SCHEMA public TO nfx_owner",
+		"GRANT USAGE ON SCHEMA public TO nfx_app",
 		`CREATE TABLE IF NOT EXISTS schema_migrations (
 		   name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
 	}
@@ -191,7 +191,7 @@ func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 		}
 	}
 	if appPassword != "" {
-		if _, err := conn.ExecContext(ctx, "ALTER ROLE lir_app PASSWORD "+quoteLiteral(appPassword)); err != nil {
+		if _, err := conn.ExecContext(ctx, "ALTER ROLE nfx_app PASSWORD "+quoteLiteral(appPassword)); err != nil {
 			return err
 		}
 	}

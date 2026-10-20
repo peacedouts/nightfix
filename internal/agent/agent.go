@@ -17,9 +17,9 @@ import (
 
 	"github.com/goccy/go-yaml"
 
-	"github.com/peacedouts/lightning_ir/internal/agentapi"
-	"github.com/peacedouts/lightning_ir/internal/runbook"
-	"github.com/peacedouts/lightning_ir/internal/signing"
+	"github.com/peacedouts/nightfix/internal/agentapi"
+	"github.com/peacedouts/nightfix/internal/runbook"
+	"github.com/peacedouts/nightfix/internal/signing"
 )
 
 // Version is reported to the control plane.
@@ -32,10 +32,16 @@ type AWSCaller interface {
 
 // Config configures an agent.
 type Config struct {
-	Endpoint    string // https://agent.lightning.ir:443
-	CAPEM       []byte // CA to trust for the gateway (and enrollment)
-	EnrollToken string
-	StateDir    string // empty: no persistent disk, re-enroll on restart
+	Endpoint string // https://agent.nightfix.dev:443
+	CAPEM    []byte // CA to trust for the gateway (and enrollment)
+
+	// Enrollment: "iam" (default) proves the agent's AWS role; "token" uses
+	// EnrollToken. OrgID (org_…) is required for iam.
+	EnrollMethod string
+	OrgID        string
+	IAM          IAMSigner
+	EnrollToken  string
+	StateDir     string // empty: no persistent disk, re-enroll on restart
 
 	// RequiredSigners, when set, is the locally pinned list of signers every
 	// runbook bundle must carry. It always wins over the control plane's list.
@@ -100,10 +106,21 @@ func (a *Agent) ID() string {
 func (a *Agent) Run(ctx context.Context) error {
 	id, err := loadIdentity(a.cfg.StateDir)
 	if err != nil {
-		if a.cfg.EnrollToken == "" {
-			return errors.New("not enrolled and no enrollment token provided")
+		switch a.cfg.EnrollMethod {
+		case "token":
+			if a.cfg.EnrollToken == "" {
+				return errors.New("token enrollment needs an enrollment token")
+			}
+			id, err = a.c.enroll(ctx, a.cfg.EnrollToken, Version)
+		case "", "iam":
+			if a.cfg.OrgID == "" || a.cfg.IAM == nil {
+				return errors.New("iam enrollment needs the org id (org_…) and AWS credentials")
+			}
+			id, err = a.c.enrollIAM(ctx, a.cfg.OrgID, a.cfg.IAM, Version)
+		default:
+			return fmt.Errorf("unknown enrollment method %q", a.cfg.EnrollMethod)
 		}
-		if id, err = a.c.enroll(ctx, a.cfg.EnrollToken, Version); err != nil {
+		if err != nil {
 			return err
 		}
 		if err := saveIdentity(a.cfg.StateDir, id); err != nil {

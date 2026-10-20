@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/ids"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/ids"
 )
 
 const maxIngestBody = 256 << 10
@@ -37,7 +37,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var orgID string
-	if err := s.DB.QueryRowContext(ctx, `SELECT org_id FROM lir_route_integration($1)`, integrationID).Scan(&orgID); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT org_id FROM nfx_route_integration($1)`, integrationID).Scan(&orgID); err != nil {
 		http.Error(w, "unknown integration", http.StatusNotFound)
 		return
 	}

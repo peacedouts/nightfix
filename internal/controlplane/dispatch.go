@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/agentapi"
-	"github.com/peacedouts/lightning_ir/internal/db"
-	"github.com/peacedouts/lightning_ir/internal/ids"
-	"github.com/peacedouts/lightning_ir/internal/signing"
+	"github.com/peacedouts/nightfix/internal/agentapi"
+	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/ids"
+	"github.com/peacedouts/nightfix/internal/signing"
 )
 
 // agentIdentity is an authenticated agent (from its mTLS certificate).
@@ -20,17 +20,62 @@ type agentIdentity struct {
 	AgentID string
 }
 
-// Enroll exchanges a single-use or limited-use token and a CSR for a
-// certificate. Labels always come from the enrollment rule, never the agent.
+// Enroll exchanges proof of identity and a CSR for a certificate. Labels
+// always come from the matched enrollment rule, never from the agent.
+//
+//   - iam (default): a SigV4-signed sts:GetCallerIdentity request bound to
+//     the org and a single-use challenge nonce; matched on account + role.
+//   - token: a single- or limited-use token (fallback for non-IAM hosts).
 func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agentapi.EnrollResponse, error) {
-	if req.Method != "token" {
-		return nil, httpError{400, "only token enrollment is available in this build; IAM enrollment is designed (agent-protocol.md §3.1) but not implemented yet"}
-	}
 	var orgID, ruleID string
-	if err := s.DB.QueryRowContext(ctx, `SELECT org_id, rule_id FROM lir_route_enrollment_token($1)`, hashSecret(req.Token)).
-		Scan(&orgID, &ruleID); err != nil {
-		return nil, httpError{401, "invalid or expired enrollment token"}
+	audit := map[string]any{"method": req.Method}
+	switch req.Method {
+	case "iam":
+		if req.Nonce == "" {
+			return nil, httpError{400, "iam enrollment needs a challenge nonce"}
+		}
+		// Consume the nonce first: a request gets one chance, success or not.
+		if err := s.DB.QueryRowContext(ctx, `SELECT org_id FROM nfx_consume_enroll_challenge($1)`, hashSecret(req.Nonce)).
+			Scan(&orgID); err != nil {
+			return nil, httpError{401, "unknown, used or expired enrollment challenge"}
+		}
+		if ids.Encode("org", orgID) != req.OrgID {
+			return nil, httpError{401, "challenge was issued for a different org"}
+		}
+		id, err := s.verifyIAM(ctx, req.OrgID, req.Nonce, req.IAM)
+		if err != nil {
+			return nil, httpError{401, "iam enrollment: " + err.Error()}
+		}
+		audit["arn"], audit["account"] = id.Arn, id.Account
+		denied := false
+		err = s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
+			err := tx.QueryRow(`SELECT id FROM enrollment_rules WHERE method = 'iam' AND aws_account_id = $1 AND role_name = $2
+				AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now()) ORDER BY created_at LIMIT 1`,
+				id.Account, id.RoleName).Scan(&ruleID)
+			if isNoRows(err) {
+				// Returning nil commits the denial to the audit log.
+				denied = true
+				return tx.Audit(ctx, "agent", id.Arn, "agent.enroll_denied", "enrollment", id.Arn,
+					map[string]string{"reason": "no matching rule", "account": id.Account, "role": id.RoleName})
+			}
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		if denied {
+			return nil, httpError{403, fmt.Sprintf("no IAM enrollment rule matches role %s in account %s", id.RoleName, id.Account)}
+		}
+	case "token":
+		if err := s.DB.QueryRowContext(ctx, `SELECT org_id, rule_id FROM nfx_route_enrollment_token($1)`, hashSecret(req.Token)).
+			Scan(&orgID, &ruleID); err != nil {
+			return nil, httpError{401, "invalid or expired enrollment token"}
+		}
+	default:
+		return nil, httpError{400, "method must be iam or token"}
 	}
+	audit["rule"] = ruleID
+
 	var resp agentapi.EnrollResponse
 	err := s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
 		var labels db.JSON[map[string]string]
@@ -38,11 +83,14 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 		if err := tx.QueryRow(`SELECT labels, max_agents FROM enrollment_rules WHERE id = $1 FOR UPDATE`, ruleID).Scan(&labels, &max); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(`SELECT count(*) FROM agents WHERE enrollment_rule_id = $1 AND revoked_at IS NULL`, ruleID).Scan(&active); err != nil {
+		// Agents without persistent disk (Fargate) re-enroll on every start, so
+		// count only agents that are live or just enrolled, not old identities.
+		if err := tx.QueryRow(`SELECT count(*) FROM agents WHERE enrollment_rule_id = $1 AND revoked_at IS NULL
+			AND (last_seen_at > now() - interval '10 minutes' OR created_at > now() - interval '10 minutes')`, ruleID).Scan(&active); err != nil {
 			return err
 		}
 		if active >= max {
-			return httpError{403, fmt.Sprintf("enrollment rule allows at most %d agents", max)}
+			return httpError{403, fmt.Sprintf("enrollment rule allows at most %d live agents", max)}
 		}
 		agentID := ids.NewString()
 		certPEM, serial, exp, err := s.CA.IssueAgentCert([]byte(req.CSRPEM), orgID, agentID)
@@ -59,8 +107,8 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 		}
 		resp = agentapi.EnrollResponse{AgentID: agentID, OrgID: orgID, CertPEM: string(certPEM), CAPEM: string(s.CA.CertPEM),
 			Labels: labels.V, TrustConfig: tc}
-		return tx.Audit(ctx, "agent", agentID, "agent.enroll", "agent", agentID,
-			map[string]any{"rule": ruleID, "labels": labels.V, "method": "token", "cert_serial": serial})
+		audit["labels"], audit["cert_serial"] = labels.V, serial
+		return tx.Audit(ctx, "agent", agentID, "agent.enroll", "agent", agentID, audit)
 	})
 	if err != nil {
 		return nil, err

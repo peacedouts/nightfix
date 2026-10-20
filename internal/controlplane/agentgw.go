@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/peacedouts/lightning_ir/internal/agentapi"
+	"github.com/peacedouts/nightfix/internal/agentapi"
 )
 
 // AgentHandler serves the agent gateway. It must be served with the TLS
@@ -21,6 +21,14 @@ func (s *Server) AgentHandler() http.Handler {
 			return
 		}
 		resp, err := s.Enroll(r.Context(), req)
+		s.reply(w, resp, err)
+	})
+	mux.HandleFunc("POST /agent/v1/enroll/challenge", func(w http.ResponseWriter, r *http.Request) {
+		var req agentapi.ChallengeRequest
+		if !decodeBody(w, r, &req) {
+			return
+		}
+		resp, err := s.Challenge(r.Context(), req)
 		s.reply(w, resp, err)
 	})
 	authed := func(pattern string, fn func(w http.ResponseWriter, r *http.Request, a agentIdentity)) {
@@ -90,7 +98,7 @@ func (s *Server) authenticateAgent(r *http.Request) (agentIdentity, error) {
 	}
 	cert := r.TLS.VerifiedChains[0][0]
 	var a agentIdentity
-	if err := s.DB.QueryRowContext(r.Context(), `SELECT org_id, agent_id FROM lir_route_agent($1)`, SerialHex(cert.SerialNumber)).
+	if err := s.DB.QueryRowContext(r.Context(), `SELECT org_id, agent_id FROM nfx_route_agent($1)`, SerialHex(cert.SerialNumber)).
 		Scan(&a.OrgID, &a.AgentID); err != nil {
 		return a, errors.New("unknown or revoked agent certificate")
 	}

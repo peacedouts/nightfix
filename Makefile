@@ -3,10 +3,10 @@
 build:
 	go build -o bin/ ./cmd/...
 
-# Starts a throwaway local Postgres (port 54329) if LIR_TEST_ADMIN_DSN isn't set.
+# Starts a throwaway local Postgres (port 54329) if NIGHTFIX_TEST_ADMIN_DSN isn't set.
 test:
-	@DSN="$${LIR_TEST_ADMIN_DSN:-$$(scripts/dev-postgres.sh start)}"; \
-	LIR_TEST_ADMIN_DSN="$$DSN" go test ./...
+	@DSN="$${NIGHTFIX_TEST_ADMIN_DSN:-$$(scripts/dev-postgres.sh start)}"; \
+	NIGHTFIX_TEST_ADMIN_DSN="$$DSN" go test ./...
 
 lint:
 	go vet ./...

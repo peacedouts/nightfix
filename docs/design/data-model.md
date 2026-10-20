@@ -1,4 +1,4 @@
-# Lightning IR — Core Data Model & API Surface (Draft v1alpha1)
+# Nightfix — Core Data Model & API Surface (Draft v1alpha1)
 
 Status: draft for discussion. Unifies the tables sketched in `runbook-schema.md`, `agent-protocol.md` and `alert-incident-model.md` into one Postgres model, defines how tenancy, RBAC and audit work, and outlines the v1 REST API.
 
@@ -236,9 +236,9 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 
 | Topic | Convention |
 |---|---|
-| Base | `https://api.lightning.ir/v1` |
-| Auth | Auth0 access token (users) or `Authorization: Bearer lir_<key>` (API keys) |
-| Org | Inferred from the token; API keys belong to one org. Users in several orgs pass `Lightning-Org: org_…` |
+| Base | `https://api.nightfix.dev/v1` |
+| Auth | Auth0 access token (users) or `Authorization: Bearer nfx_<key>` (API keys) |
+| Org | Inferred from the token; API keys belong to one org. Users in several orgs pass `Nightfix-Org: org_…` |
 | Pagination | Cursor-based: `?limit=50&cursor=…` |
 | Idempotency | `Idempotency-Key` header on every `POST`, stored 24h |
 | Concurrency | `ETag` on reads; `If-Match` required on `PATCH`/`PUT` of config objects |
@@ -324,7 +324,7 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `https://ingest.lightning.ir/v1/i/{integration_id}` | Receive alerts; returns `202` |
+| POST | `https://ingest.nightfix.dev/v1/i/{integration_id}` | Receive alerts; returns `202` |
 
 **Audit**
 
@@ -337,18 +337,18 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 
 | Terraform resource | API |
 |---|---|
-| `lightning_team`, `lightning_team_membership` | `/teams` |
-| `lightning_role_binding` | `/role-bindings` |
-| `lightning_api_key` | `/api-keys` |
-| `lightning_enrollment_rule` | `/enrollment-rules` |
-| `lightning_runbook` | `PUT /runbooks/{name}` (YAML or HCL-encoded spec) |
-| `lightning_service` | `/services` |
-| `lightning_routing_rules` | `PUT /routing-rules` (one resource for the ordered set) |
-| `lightning_integration` | `/integrations` |
-| `lightning_escalation_target` | `/services/{id}/escalation-targets` |
-| `lightning_maintenance_window` | `/services/{id}/maintenance-windows` |
+| `nightfix_team`, `nightfix_team_membership` | `/teams` |
+| `nightfix_role_binding` | `/role-bindings` |
+| `nightfix_api_key` | `/api-keys` |
+| `nightfix_enrollment_rule` | `/enrollment-rules` |
+| `nightfix_runbook` | `PUT /runbooks/{name}` (YAML or HCL-encoded spec) |
+| `nightfix_service` | `/services` |
+| `nightfix_routing_rules` | `PUT /routing-rules` (one resource for the ordered set) |
+| `nightfix_integration` | `/integrations` |
+| `nightfix_escalation_target` | `/services/{id}/escalation-targets` |
+| `nightfix_maintenance_window` | `/services/{id}/maintenance-windows` |
 
-Data sources: `lightning_agents`, `lightning_runbook_version`, `lightning_service`.
+Data sources: `nightfix_agents`, `nightfix_runbook_version`, `nightfix_service`.
 
 Not exposed to Terraform on purpose: critical-hold grants (they depend on live track record) and freeze (an emergency action, not configuration).
 
@@ -358,6 +358,6 @@ Not exposed to Terraform on purpose: critical-hold grants (they depend on live t
 
 1. **Routing rules: one ordered set per org, or per integration?** Per org is simpler to reason about; per integration avoids one team's rule shadowing another's.
 2. **Custom roles.** Fixed roles plus scopes should cover v1. When will a customer need a custom role, and is it a premium feature?
-3. **Multi-org users.** How common will consultants or agencies belonging to several orgs be? It affects the `Lightning-Org` header and the UI org switcher.
+3. **Multi-org users.** How common will consultants or agencies belonging to several orgs be? It affects the `Nightfix-Org` header and the UI org switcher.
 4. **Region.** Is v1 US-only (`us-east-1` primary, `us-west-2` for the notification path), with EU data residency later?
 5. **Long-term archival** of alerts, incidents and runs beyond one year: keep forever on paid plans, or archive to S3 after a period?

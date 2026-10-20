@@ -1,0 +1,49 @@
+/* Starlight theme: carries the landing page's palette into the docs. */
+@import '@fontsource/schibsted-grotesk/400.css';
+@import '@fontsource/schibsted-grotesk/600.css';
+@import '@fontsource/schibsted-grotesk/800.css';
+@import '@fontsource/martian-mono/400.css';
+@import './tokens.css';
+
+:root {
+  --sl-font: var(--font-sans);
+  --sl-font-mono: var(--font-log);
+}
+
+/* Dark (default) */
+:root,
+::backdrop {
+  --sl-color-accent-low: #3b2a0c;
+  --sl-color-accent: #f4a52a;
+  --sl-color-accent-high: #fbd9a1;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e9e7f3;
+  --sl-color-gray-2: #c9cae2;
+  --sl-color-gray-3: #a6a8c9;
+  --sl-color-gray-4: #6d7199;
+  --sl-color-gray-5: #333a6b;
+  --sl-color-gray-6: #20254a;
+  --sl-color-black: #161a33;
+}
+
+/* Light */
+:root[data-theme='light'],
+[data-theme='light'] ::backdrop {
+  --sl-color-accent-low: #fde6c2;
+  --sl-color-accent: #9a5a00;
+  --sl-color-accent-high: #4d2c00;
+  --sl-color-white: #161a33;
+  --sl-color-gray-1: #20254a;
+  --sl-color-gray-2: #333a6b;
+  --sl-color-gray-3: #555a87;
+  --sl-color-gray-4: #8a8db0;
+  --sl-color-gray-5: #c9cae2;
+  --sl-color-gray-6: #ecebf6;
+  --sl-color-gray-7: #f6f5fb;
+  --sl-color-black: #ffffff;
+}
+
+.site-title img {
+  height: 1.75rem;
+  width: auto;
+}

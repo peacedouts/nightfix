@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/expr"
+	"github.com/peacedouts/nightfix/internal/expr"
 )
 
 // Issue is one validation finding.

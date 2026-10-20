@@ -1,0 +1,233 @@
+---
+import '@fontsource/schibsted-grotesk/400.css';
+import '@fontsource/schibsted-grotesk/600.css';
+import '@fontsource/schibsted-grotesk/800.css';
+import '@fontsource/martian-mono/400.css';
+import '../styles/tokens.css';
+import '../styles/landing.css';
+import { brand } from '../../brand.mjs';
+
+// The hero replays a real run from the walking-skeleton demo.
+const timeline = [
+  { t: '02:14:03', who: 'CloudWatch', text: 'ecs-unhealthy-checkout is in ALARM: 1 of 2 tasks running' },
+  { t: '02:14:04', who: brand.name, text: 'Incident #412 opened on checkout-api' },
+  { t: '02:14:04', who: brand.name, text: 'Runbook ecs-service-restart matched. Paging held for up to 10 minutes' },
+  { t: '02:14:05', who: 'Agent, your VPC', text: 'DescribeServices: 1 running, 2 desired' },
+  { t: '02:14:06', who: 'Agent, your VPC', text: 'UpdateService: forced a new deployment' },
+  { t: '02:19:40', who: 'Agent, your VPC', text: 'Service is stable: 2 of 2 running' },
+  { t: '02:21:10', who: 'CloudWatch', text: 'ecs-unhealthy-checkout is back to OK' },
+  { t: '02:21:10', who: brand.name, text: 'Resolved by the runbook. Nobody was paged.', done: true },
+];
+
+const steps = [
+  {
+    title: 'An alert arrives',
+    body: 'From CloudWatch, Alertmanager or any webhook. Repeats of the same alarm update one alert, and related alerts group into one incident.',
+  },
+  {
+    title: 'A runbook matches it',
+    body: 'Runbooks are YAML you keep in Git or write in the app. One marked to run automatically gets a short, capped window to fix the problem before anyone is paged.',
+  },
+  {
+    title: 'The agent runs the fix in your account',
+    body: 'One small agent per VPC or cluster, running under your own IAM role. It calls AWS APIs and runs scripts there, and reads secrets from your Secrets Manager.',
+  },
+  {
+    title: brand.name + ' checks that it worked',
+    body: 'An incident only counts as fixed when the run succeeds and the alert clears and stays clear. Anything less pages your on-call, with the full run attached.',
+  },
+];
+
+const security = [
+  {
+    title: 'Outbound only',
+    body: 'The agent connects out over port 443. You open no inbound ports and expose nothing to the internet.',
+  },
+  {
+    title: 'Your role, your secrets',
+    body: 'The agent proves who it is with its IAM role, so there is no long-lived token to leak. Secrets are read inside your VPC and scrubbed from output. We never see them.',
+  },
+  {
+    title: 'Nothing runs unsigned',
+    body: 'Every runbook version is signed, and the agent checks the signature before each step. Add your own signing key from CI, and nothing runs without your approval, even if our side were compromised.',
+  },
+  {
+    title: 'You hold a kill switch',
+    body: 'Freeze automation for your whole org from the app, or set a flag on the agent itself. The local switch overrides us.',
+  },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{brand.name}: {brand.tagline}</title>
+    <meta name="description" content={`${brand.name} matches alerts to runbooks and runs the fix in your own AWS account before anyone is paged.`} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta property="og:title" content={`${brand.name}: ${brand.tagline}`} />
+    <meta name="theme-color" content="#161a33" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="site-header wrap">
+      <a class="wordmark" href="/" aria-label={`${brand.name} home`}>
+        <img src="/favicon.svg" alt="" width="28" height="28" />
+        <span>{brand.name}</span>
+      </a>
+      <nav aria-label="Main">
+        <a href="/docs/">Docs</a>
+        <a href="#security">Security</a>
+        <a class="nav-cta" href="#design-partners">Become a design partner</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero wrap" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <h1 id="hero-title"><span>The runbook ran.</span> <span>You stayed asleep.</span></h1>
+          <p class="lede">
+            {brand.name} matches alerts to your runbooks and runs the fix in your own AWS account before anyone is
+            paged. If the fix doesn't hold, on-call gets paged with everything it tried.
+          </p>
+          <div class="actions">
+            <a class="button" href="#design-partners">Become a design partner</a>
+            <a class="link" href="/docs/how-it-works/">See how it works</a>
+          </div>
+        </div>
+
+        <figure class="incident" aria-labelledby="incident-caption">
+          <figcaption id="incident-caption">
+            <span class="incident-title">Incident #412, checkout-api</span>
+            <span class="incident-when">Tuesday, 2:14 a.m.</span>
+          </figcaption>
+          <ol class="log">
+            {
+              timeline.map((e, i) => (
+                <li class:list={['entry', { done: e.done }]} style={`--i:${i}`}>
+                  <time>{e.t}</time>
+                  <span class="who">{e.who}</span>
+                  <span class="what">{e.text}</span>
+                </li>
+              ))
+            }
+          </ol>
+          <p class="phone" style={`--i:${timeline.length}`}>
+            <span class="phone-dot" aria-hidden="true"></span>
+            On-call phone: no notifications
+          </p>
+        </figure>
+      </section>
+
+      <section class="band" aria-labelledby="how-title">
+        <div class="wrap">
+          <h2 id="how-title">How a fix happens</h2>
+          <ol class="steps">
+            {
+              steps.map((s, i) => (
+                <li>
+                  <span class="step-n" aria-hidden="true">{i + 1}</span>
+                  <h3>{s.title}</h3>
+                  <p>{s.body}</p>
+                </li>
+              ))
+            }
+          </ol>
+        </div>
+      </section>
+
+      <section class="wrap split" aria-labelledby="fail-title">
+        <h2 id="fail-title">When the fix doesn't work, you hear about it</h2>
+        <div class="prose">
+          <p>
+            Automation that hides problems is worse than none. {brand.name} pages your on-call straight away when a
+            run fails or times out, when the agent can't be reached, or when the alert is still firing after the fix.
+          </p>
+          <ul>
+            <li>Critical alerts page at the same moment the fix starts, so you're never in the dark for the big ones.</li>
+            <li>If the same alert gets auto-fixed three times in a day, {brand.name} stops and pages you. The real problem isn't being fixed.</li>
+            <li>When the alert clears, the page in PagerDuty or incident.io resolves itself.</li>
+            <li>Every step, approval and result is in an audit log that can't be edited.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="security" class="band" aria-labelledby="security-title">
+        <div class="wrap">
+          <h2 id="security-title">Your secrets stay in your account</h2>
+          <p class="section-lede">
+            {brand.name} runs code in your infrastructure, so the design starts there. Read the full <a href="/docs/security/">security model</a>.
+          </p>
+          <dl class="pillars">
+            {
+              security.map((s) => (
+                <div>
+                  <dt>{s.title}</dt>
+                  <dd>{s.body}</dd>
+                </div>
+              ))
+            }
+          </dl>
+        </div>
+      </section>
+
+      <section class="wrap split" aria-labelledby="fit-title">
+        <h2 id="fit-title">Built for small teams on AWS</h2>
+        <div class="prose">
+          <p>
+            For engineering teams of 10 to 100 running on ECS, EKS or EC2, where the same few people carry the pager
+            and fix the same few things by hand.
+          </p>
+          <p>
+            It works alongside PagerDuty or incident.io today, so you can try it without changing who gets paged.
+            Pricing is per responder, with viewers free.
+          </p>
+        </div>
+      </section>
+
+      <section id="design-partners" class="band partner" aria-labelledby="partner-title">
+        <div class="wrap split">
+          <div>
+            <h2 id="partner-title">Become a design partner</h2>
+            <p>
+              We're working closely with a small group of teams. You get early access, founder pricing locked for a
+              year, and a direct line to the people building it. We get your real incidents to design against.
+            </p>
+          </div>
+          {
+            brand.formEndpoint ? (
+              <form class="form" method="post" action={brand.formEndpoint}>
+                <label>
+                  Work email
+                  <input name="email" type="email" autocomplete="email" required />
+                </label>
+                <label>
+                  Company
+                  <input name="company" type="text" autocomplete="organization" required />
+                </label>
+                <label>
+                  What do you fix by hand most often?
+                  <textarea name="repeat_fixes" rows="4" placeholder="Restarting a stuck ECS service, clearing a full disk, failing over a database…" />
+                </label>
+                <button class="button" type="submit">Apply to be a design partner</button>
+              </form>
+            ) : (
+              <div class="form">
+                <p>Email us with a line about your team and what you fix by hand most often.</p>
+                <a class="button" href={`mailto:${brand.contactEmail}?subject=Design%20partner`}>{brand.contactEmail}</a>
+              </div>
+            )
+          }
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer wrap">
+      <span>{brand.name}</span>
+      <a href="/docs/">Docs</a>
+      <a href="/docs/security/">Security</a>
+      <a href={`mailto:${brand.contactEmail}`}>Contact</a>
+    </footer>
+  </body>
+</html>

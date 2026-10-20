@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/expr"
+	"github.com/peacedouts/nightfix/internal/expr"
 )
 
 // ResolveParams computes a run's parameters: supplied values first, then

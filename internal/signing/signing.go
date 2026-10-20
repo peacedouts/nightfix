@@ -17,8 +17,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/peacedouts/lightning_ir/internal/canonical"
-	"github.com/peacedouts/lightning_ir/internal/runbook"
+	"github.com/peacedouts/nightfix/internal/canonical"
+	"github.com/peacedouts/nightfix/internal/runbook"
 )
 
 // Key is a named Ed25519 key pair. Private is nil for verify-only keys.

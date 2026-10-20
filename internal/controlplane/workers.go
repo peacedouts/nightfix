@@ -46,12 +46,12 @@ func (s *Server) RunWorkers(ctx context.Context, tick time.Duration) {
 		defer t.Stop()
 		lastPartitions := time.Time{}
 		for {
-			s.DB.ExecContext(ctx, `SELECT lir_mark_stale_agents()`)
+			s.DB.ExecContext(ctx, `SELECT nfx_mark_stale_agents()`)
 			if time.Since(lastPartitions) > time.Hour {
-				if _, err := s.DB.ExecContext(ctx, `SELECT lir_ensure_partitions(3)`); err != nil && ctx.Err() == nil {
+				if _, err := s.DB.ExecContext(ctx, `SELECT nfx_ensure_partitions(3)`); err != nil && ctx.Err() == nil {
 					s.Log.Error("partitions", "err", err)
 				}
-				s.DB.ExecContext(ctx, `SELECT lir_drop_expired_partitions(30, 90)`)
+				s.DB.ExecContext(ctx, `SELECT nfx_drop_expired_partitions(30, 90)`)
 				lastPartitions = time.Now()
 			}
 			select {
