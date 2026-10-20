@@ -84,10 +84,53 @@ spec:
 | Type | What it does |
 |---|---|
 | `note` | Adds context to the incident timeline |
+| `approval` | Pauses the run until the right people approve it |
 | `aws` | Calls an AWS API with the agent's role (ECS, Secrets Manager, SSM, DynamoDB, CloudWatch Logs, KMS) |
 | `wait` | Repeats a read-only AWS call until a condition is true |
 | `shell` | Runs a bash script on the agent |
 
-Planned: `manual` checklists, `approval` gates, `python`, `http`, container tasks, running scripts on EC2 fleets through SSM, and more AWS services such as RDS.
+Planned: `manual` checklists, `python`, `http`, container tasks, running scripts on EC2 fleets through SSM, and more AWS services such as RDS.
+
+## Require a human OK before risky steps
+
+Add an `approval` step in front of anything you want a person to sign off on, such as a restart in production:
+
+```yaml
+    - id: approve
+      name: Approve the restart
+      type: approval
+      count: 1                # approvals needed (default 1)
+      fromRoles: [Admin]      # who may approve (default Responder); higher roles also count
+      excludeRequester: true  # whoever started the run can't approve it
+      expiresAfter: 15m       # default 15m, and never longer than the run timeout
+```
+
+When a run reaches the step, it waits:
+
+- **Approving.** Each approval is checked against the approver's role *and* scope at the moment they approve, so a responder scoped to staging can't approve a production run. Approvals always come from a person; API keys can't approve.
+- **Rejecting.** One rejection from anyone allowed to approve cancels the run, with their reason in the run record.
+- **Expiring.** If not enough people approve in time, the run times out and the steps after the approval never run.
+- **Paging.** If the run was fixing an alert before paging anyone, Nightfix pages on-call right away, because waiting for a human is no reason to keep humans in the dark.
+
+Approve or reject from the **Approve** and **Reject** buttons on the Slack message, or from the API:
+
+```bash
+curl -X POST https://api.nightfix.dev/v1/runs/run_…/steps/approve/approve \
+  -H "Authorization: Bearer $AUTH0_TOKEN" -d '{"comment": "checked the dashboards"}'
+```
+
+Later steps can read who approved as `steps.approve.outputs.approved_by`. Every request, approval, rejection and expiry is in the audit log.
+
+### Set up Slack buttons
+
+1. In your Slack app's settings, turn on **Interactivity** and copy the **Signing Secret** from **Basic Information**.
+2. Register the app with Nightfix (Admin only):
+   ```bash
+   curl -X POST https://api.nightfix.dev/v1/slack-apps -H "Authorization: Bearer $NIGHTFIX_API_KEY" \
+     -d '{"signing_secret": "…", "team_id": "T0123ABC"}'
+   ```
+3. Paste the `interactivity_url` it returns into Slack's **Interactivity → Request URL**.
+
+The first time someone clicks a button, Nightfix replies privately with a one-time code. They link their Slack account by submitting the code while signed in to Nightfix (`POST /v1/me/slack-link`). Nightfix never matches people by Slack profile email. Slack approvals also need a Nightfix sign-in within the last 7 days, so team changes from your identity provider are never more than a week out of date.
 
 Expressions such as `match`, `until` and `${{ }}` use [CEL](https://cel.dev), a small, safe expression language.

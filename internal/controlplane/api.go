@@ -62,6 +62,8 @@ func (s *Server) APIHandler() http.Handler {
 	route("PUT /v1/runbooks/{name}", "responder*", s.apiPublishRunbook)
 	route("GET /v1/runbooks/{name}", "viewer", s.apiGetRunbook)
 	route("POST /v1/runs", "responder*", s.apiStartRun)
+	s.approvalRoutes(route)
+	s.slackRoutes(route, mux)
 	route("GET /v1/runs/{id}", "viewer", s.apiGetRun)
 	route("GET /v1/incidents", "viewer", s.apiListIncidents)
 	route("GET /v1/incidents/{number}", "viewer", s.apiGetIncident)
@@ -729,9 +731,13 @@ func (s *Server) apiGetRun(r *http.Request, p principal) (any, error) {
 		for i, aid := range attemptIDs {
 			steps[i]["output"] = s.attemptOutput(tx, aid)
 		}
+		approvals, err := s.runApprovals(tx, id)
+		if err != nil {
+			return err
+		}
 		out = map[string]any{"id": ids.Encode("run", id), "runbook": run.RunbookName, "digest": run.Digest,
 			"status": run.Status, "params": run.Params, "error": run.Error.String, "verified": verified.Bool,
-			"started_at": started, "finished_at": finished.Time, "attempts": steps}
+			"started_at": started, "finished_at": finished.Time, "attempts": steps, "approvals": approvals}
 		return nil
 	})
 	return out, err
@@ -926,7 +932,7 @@ func (s *Server) setFrozen(ctx context.Context, p principal, frozen bool) (any, 
 				return err
 			}
 			// Stop everything in flight. Agents also see Frozen on their next poll.
-			rows, err := tx.Query(`SELECT id FROM runbook_runs WHERE status = 'running'`)
+			rows, err := tx.Query(`SELECT id FROM runbook_runs WHERE status IN ('running','awaiting_approval')`)
 			if err != nil {
 				return err
 			}

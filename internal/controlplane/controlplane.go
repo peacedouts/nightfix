@@ -25,6 +25,15 @@ import (
 // Config holds runtime settings.
 type Config struct {
 	PublicIngestURL string // base URL customers point integrations at
+	PublicAPIURL    string // base URL of the API, for the Slack interactivity URL
+	// SlackResponseURLPrefixes, if set, are extra allowed Slack response_url
+	// prefixes. For local development only; production accepts only
+	// https://hooks.slack.com/.
+	SlackResponseURLPrefixes []string
+	// SlackMaxLoginAge is how recently a person must have signed in to
+	// Nightfix for their Slack clicks to count. Team membership from IdP
+	// groups is refreshed at sign-in, so this bounds how stale it can be.
+	SlackMaxLoginAge time.Duration
 	// SNSCertURLPrefixes, if set, are extra allowed SigningCertURL prefixes.
 	// For local development only; production accepts only sns.*.amazonaws.com.
 	SNSCertURLPrefixes []string
@@ -47,6 +56,9 @@ func (c *Config) defaults() {
 	}
 	if c.PollWait == 0 {
 		c.PollWait = 20 * time.Second
+	}
+	if c.SlackMaxLoginAge == 0 {
+		c.SlackMaxLoginAge = 7 * 24 * time.Hour
 	}
 	if c.HTTPClient == nil {
 		c.HTTPClient = &http.Client{Timeout: 10 * time.Second}

@@ -24,6 +24,7 @@ import (
 	"github.com/peacedouts/nightfix/internal/auth0"
 	"github.com/peacedouts/nightfix/internal/auth0/auth0test"
 	"github.com/peacedouts/nightfix/internal/controlplane"
+	"github.com/peacedouts/nightfix/internal/db"
 	"github.com/peacedouts/nightfix/internal/devstub"
 	"github.com/peacedouts/nightfix/internal/ids"
 	"github.com/peacedouts/nightfix/internal/signing"
@@ -33,17 +34,20 @@ import (
 const topic = "arn:aws:sns:us-east-1:123456789012:nightfix-alarms"
 
 type env struct {
-	t      *testing.T
-	ctx    context.Context
-	api    string
-	key    string
-	stub   *devstub.Stub
-	ingest string
-	orgID  string // org_…
-	gwURL  string
-	caPEM  []byte
-	auth0  *auth0test.Issuer
-	aws    *awscall.Client
+	t       *testing.T
+	ctx     context.Context
+	api     string
+	key     string
+	stub    *devstub.Stub
+	ingest  string
+	orgID   string // org_…
+	gwURL   string
+	caPEM   []byte
+	auth0   *auth0test.Issuer
+	aws     *awscall.Client
+	db      *db.DB
+	rawOrg  string // the org's UUID, for direct database access in tests
+	stubURL string
 }
 
 const (
@@ -76,10 +80,11 @@ func setup(t *testing.T, runbookYAML string) *env {
 	ingestSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { srv.IngestHandler().ServeHTTP(w, r) }))
 	t.Cleanup(ingestSrv.Close)
 	srv = controlplane.New(pool, sealer, ca, controlplane.Config{
-		PublicIngestURL:    ingestSrv.URL,
-		SNSCertURLPrefixes: []string{stubSrv.URL + "/sns/"},
-		PollWait:           2 * time.Second,
-		STSEndpoint:        stubSrv.URL + "/sts/",
+		PublicIngestURL:          ingestSrv.URL,
+		SNSCertURLPrefixes:       []string{stubSrv.URL + "/sns/"},
+		PollWait:                 2 * time.Second,
+		STSEndpoint:              stubSrv.URL + "/sts/",
+		SlackResponseURLPrefixes: []string{stubSrv.URL + "/slack/response/"},
 		Auth0: controlplane.Auth0Config{Verifier: &auth0.Verifier{
 			Issuer: idp.Issuer, Audience: idp.Audience, JWKSURL: idp.Srv.URL}},
 	}, log)
@@ -100,7 +105,7 @@ func setup(t *testing.T, runbookYAML string) *env {
 		t.Fatal(err)
 	}
 	e := &env{t: t, ctx: ctx, api: apiSrv.URL, key: org.APIKey, stub: stub, orgID: ids.Encode("org", org.OrgID),
-		gwURL: gw.URL, caPEM: ca.CertPEM, auth0: idp}
+		gwURL: gw.URL, caPEM: ca.CertPEM, auth0: idp, db: pool, rawOrg: org.OrgID, stubURL: stubSrv.URL}
 
 	e.call("POST", "/v1/services", map[string]any{"name": "checkout-api", "max_hold": "1m", "verification_window": "20s"}, nil)
 	e.call("POST", "/v1/services/checkout-api/escalation-targets", map[string]any{"type": "slack", "url": stubSrv.URL + "/slack"}, nil)

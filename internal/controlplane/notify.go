@@ -74,6 +74,9 @@ func (s *Server) DeliverNotifications(ctx context.Context) (int, error) {
 func (s *Server) send(ctx context.Context, typ, kind, secret string, cfg map[string]string, p map[string]any) error {
 	switch typ {
 	case "slack":
+		if kind == "approval" {
+			return s.postJSON(ctx, secret, slackApprovalMessage(p))
+		}
 		return s.postJSON(ctx, secret, map[string]any{"text": slackText(kind, p)})
 	case "pagerduty":
 		url := cfg["events_url"]

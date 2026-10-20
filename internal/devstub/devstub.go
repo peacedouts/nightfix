@@ -37,6 +37,8 @@ type Stub struct {
 	services map[string]*ecsService
 	Calls    []string // "ecs:DescribeServices", …
 	Slack    []string
+	SlackRaw []map[string]any // full message bodies, including buttons
+	Replies  []string         // ephemeral replies posted to response URLs
 	PD       []map[string]any
 	healIn   time.Duration
 	heal     bool
@@ -87,6 +89,13 @@ func (s *Stub) Snapshot() (calls, slack []string, pd []map[string]any) {
 	return append([]string(nil), s.Calls...), append([]string(nil), s.Slack...), append([]map[string]any(nil), s.PD...)
 }
 
+// SlackState returns copies of full Slack messages and replies to clickers.
+func (s *Stub) SlackState() (raw []map[string]any, replies []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]map[string]any(nil), s.SlackRaw...), append([]string(nil), s.Replies...)
+}
+
 // Handler serves every stub endpoint.
 func (s *Stub) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -96,14 +105,29 @@ func (s *Stub) Handler() http.Handler {
 	mux.HandleFunc("GET /sns/cert.pem", func(w http.ResponseWriter, _ *http.Request) { w.Write(s.snsCert) })
 	mux.HandleFunc("GET /sns/subscribe", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("<ConfirmSubscriptionResponse/>")) })
 	mux.HandleFunc("POST /slack", func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		json.NewDecoder(r.Body).Decode(&m)
+		text := fmt.Sprint(m["text"])
+		s.mu.Lock()
+		s.Slack = append(s.Slack, text)
+		s.SlackRaw = append(s.SlackRaw, m)
+		s.mu.Unlock()
+		if _, ok := m["blocks"]; ok && strings.Contains(fmt.Sprint(m["blocks"]), "nfx_approve") {
+			text += "  [Approve] [Reject]"
+		}
+		fmt.Printf("[slack] %s\n", text)
+		w.Write([]byte("ok"))
+	})
+	// Slack's response_url for interactive messages: replies to the clicker.
+	mux.HandleFunc("POST /slack/response/", func(w http.ResponseWriter, r *http.Request) {
 		var m struct {
 			Text string `json:"text"`
 		}
 		json.NewDecoder(r.Body).Decode(&m)
 		s.mu.Lock()
-		s.Slack = append(s.Slack, m.Text)
+		s.Replies = append(s.Replies, m.Text)
 		s.mu.Unlock()
-		fmt.Printf("[slack] %s\n", m.Text)
+		fmt.Printf("[slack reply to clicker] %s\n", m.Text)
 		w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("POST /pagerduty", func(w http.ResponseWriter, r *http.Request) {

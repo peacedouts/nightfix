@@ -167,7 +167,10 @@ func (s *Server) advance(ctx context.Context, tx *db.Tx, runID string) error {
 			}
 		}
 		if step.RunsOnControlPlane() {
-			// note is the only control-plane type this build executes.
+			if step.Type == "approval" {
+				return s.openGate(ctx, tx, run, rb, idx, step)
+			}
+			// note: posted to the incident timeline.
 			if run.IncidentID.Valid && step.Markdown != "" {
 				if err := s.timeline(tx, run.IncidentID.String, "run.note", "runbook", run.RunbookName, step.Markdown,
 					map[string]any{"step": step.ID}); err != nil {
@@ -222,6 +225,10 @@ func (s *Server) finishRun(ctx context.Context, tx *db.Tx, run runRow, rb *runbo
 	// Anything still queued or in flight is cancelled; agents learn on poll.
 	if _, err := tx.Exec(`UPDATE step_attempts SET state = 'cancelled', finished_at = now()
 		WHERE run_id = $1 AND state IN ('queued','dispatched','running')`, run.ID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE approval_gates SET status = 'cancelled', decided_at = now()
+		WHERE run_id = $1 AND status = 'pending'`, run.ID); err != nil {
 		return err
 	}
 	if err := tx.Audit(ctx, "system", "control-plane", "run.finish", "run", run.ID,

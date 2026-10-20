@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/peacedouts/nightfix/internal/auth0"
 	"github.com/peacedouts/nightfix/internal/db"
@@ -258,39 +259,65 @@ func (s *Server) authUser(ctx context.Context, tok string) (principal, error) {
 		if err := s.syncIdPTeams(ctx, tx, p.UserID, groups); err != nil {
 			return err
 		}
-		rows, err := tx.Query(`SELECT t.id, t.slug FROM team_members m JOIN teams t ON t.id = m.team_id
-			WHERE m.user_id = $1 AND t.archived_at IS NULL ORDER BY t.slug`, p.UserID)
-		if err != nil {
-			return err
-		}
-		type team struct{ id, slug string }
-		var teams []team
-		for rows.Next() {
-			var t team
-			rows.Scan(&t.id, &t.slug)
-			teams = append(teams, t)
-		}
-		rows.Close()
-		own, err := s.bindingsFor(tx, "user", p.UserID, "user")
-		if err != nil {
-			return err
-		}
-		p.Bindings = own
-		for _, t := range teams {
-			p.Teams = append(p.Teams, t.slug)
-			tb, err := s.bindingsFor(tx, "team", t.id, "team:"+t.slug)
-			if err != nil {
-				return err
-			}
-			p.Bindings = append(p.Bindings, tb...)
-		}
-		if len(p.Bindings) == 0 {
-			// Org members without a binding are viewers (free seats).
-			p.Bindings = []binding{{Role: "viewer", Source: "default"}}
-		}
-		return nil
+		return s.loadUserBindings(tx, &p)
 	})
 	return p, err
+}
+
+// loadUserBindings fills in a user's teams and the bindings that reach them.
+func (s *Server) loadUserBindings(tx *db.Tx, p *principal) error {
+	rows, err := tx.Query(`SELECT t.id, t.slug FROM team_members m JOIN teams t ON t.id = m.team_id
+		WHERE m.user_id = $1 AND t.archived_at IS NULL ORDER BY t.slug`, p.UserID)
+	if err != nil {
+		return err
+	}
+	type team struct{ id, slug string }
+	var teams []team
+	for rows.Next() {
+		var t team
+		rows.Scan(&t.id, &t.slug)
+		teams = append(teams, t)
+	}
+	rows.Close()
+	own, err := s.bindingsFor(tx, "user", p.UserID, "user")
+	if err != nil {
+		return err
+	}
+	p.Bindings, p.Teams = own, nil
+	for _, t := range teams {
+		p.Teams = append(p.Teams, t.slug)
+		tb, err := s.bindingsFor(tx, "team", t.id, "team:"+t.slug)
+		if err != nil {
+			return err
+		}
+		p.Bindings = append(p.Bindings, tb...)
+	}
+	if len(p.Bindings) == 0 {
+		// Org members without a binding are viewers (free seats).
+		p.Bindings = []binding{{Role: "viewer", Source: "default"}}
+	}
+	return nil
+}
+
+// memberPrincipal builds the principal for an existing, active org member
+// without a token (a linked Slack user). Team membership is as of the
+// member's last login, when IdP groups were last synced.
+func (s *Server) memberPrincipal(tx *db.Tx, userID string) (principal, error) {
+	p := principal{Kind: "user", OrgID: tx.OrgID, UserID: userID}
+	var status string
+	var lastLogin sql.NullTime
+	err := tx.QueryRow(`SELECT email, status, last_login_at FROM nfx_org_users() WHERE id = $1`, userID).Scan(&p.Email, &status, &lastLogin)
+	if isNoRows(err) || (err == nil && status != "active") {
+		return p, httpError{http.StatusForbidden, "your Nightfix account is no longer a member of this org"}
+	}
+	if err != nil {
+		return p, err
+	}
+	if !lastLogin.Valid || time.Since(lastLogin.Time) > s.Cfg.SlackMaxLoginAge {
+		return p, httpError{http.StatusForbidden, fmt.Sprintf(
+			"you haven't signed in to Nightfix in the last %s; sign in once to refresh your access, then click again", roundDur(s.Cfg.SlackMaxLoginAge))}
+	}
+	return p, s.loadUserBindings(tx, &p)
 }
 
 // syncIdPTeams makes the user's idp-sourced team memberships match the
