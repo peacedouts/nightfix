@@ -1,0 +1,4 @@
+/bin/
+/.state/
+*.test
+coverage.out
