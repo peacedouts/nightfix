@@ -1,0 +1,11 @@
+// Deploy config for Cloudflare Workers (static assets only, no server code).
+// Workers Builds runs `npm run build` and then `npx wrangler deploy` from this folder.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nightfix",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page"
+  }
+}
