@@ -4,7 +4,7 @@ import "testing"
 
 func TestTransform(t *testing.T) {
 	cases := map[string]string{
-		`{"b":2,"a":1}`:                       `{"a":1,"b":2}`,
+		`{"b":2,"a":1}`:                        `{"a":1,"b":2}`,
 		`{ "z" : [ 1 , 2.50, -0 ] , "y":null}`: `{"y":null,"z":[1,2.5,0]}`,
 		`{"s":"tab\there \u00e9 \u2028"}`:      "{\"s\":\"tab\\there é \u2028\"}",
 		`{"n":1e21,"m":1e-7,"k":123456789012}`: `{"k":123456789012,"m":1e-7,"n":1e+21}`,

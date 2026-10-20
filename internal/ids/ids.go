@@ -16,9 +16,9 @@ import (
 type UUID [16]byte
 
 var (
-	mu       sync.Mutex
-	lastMs   uint64
-	lastSeq  uint16
+	mu      sync.Mutex
+	lastMs  uint64
+	lastSeq uint16
 )
 
 // New returns a UUIDv7: 48-bit Unix milliseconds, then random bits. Within a
