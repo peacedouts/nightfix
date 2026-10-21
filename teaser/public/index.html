@@ -39,22 +39,11 @@
   header { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; padding: 28px 0; }
   .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text); }
   .brand span { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
-  .pill { font-family: var(--mono); font-size: 14px; padding: 12px 18px; min-height: 44px; display: inline-flex; align-items: center; border: 1px solid var(--edge); border-radius: 999px; text-decoration: none; }
 
   main { flex-grow: 1; display: flex; flex-direction: column; justify-content: center; gap: 28px; padding: 72px 0 96px; max-width: 640px; }
   .eyebrow { margin: 0; font-family: var(--mono); font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); }
   h1 { margin: 0; font-size: clamp(48px, 7vw, 96px); line-height: 0.98; font-weight: 700; letter-spacing: -0.035em; }
   .lede { margin: 0; max-width: 520px; font-size: 20px; line-height: 1.5; color: var(--muted); }
-
-  form { display: flex; flex-direction: column; gap: 10px; max-width: 520px; margin-top: 8px; }
-  label { font-family: var(--mono); font-size: 13px; color: var(--muted); }
-  .row { display: flex; flex-wrap: wrap; gap: 10px; }
-  input[type=email] { flex: 1 1 260px; min-width: 0; min-height: 52px; padding: 0 18px; background: var(--panel); border: 1px solid var(--edge); border-radius: 12px; color: var(--text); font-family: var(--mono); font-size: 15px; }
-  input[type=email]::placeholder { color: var(--dim); }
-  button { flex: 0 0 auto; min-height: 52px; padding: 0 24px; background: var(--accent); color: var(--ground); border: 0; border-radius: 12px; font-family: var(--sans); font-size: 17px; font-weight: 700; cursor: pointer; }
-  button:hover { filter: brightness(1.06); }
-  .fine { margin: 0; font-size: 14px; color: var(--dim); }
-  .hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
 
   footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 28px 0; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 13px; color: var(--dim); }
 </style>
@@ -66,28 +55,12 @@
       <img src="/favicon.svg" width="28" height="28" alt="">
       <span>nightfix</span>
     </a>
-    <a class="pill" href="#join">Early access</a>
   </header>
 
   <main>
     <p class="eyebrow">Coming soon</p>
     <h1>Quieter nights<br>are coming.</h1>
     <p class="lede">We're building something new, quietly. A handful of early spots will open soon.</p>
-
-    <!--
-      Form backend: set data-endpoint to a Formspree / Tally / Basin URL that
-      accepts a normal HTML POST. While it's empty, the button opens an email
-      to hello@nightfix.dev instead, so nothing is ever silently dropped.
-    -->
-    <form id="join" method="post" data-endpoint="" data-fallback="hello@nightfix.dev">
-      <label for="email">Work email</label>
-      <div class="row">
-        <input id="email" name="email" type="email" placeholder="you@company.com" autocomplete="email" required>
-        <button type="submit">Get early access</button>
-      </div>
-      <div class="hp" aria-hidden="true"><label for="website">Leave this empty</label><input id="website" name="_gotcha" type="text" tabindex="-1" autocomplete="off"></div>
-      <p class="fine" id="status" role="status">No spam. One email when there's something to see.</p>
-    </form>
   </main>
 
   <footer>
@@ -95,20 +68,5 @@
   </footer>
 </div>
 
-<script>
-  (function () {
-    var form = document.getElementById('join');
-    var endpoint = form.getAttribute('data-endpoint');
-    if (endpoint) { form.action = endpoint; return; }
-    form.addEventListener('submit', function (e) {
-      e.preventDefault();
-      var email = document.getElementById('email').value;
-      var to = form.getAttribute('data-fallback');
-      window.location.href = 'mailto:' + to +
-        '?subject=' + encodeURIComponent('Nightfix early access') +
-        '&body=' + encodeURIComponent('Please add me to the list: ' + email);
-    });
-  })();
-</script>
 </body>
 </html>
