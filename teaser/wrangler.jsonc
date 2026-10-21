@@ -1,0 +1,11 @@
+// The pre-launch teaser: a static page with nothing about how Nightfix works.
+// Deployed as its own Worker so the full site in ../website stays private until launch.
+// No build step: Workers Builds (or `npx wrangler deploy` from this folder) uploads ./public as-is.
+{
+  "name": "nightfix-teaser",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "404-page"
+  }
+}
