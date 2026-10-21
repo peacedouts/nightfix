@@ -45,18 +45,21 @@ org ─┬─ org_members ─ users (global, Auth0 identity)
      │
      ├─ signing_keys, org_trust_config
      ├─ enrollment_rules ─ agents
+     ├─ enrollment_challenges
      │
      ├─ runbooks ─ runbook_versions ─ runbook_signatures
      │      └─ runbook_triggers (denormalized for matching)
      ├─ runbook_runs ─ step_attempts ─ step_output_chunks
-     │      └─ approvals
+     │      └─ approval_gates ─ approvals
      ├─ critical_hold_grants
      │
      ├─ integrations ─ alert_events
      ├─ services ─ routing_rules, maintenance_windows, escalation_targets
      ├─ alerts ─ incident_alerts ─ incidents ─ incident_timeline
+     │                                  └─ notifications (outbox)
      │
-     ├─ slack_installations
+     ├─ slack_apps, slack_user_links, slack_link_codes
+     ├─ approval_channels
      └─ audit_events
 ```
 
@@ -86,6 +89,7 @@ Columns are the important ones, not exhaustive. Every tenant table also has `org
 | `signing_keys` | `key_id`, `owner` (`control_plane` \| `customer`), `kms_key_arn`, `public_key`, `state` (`active` \| `retiring` \| `retired`), `rotated_from` | Customer keys store only the public key |
 | `org_trust_config` | `org_id`, `required_signers` (key_id[]), `version`, `signature` | Signed by the current control-plane key; agents may pin their own list locally |
 | `enrollment_rules` | `id`, `method` (`iam` \| `token`), `aws_account_id`, `role_arn`, `token_hash`, `labels`, `max_agents`, `expires_at` | Labels always come from the rule |
+| `enrollment_challenges` | `nonce_hash`, `org_id`, `expires_at` | Single-use nonces for IAM enrollment; bound into the signed STS request so it can't be replayed (built) |
 | `agents` | `id`, `enrollment_rule_id`, `labels`, `status` (`online` \| `offline` \| `revoked`), `version`, `capabilities`, `slots`, `allowlist_mode`, `cert_serial`, `cert_expires_at`, `last_seen_at`, `frozen_local` | `frozen_local` is reported by the agent, not set by us |
 
 ### 4.3 Runbooks and runs
@@ -99,7 +103,8 @@ Columns are the important ones, not exhaustive. Every tenant table also has `org
 | `critical_hold_grants` | `id`, `runbook_id`, `service_id`, `granted_by`, `granted_at`, `track_record_snapshot`, `last_verified_run_at`, `revoked_at`, `revoked_reason` | One active grant per (runbook, service) |
 | `runbook_runs` | `id`, `runbook_version_id`, `digest`, `incident_id`, `trigger_type`, `mode`, `requested_by_type` (`user` \| `api_key` \| `trigger`), `requested_by_id`, `params`, `status`, `before_paging`, `held_critical`, `verified`, `started_at`, `finished_at` | `params` never contains secret values |
 | `step_attempts` | `id`, `run_id`, `step_id`, `attempt_number`, `state`, `agent_id`, `lease_expires_at`, `exit_code`, `outputs`, `error`, `started_at`, `finished_at` | The agent work queue (`SKIP LOCKED`) |
-| `approvals` | `id`, `run_id`, `step_id`, `approver_id`, `decision` (`approved` \| `rejected`), `comment`, `decided_at`, `expires_at` | DB check: approver ≠ requester when the step sets `excludeRequester` |
+| `approval_gates` | `id`, `run_id`, `step_index`, `step_id`, `required_count` (1–10), `from_roles`, `exclude_requester`, `status` (`pending` \| `approved` \| `rejected` \| `expired` \| `cancelled`), `requested_at`, `expires_at`, `decided_at` | One per approval step per run (built; semantics in `runbook-schema.md` §9) |
+| `approvals` | `id`, `run_id`, `step_id`, `approver_id`, `decision` (`approved` \| `rejected`), `comment`, `decided_at`, `expires_at` | One decision per person per gate. DB trigger: approver ≠ requester when the gate sets `exclude_requester` |
 | `step_output_chunks` | `attempt_id`, `seq`, `stream`, `data`, `received_at` | **Partitioned by day**, 90-day default retention; 1 MiB cap per attempt |
 
 **Trigger-to-service links (decided Oct 20, 2026):** runbook triggers carry an optional `services:` list, required for `auto` triggers. `runbook_triggers.services` is indexed (GIN) so the control plane can find a service's triggers in one query when an incident opens.
@@ -118,7 +123,11 @@ Columns are the important ones, not exhaustive. Every tenant table also has `org
 | `incidents` | `id`, `number`, `service_id`, `group_key`, `status`, `severity`, `title`, `opened_at`, `ack_at`, `ack_by`, `resolved_at`, `resolution`, `hold_until`, `upstream_refs` | `upstream_refs` stores PagerDuty / incident.io IDs for auto-resolve |
 | `incident_alerts` | `incident_id`, `alert_id`, `attached_at`, `detached_at` | Join table so an alert's history across incidents is kept |
 | `incident_timeline` | `id`, `incident_id`, `at`, `type`, `actor_type`, `actor_id`, `data` | Append-only |
-| `slack_installations` | `id`, `slack_team_id`, `bot_token` (encrypted), `installed_by` | |
+| `notifications` | `id`, `incident_id`, `target_id`, `kind` (`page` \| `resolve` \| `update`), `payload`, `status` (`pending` \| `sent` \| `failed`), `attempts`, `next_attempt_at`, `last_error`, `sent_at` | Outbox for upstream pages and Slack posts, retried with backoff (built) |
+| `slack_apps` | `id`, `team_id` (Slack workspace; requests from others are refused), `signing_secret` (sealed), `archived_at` | The org's Slack app, used to verify button clicks and slash commands (built) |
+| `slack_user_links` | `slack_team_id`, `slack_user_id`, `user_id`, `linked_at` | Links a Slack user to a Nightfix member; created only by a one-time code (built) |
+| `slack_link_codes` | `code_hash`, `user_id`, `expires_at` | One-time codes Nightfix issues to a signed-in user for `/nightfix link <code>` (built) |
+| `approval_channels` | `id`, `team_id` (null = org default), `type` (`slack`), `credential` (sealed webhook URL), `created_by` | Where approval requests go for runs outside an incident (built) |
 
 **Concurrency-critical indexes:**
 
@@ -258,6 +267,8 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 | GET, POST | `/teams` | List / create teams |
 | GET, PATCH, DELETE | `/teams/{id}` | Read / update / archive |
 | PUT, DELETE | `/teams/{id}/members/{user_id}` | Manage manual membership |
+| PUT | `/org/auth0` | Connect the org's Auth0 Organization (built) |
+| POST | `/me/slack-link-code` | Issue a one-time code to link the caller's Slack user (built) |
 | GET, POST | `/role-bindings` | List / create bindings |
 | DELETE | `/role-bindings/{id}` | Remove |
 | GET, POST | `/api-keys` | List / create (secret returned once) |
@@ -297,6 +308,8 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 | GET | `/runs/{id}/steps/{step_id}/output` | Output; supports `Accept: text/event-stream` for live streaming |
 | POST | `/runs/{id}/cancel` | Cancel |
 | POST | `/runs/{id}/steps/{step_id}/approve`, `/reject` | Approval decisions |
+| GET | `/approvals` | Pending approvals the caller can decide (built) |
+| GET, PUT | `/approval-channels` | Org-default and per-team approval channels (built) |
 | POST | `/runs/{id}/steps/{step_id}/confirm` | Complete a `manual` checklist step |
 
 **Alerts and incidents**
@@ -311,6 +324,8 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 | GET, POST | `/services/{id}/maintenance-windows` | List / create |
 | DELETE | `/maintenance-windows/{id}` | Remove |
 | GET, POST | `/services/{id}/escalation-targets` | List / configure upstream pager or Slack |
+| POST | `/slack-apps` | Register the org's Slack app (signing secret); returns the interactivity and command URLs (built) |
+| POST | `/slack/interactions/{id}`, `/slack/commands/{id}` | Called by Slack; authenticated by Slack's request signature, not a token (built) |
 | GET | `/alerts` | List (filters: status, service, severity) |
 | GET | `/alerts/{id}` | Detail with recent events |
 | GET | `/incidents` | List |

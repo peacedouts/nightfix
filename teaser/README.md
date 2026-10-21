@@ -6,7 +6,7 @@ Plain static files, no build step.
 
 ```
 teaser/
-├── wrangler.jsonc        Worker config (static assets only)
+├── wrangler.jsonc        optional standalone Worker config (not used in production)
 └── public/
     ├── index.html        the page
     ├── og.png            1200×630 link preview image
@@ -21,13 +21,20 @@ teaser/
 ## Preview locally
 
 ```bash
-cd teaser
-npx wrangler dev          # http://localhost:8787
+npx wrangler dev          # from the repo root; http://localhost:8787
 ```
 
 ## Deploy
 
-From this folder: `npx wrangler login`, then `npx wrangler deploy`. Or connect the repo in Cloudflare with **Root directory** set to `teaser` and an empty build command. Then attach `nightfix.dev` under the Worker's **Settings → Domains & Routes**.
+Production is the `nightfix` Cloudflare Worker, defined by the **root** `wrangler.jsonc`, which serves `teaser/public`. Workers Builds deploys it on every push to `main` (root directory: repo root, no build command). `nightfix.dev` is attached under the Worker's **Settings → Domains & Routes**.
+
+Preview URLs are off (`preview_urls: false`), so builds of other branches show as failed in GitHub checks. That's expected; only `main` deploys.
+
+After changing a file at a fixed path (such as `security.txt`), purge it from Cloudflare's cache if the old version keeps appearing.
+
+## Yearly upkeep
+
+`security.txt` must have an `Expires` date in the future (RFC 9116 recommends less than a year ahead). CI fails 30 days before it lapses; bump the date then.
 
 ## At launch
 
