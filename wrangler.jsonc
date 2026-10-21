@@ -1,16 +1,18 @@
-// Deploy config for the website as a Cloudflare Worker (static assets only).
-// Used when Workers Builds runs from the repository root; website/wrangler.jsonc
-// is used when the root directory is set to "website". Both deploy the same site.
+// Deploy config used when Workers Builds runs from the repository root.
+//
+// PRE-LAUNCH: this serves the teaser (teaser/public) so a build from the repo
+// root can never publish the full site or docs. The full site's own config is
+// website/wrangler.jsonc (root directory "website").
+//
+// AT LAUNCH: restore the build below and point assets back at ./website/dist.
+//   "build": { "command": "npm ci && npm run build", "cwd": "website" },
+//   "assets": { "directory": "./website/dist", "not_found_handling": "404-page" }
 {
-  "$schema": "website/node_modules/wrangler/config-schema.json",
   "name": "nightfix",
   "compatibility_date": "2026-10-01",
-  "build": {
-    "command": "npm ci && npm run build",
-    "cwd": "website"
-  },
+  "preview_urls": false,
   "assets": {
-    "directory": "./website/dist",
+    "directory": "./teaser/public",
     "not_found_handling": "404-page"
   }
 }
