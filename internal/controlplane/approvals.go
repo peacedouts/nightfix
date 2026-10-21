@@ -93,10 +93,6 @@ func (s *Server) openGate(ctx context.Context, tx *db.Tx, run runRow, rb *runboo
 		"exclude_requester": st.ExcludeRequester, "expires_at": expires}); err != nil {
 		return err
 	}
-	if !run.IncidentID.Valid {
-		return nil // runs outside an incident are approved through the API (GET /v1/approvals lists them)
-	}
-
 	need := fmt.Sprintf("%d approval", st.ApprovalCount())
 	if st.ApprovalCount() > 1 {
 		need += "s"
@@ -106,32 +102,86 @@ func (s *Server) openGate(ctx context.Context, tx *db.Tx, run runRow, rb *runboo
 	if st.ExcludeRequester {
 		msg += " (not from whoever started the run)"
 	}
-	if err := s.timeline(tx, run.IncidentID.String, "approval.requested", "runbook", run.RunbookName, msg,
-		map[string]any{"run_id": ids.Encode("run", run.ID), "step": st.ID, "gate": ids.Encode("apr", gateID)}); err != nil {
-		return err
-	}
-	inc, err := s.loadIncident(tx, run.IncidentID.String, true)
-	if err != nil {
-		return err
-	}
-	if inc.Status == "remediating" && inc.RemediationRunID.Valid && inc.RemediationRunID.String == run.ID {
-		if err := s.page(ctx, tx, inc, fmt.Sprintf("Auto-remediation %s needs an approval before %q; approve or reject it to continue",
-			run.RunbookName, stepLabel(st))); err != nil {
+	var inc *incidentRow
+	if run.IncidentID.Valid {
+		if err := s.timeline(tx, run.IncidentID.String, "approval.requested", "runbook", run.RunbookName, msg,
+			map[string]any{"run_id": ids.Encode("run", run.ID), "step": st.ID, "gate": ids.Encode("apr", gateID)}); err != nil {
 			return err
 		}
+		i, err := s.loadIncident(tx, run.IncidentID.String, true)
+		if err != nil {
+			return err
+		}
+		if i.Status == "remediating" && i.RemediationRunID.Valid && i.RemediationRunID.String == run.ID {
+			if err := s.page(ctx, tx, i, fmt.Sprintf("Auto-remediation %s needs an approval before %q; approve or reject it to continue",
+				run.RunbookName, stepLabel(st))); err != nil {
+				return err
+			}
+		}
+		inc = &i
 	}
 	var interactive int
 	if err := tx.QueryRow(`SELECT count(*) FROM slack_apps WHERE archived_at IS NULL`).Scan(&interactive); err != nil {
 		return err
 	}
-	_, err = s.enqueue(tx, inc, "approval", []string{"slack"}, map[string]any{
-		"title": inc.Title, "reason": msg, "service": s.serviceName(tx, inc.ServiceID), "severity": inc.Severity,
+	return s.notifyApproval(tx, rb, inc, "approval", map[string]any{
+		"reason": msg,
 		"approval": map[string]any{
 			"gate": ids.Encode("apr", gateID), "run": ids.Encode("run", run.ID), "step": st.ID, "step_name": stepLabel(st),
-			"runbook": run.RunbookName, "interactive": interactive > 0,
+			"runbook": run.RunbookName, "interactive": interactive > 0, "requested_by": s.requesterDisplay(tx, run),
 		},
 	})
+}
+
+// notifyApproval sends an approval request or decision to Slack. Runs in an
+// incident use the incident's service targets, like every other incident
+// message. Otherwise (or when the service has no Slack target) it goes to
+// the runbook team's approval channel, else the org's default one.
+func (s *Server) notifyApproval(tx *db.Tx, rb *runbook.Runbook, inc *incidentRow, kind string, payload map[string]any) error {
+	if inc != nil {
+		payload["title"], payload["service"], payload["severity"] = inc.Title, s.serviceName(tx, inc.ServiceID), inc.Severity
+		n, err := s.enqueue(tx, *inc, kind, []string{"slack"}, payload)
+		if err != nil || n > 0 {
+			return err
+		}
+	}
+	var channel string
+	err := tx.QueryRow(`SELECT c.id FROM approval_channels c LEFT JOIN teams t ON t.id = c.team_id
+		WHERE (t.slug = $1 AND t.archived_at IS NULL) OR c.team_id IS NULL
+		ORDER BY c.team_id IS NULL LIMIT 1`, rb.Metadata.Team).Scan(&channel)
+	if isNoRows(err) {
+		return nil // nowhere configured; GET /v1/approvals still lists it
+	}
+	if err != nil {
+		return err
+	}
+	var incID any
+	if inc != nil {
+		incID = inc.ID
+	}
+	payload["kind"] = kind
+	_, err = tx.Exec(`INSERT INTO notifications (id, org_id, incident_id, channel_id, kind, payload) VALUES ($1,$2,$3,$4,$5,$6)`,
+		ids.NewString(), tx.OrgID, incID, channel, kind, db.JSON[map[string]any]{V: payload})
 	return err
+}
+
+// requesterDisplay names whoever started a run, for people deciding on it.
+func (s *Server) requesterDisplay(tx *db.Tx, run runRow) string {
+	typ, id, _ := strings.Cut(run.RequestedBy, ":")
+	switch typ {
+	case "user":
+		if uid, err := ids.Decode("usr", id); err == nil {
+			var email string
+			if tx.QueryRow(`SELECT email FROM nfx_org_users() WHERE id = $1`, uid).Scan(&email) == nil {
+				return email
+			}
+		}
+		return id
+	case "api_key":
+		return "an API key (" + id + ")"
+	default:
+		return "an alert trigger"
+	}
 }
 
 // approvalResult is what a decision returns.
@@ -250,18 +300,20 @@ func (s *Server) decide(ctx context.Context, tx *db.Tx, p principal, gateID, dec
 		res.Status = "pending"
 		note = fmt.Sprintf("%s approved by %s (%d of %d); waiting for more", stepLabel(st), who, len(approvers), g.Required)
 	}
+	var inc *incidentRow
 	if run.IncidentID.Valid {
 		if err := s.timeline(tx, run.IncidentID.String, "approval."+decision, p.actorType(), p.actor(), note,
 			map[string]any{"run_id": res.Run, "step": g.StepID, "via": via}); err != nil {
 			return res, err
 		}
-		inc, err := s.loadIncident(tx, run.IncidentID.String, false)
+		i, err := s.loadIncident(tx, run.IncidentID.String, false)
 		if err != nil {
 			return res, err
 		}
-		if err := s.notifyUpdate(tx, inc, s.serviceName(tx, inc.ServiceID), note); err != nil {
-			return res, err
-		}
+		inc = &i
+	}
+	if err := s.notifyApproval(tx, rb, inc, "update", map[string]any{"reason": fmt.Sprintf("%s (run of %s)", note, run.RunbookName)}); err != nil {
+		return res, err
 	}
 
 	switch res.Status {
@@ -360,12 +412,84 @@ func (s *Server) ProcessExpiredGates(ctx context.Context) (int, error) {
 
 func (s *Server) approvalRoutes(route routeFn) {
 	route("GET /v1/approvals", "viewer", s.apiListApprovals)
+	route("PUT /v1/approval-channels", "admin", s.apiPutApprovalChannel)
+	route("GET /v1/approval-channels", "admin", s.apiListApprovalChannels)
 	route("POST /v1/runs/{id}/steps/{step}/approve", "responder*", func(r *http.Request, p principal) (any, error) {
 		return s.apiDecide(r, p, "approved")
 	})
 	route("POST /v1/runs/{id}/steps/{step}/reject", "responder*", func(r *http.Request, p principal) (any, error) {
 		return s.apiDecide(r, p, "rejected")
 	})
+}
+
+// apiPutApprovalChannel sets where approval requests go for a team (or, with
+// no team, the org default). It replaces any existing channel for that team.
+func (s *Server) apiPutApprovalChannel(r *http.Request, p principal) (any, error) {
+	var req struct {
+		Team string `json:"team"` // team slug; empty for the org default
+		URL  string `json:"url"`  // Slack incoming-webhook URL
+	}
+	if err := readJSON(r, &req); err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(req.URL, "https://") && !strings.HasPrefix(req.URL, "http://127.0.0.1") && !strings.HasPrefix(req.URL, "http://localhost") {
+		return nil, httpError{400, "url must be an https Slack incoming-webhook URL"}
+	}
+	id := ids.NewString()
+	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		var team any
+		if req.Team != "" {
+			var tid string
+			if err := tx.QueryRow(`SELECT id FROM teams WHERE slug = $1 AND archived_at IS NULL`, req.Team).Scan(&tid); err != nil {
+				if isNoRows(err) {
+					return httpError{404, "no team " + req.Team}
+				}
+				return err
+			}
+			team = tid
+		}
+		sealed, err := s.Sealer.Seal([]byte(req.URL), p.OrgID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM approval_channels WHERE team_id IS NOT DISTINCT FROM $1::uuid`, team); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO approval_channels (id, org_id, team_id, credential, created_by) VALUES ($1,$2,$3,$4,$5)`,
+			id, p.OrgID, team, sealed, p.actor()); err != nil {
+			return err
+		}
+		// The webhook URL is itself a credential: never logged or returned.
+		return tx.Audit(r.Context(), p.actorType(), p.actor(), "approval_channel.set", "approval_channel", id, map[string]string{"team": req.Team})
+	})
+	scope := req.Team
+	if scope == "" {
+		scope = "org default"
+	}
+	return map[string]string{"id": ids.Encode("apc", id), "for": scope}, err
+}
+
+func (s *Server) apiListApprovalChannels(r *http.Request, p principal) (any, error) {
+	out := []map[string]any{}
+	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		rows, err := tx.Query(`SELECT c.id, coalesce(t.slug, ''), c.created_at FROM approval_channels c LEFT JOIN teams t ON t.id = c.team_id
+			ORDER BY t.slug NULLS FIRST`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, team string
+			var at time.Time
+			rows.Scan(&id, &team, &at)
+			if team == "" {
+				team = "org default"
+			}
+			out = append(out, map[string]any{"id": ids.Encode("apc", id), "for": team, "created_at": at})
+		}
+		return rows.Err()
+	})
+	return out, err
 }
 
 func (s *Server) apiDecide(r *http.Request, p principal, decision string) (any, error) {

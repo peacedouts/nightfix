@@ -95,6 +95,31 @@ func (e *env) ageLogin(email string, age time.Duration) {
 	}
 }
 
+// slackOn returns the texts of messages that arrived on a test channel.
+func (e *env) slackOn(channel string) []string {
+	raw, _ := e.stub.SlackState()
+	var out []string
+	for _, m := range raw {
+		if m["_channel"] == channel {
+			b, _ := json.Marshal(m["blocks"])
+			out = append(out, fmt.Sprint(m["text"])+" "+string(b))
+		}
+	}
+	return out
+}
+
+func (e *env) waitSlackOn(channel, want string) {
+	e.t.Helper()
+	e.waitFor("slack message on "+channel+" containing "+want, 10*time.Second, func() bool {
+		for _, m := range e.slackOn(channel) {
+			if strings.Contains(m, want) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func countCalls(calls []string, c string) int {
 	n := 0
 	for _, x := range calls {
@@ -112,6 +137,16 @@ func TestApprovalGatesARun(t *testing.T) {
 	who := e.people()
 	e.callRaw("PUT", "/v1/runbooks/ecs-restart-gated", []byte(gatedRunbook(t, "ecs-restart-gated",
 		"      fromRoles: [Admin]\n      excludeRequester: true\n      expiresAfter: 10m\n", false)), nil)
+	// Runs outside an incident ask in the runbook team's channel (platform),
+	// falling back to the org default.
+	e.call("POST", "/v1/teams", map[string]string{"slug": "platform"}, nil)
+	e.call("PUT", "/v1/approval-channels", map[string]string{"url": e.stubURL + "/slack?channel=default"}, nil)
+	e.call("PUT", "/v1/approval-channels", map[string]string{"team": "platform", "url": e.stubURL + "/slack?channel=platform"}, nil)
+	var channels []map[string]any
+	e.call("GET", "/v1/approval-channels", nil, &channels)
+	if len(channels) != 2 || strings.Contains(mustJSON(channels), "/slack") {
+		t.Fatalf("channels should be listed without their webhook URLs: %v", channels)
+	}
 
 	e.expect("api key start", e.key, "POST", "/v1/runs", map[string]any{"runbook": "ecs-restart-gated",
 		"params": map[string]string{"cluster": "prod-east", "service": "checkout-api"}}, 403, "a person has to start it")
@@ -120,6 +155,11 @@ func TestApprovalGatesARun(t *testing.T) {
 	calls, _, _ := e.stub.Snapshot()
 	if countCalls(calls, "ecs:DescribeServices") != 1 || contains(calls, "ecs:UpdateService") {
 		t.Fatalf("only the steps before the approval should have run: %v", calls)
+	}
+	e.waitSlackOn("platform", "alice@acme.dev started `ecs-restart-gated`")
+	e.waitSlackOn("platform", "/steps/approve/approve") // no Slack app yet: API instructions instead of buttons
+	if got := e.slackOn("default"); len(got) != 0 {
+		t.Fatalf("the team channel should take precedence over the org default: %v", got)
 	}
 	var pending []map[string]any
 	e.call("GET", "/v1/approvals", nil, &pending)
@@ -151,6 +191,7 @@ func TestApprovalGatesARun(t *testing.T) {
 	e.expect("bob again", who.bob, "POST", path, nil, 409, "already approved")
 
 	run := e.waitRun(runID, "succeeded")
+	e.waitSlackOn("platform", "approved by bob@acme.dev (1 of 1)")
 	calls, _, _ = e.stub.Snapshot()
 	if !contains(calls, "ecs:UpdateService") {
 		t.Fatalf("the restart should have run after approval: %v", calls)
@@ -175,12 +216,18 @@ func TestApprovalRejectionAndExpiry(t *testing.T) {
 	who := e.people()
 	e.callRaw("PUT", "/v1/runbooks/ecs-restart-gated", []byte(gatedRunbook(t, "ecs-restart-gated",
 		"      count: 2\n      fromRoles: [Responder]\n      expiresAfter: 10m\n", false)), nil)
+	e.call("PUT", "/v1/approval-channels", map[string]string{"url": e.stubURL + "/slack?channel=default"}, nil)
+	e.expect("bob (admin, not owner)", who.bob, "PUT", "/v1/approval-channels", map[string]string{"url": e.stubURL + "/slack"}, 200, "")
+	e.call("PUT", "/v1/approval-channels", map[string]string{"url": e.stubURL + "/slack?channel=default"}, nil)
+	e.expect("dave (responder)", who.dave, "PUT", "/v1/approval-channels", map[string]string{"url": e.stubURL + "/slack"}, 403, "")
 
 	runA := e.startRun(who.alice, "ecs-restart-gated")
 	e.waitRun(runA, "awaiting_approval")
 	path := "/v1/runs/" + runA + "/steps/approve/"
 	e.expect("dave", who.dave, "POST", path+"approve", nil, 200, `"status": "pending"`)
+	e.waitSlackOn("default", "Approval needed")
 	e.expect("bob", who.bob, "POST", path+"reject", map[string]string{"comment": "not during the sale"}, 200, `"status": "rejected"`)
+	e.waitSlackOn("default", "rejected by bob@acme.dev: not during the sale")
 	run := e.waitRun(runA, "cancelled")
 	if !strings.Contains(fmt.Sprint(run["error"]), "rejected by bob@acme.dev: not during the sale") {
 		t.Fatalf("run error should say who rejected it and why: %v", run["error"])

@@ -355,6 +355,9 @@ func (s *Server) slackRespond(responseURL, text string) {
 func slackApprovalMessage(p map[string]any) map[string]any {
 	a, _ := p["approval"].(map[string]any)
 	text := fmt.Sprintf(":raised_hand: *Approval needed* — incident #%v on `%v`: %v", p["incident_number"], p["service"], p["reason"])
+	if p["incident_number"] == nil {
+		text = fmt.Sprintf(":raised_hand: *Approval needed* — %v started `%v`. %v", a["requested_by"], a["runbook"], p["reason"])
+	}
 	blocks := []any{map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": text}}}
 	if a["interactive"] == true {
 		blocks = append(blocks, map[string]any{"type": "actions", "elements": []any{

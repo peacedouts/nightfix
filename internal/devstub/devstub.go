@@ -108,6 +108,9 @@ func (s *Stub) Handler() http.Handler {
 		var m map[string]any
 		json.NewDecoder(r.Body).Decode(&m)
 		text := fmt.Sprint(m["text"])
+		if ch := r.URL.Query().Get("channel"); ch != "" {
+			m["_channel"] = ch // which webhook it arrived on (tests use one per channel)
+		}
 		s.mu.Lock()
 		s.Slack = append(s.Slack, text)
 		s.SlackRaw = append(s.SlackRaw, m)

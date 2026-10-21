@@ -123,6 +123,35 @@ GRANT SELECT, INSERT, UPDATE ON approval_gates, slack_apps TO nfx_app;
 GRANT SELECT, INSERT ON approvals TO nfx_app;
 GRANT SELECT, INSERT, DELETE ON slack_user_links, slack_link_codes TO nfx_app;
 
+-- Where approval requests go when a run isn't tied to an incident (or its
+-- incident's service has no Slack target): the runbook team's channel, else
+-- the org default (team_id NULL).
+CREATE TABLE approval_channels (
+  id          uuid NOT NULL,
+  org_id      uuid NOT NULL REFERENCES orgs(id),
+  team_id     uuid,
+  type        text NOT NULL DEFAULT 'slack' CHECK (type IN ('slack')),
+  credential  bytea NOT NULL,             -- sealed Slack incoming-webhook URL
+  created_by  text NOT NULL,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (org_id, id),
+  FOREIGN KEY (org_id, team_id) REFERENCES teams(org_id, id)
+);
+CREATE UNIQUE INDEX approval_channels_one_per_team
+  ON approval_channels (org_id, coalesce(team_id, '00000000-0000-0000-0000-000000000000'));
+ALTER TABLE approval_channels ENABLE ROW LEVEL SECURITY;
+ALTER TABLE approval_channels FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON approval_channels USING (org_id = nfx_org()) WITH CHECK (org_id = nfx_org());
+GRANT SELECT, INSERT, DELETE ON approval_channels TO nfx_app;
+
+-- A notification goes to an escalation target (incidents) or an approval
+-- channel, and approval notifications may have no incident.
+ALTER TABLE notifications ALTER COLUMN incident_id DROP NOT NULL;
+ALTER TABLE notifications ALTER COLUMN target_id DROP NOT NULL;
+ALTER TABLE notifications ADD COLUMN channel_id uuid;
+ALTER TABLE notifications ADD FOREIGN KEY (org_id, channel_id) REFERENCES approval_channels(org_id, id);
+ALTER TABLE notifications ADD CONSTRAINT notifications_one_destination CHECK ((target_id IS NULL) <> (channel_id IS NULL));
+
 -- ---------------------------------------------------------------------------
 -- Functions
 -- ---------------------------------------------------------------------------

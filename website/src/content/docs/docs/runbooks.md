@@ -119,6 +119,17 @@ curl -X POST https://api.nightfix.dev/v1/runs/run_…/steps/approve/approve \
   -H "Authorization: Bearer $AUTH0_TOKEN" -d '{"comment": "checked the dashboards"}'
 ```
 
+**Where requests go.** For a run tied to an incident, the request goes to the Slack channels for the incident's service, like every other incident message. A run with no incident (one somebody started by hand, say) asks in its runbook team's approval channel, or the org's default one. An Admin sets these once:
+
+```bash
+# Org default
+curl -X PUT https://api.nightfix.dev/v1/approval-channels -H "Authorization: Bearer $NIGHTFIX_API_KEY" \
+  -d '{"url": "https://hooks.slack.com/services/…"}'
+# Just for runbooks owned by the payments team
+curl -X PUT https://api.nightfix.dev/v1/approval-channels -H "Authorization: Bearer $NIGHTFIX_API_KEY" \
+  -d '{"team": "payments", "url": "https://hooks.slack.com/services/…"}'
+```
+
 Later steps can read who approved as `steps.approve.outputs.approved_by`. Every request, approval, rejection and expiry is in the audit log.
 
 ### Set up Slack buttons
