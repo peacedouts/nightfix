@@ -23,6 +23,7 @@ import (
 
 	"github.com/peacedouts/nightfix/internal/controlplane"
 	"github.com/peacedouts/nightfix/internal/db"
+	"github.com/peacedouts/nightfix/internal/devstub"
 	"github.com/peacedouts/nightfix/internal/signing"
 	"github.com/peacedouts/nightfix/internal/testdb"
 )
@@ -37,7 +38,10 @@ type ingestHarness struct {
 	pdMu   sync.Mutex
 	pd     []string
 	pdFail int
-	orgID  string
+
+	orgID   string // the org's UUID
+	ingBase string // the ingest listener's URL
+	stub    *devstub.Stub
 }
 
 func setupIngest(t *testing.T, svc map[string]any) *ingestHarness {
@@ -68,19 +72,24 @@ func setupIngest(t *testing.T, svc map[string]any) *ingestHarness {
 		x.pd = append(x.pd, a)
 	}))
 	t.Cleanup(pdSrv.Close)
+	// devstub signs SNS notifications for CloudWatch integrations.
+	x.stub = devstub.New(time.Second)
+	stubSrv := httptest.NewServer(x.stub.Handler())
+	t.Cleanup(stubSrv.Close)
+	x.stub.BaseURL = stubSrv.URL
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	x.srv = controlplane.New(pool, sealer, ca, controlplane.Config{PublicIngestURL: "http://ingest"}, log)
+	x.srv = controlplane.New(pool, sealer, ca, controlplane.Config{PublicIngestURL: "http://ingest",
+		SNSCertURLPrefixes: []string{stubSrv.URL + "/sns/"}}, log)
 	apiSrv := httptest.NewServer(x.srv.APIHandler())
 	t.Cleanup(apiSrv.Close)
 	ingSrv := httptest.NewServer(x.srv.IngestHandler())
 	t.Cleanup(ingSrv.Close)
-	x.api = apiSrv.URL
+	x.api, x.ingBase = apiSrv.URL, ingSrv.URL
 	org, err := x.srv.CreateOrg(context.Background(), "Acme", "acme"+fmt.Sprint(time.Now().UnixNano()%100000))
 	if err != nil {
 		t.Fatal(err)
 	}
-	x.key = org.APIKey
-	x.orgID = org.OrgID
+	x.key, x.orgID = org.APIKey, org.OrgID
 	if svc == nil {
 		svc = map[string]any{}
 	}
@@ -114,9 +123,14 @@ func (x *ingestHarness) call(method, path string, body, out any) int {
 }
 
 func (x *ingestHarness) send(body map[string]any) int {
+	return x.sendTo(x.ingest, x.secret, body)
+}
+
+// sendTo posts a signed webhook alert to an integration's ingest URL.
+func (x *ingestHarness) sendTo(ingest, secret string, body map[string]any) int {
 	b, _ := json.Marshal(body)
-	req, _ := http.NewRequest("POST", x.ingest, bytes.NewReader(b))
-	req.Header.Set(controlplane.WebhookSignatureHeader, controlplane.SignWebhook(x.secret, b, time.Now()))
+	req, _ := http.NewRequest("POST", ingest, bytes.NewReader(b))
+	req.Header.Set(controlplane.WebhookSignatureHeader, controlplane.SignWebhook(secret, b, time.Now()))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		x.t.Fatal(err)

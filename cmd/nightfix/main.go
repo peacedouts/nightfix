@@ -25,11 +25,14 @@
 //	NIGHTFIX_AGENT_TLS_HOSTS     names/IPs on the gateway certificate (default localhost,127.0.0.1)
 //	NIGHTFIX_PUBLIC_INGEST_URL   base URL returned for integrations (default http://127.0.0.1:8081)
 //	NIGHTFIX_SNS_DEV_CERT_PREFIX extra allowed SNS SigningCertURL prefix — local development only
+//	NIGHTFIX_SNS_MAX_MESSAGE_AGE SNS notifications signed longer ago than this are refused (default 1h)
 //	NIGHTFIX_STS_DEV_ENDPOINT    STS URL for IAM enrollment instead of sts.<region>.amazonaws.com — local development only
 //	NIGHTFIX_AUTH0_DOMAIN        Auth0 tenant domain (e.g. acme.us.auth0.com); enables user login
 //	NIGHTFIX_AUTH0_AUDIENCE      Auth0 API identifier (e.g. https://api.nightfix.dev)
 //	NIGHTFIX_AUTH0_EMAIL_CLAIM   custom claim carrying the user's email (default https://nightfix.dev/email)
 //	NIGHTFIX_AUTH0_GROUPS_CLAIM  custom claim carrying IdP groups (default https://nightfix.dev/groups)
+//	NIGHTFIX_AUTH0_EMAIL_VERIFIED_CLAIM  claim saying the email is verified (default email_verified;
+//	                             https://nightfix.dev/email_verified is read too). Unverified emails can't sign in.
 package main
 
 import (
@@ -200,11 +203,19 @@ func newServer(ctx context.Context) (*controlplane.Server, error) {
 		SNSCertURLPrefixes: []string{os.Getenv("NIGHTFIX_SNS_DEV_CERT_PREFIX")},
 		STSEndpoint:        os.Getenv("NIGHTFIX_STS_DEV_ENDPOINT"),
 	}
+	if v := os.Getenv("NIGHTFIX_SNS_MAX_MESSAGE_AGE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Minute {
+			return nil, fmt.Errorf("NIGHTFIX_SNS_MAX_MESSAGE_AGE must be a duration of at least 1m, like 1h")
+		}
+		cfg.SNSMaxMessageAge = d
+	}
 	if d := os.Getenv("NIGHTFIX_AUTH0_DOMAIN"); d != "" {
 		cfg.Auth0 = controlplane.Auth0Config{
-			Verifier:    auth0.New(d, mustEnv("NIGHTFIX_AUTH0_AUDIENCE")),
-			EmailClaim:  os.Getenv("NIGHTFIX_AUTH0_EMAIL_CLAIM"),
-			GroupsClaim: os.Getenv("NIGHTFIX_AUTH0_GROUPS_CLAIM"),
+			Verifier:           auth0.New(d, mustEnv("NIGHTFIX_AUTH0_AUDIENCE")),
+			EmailClaim:         os.Getenv("NIGHTFIX_AUTH0_EMAIL_CLAIM"),
+			GroupsClaim:        os.Getenv("NIGHTFIX_AUTH0_GROUPS_CLAIM"),
+			EmailVerifiedClaim: os.Getenv("NIGHTFIX_AUTH0_EMAIL_VERIFIED_CLAIM"),
 		}
 	}
 	if cfg.STSEndpoint != "" {

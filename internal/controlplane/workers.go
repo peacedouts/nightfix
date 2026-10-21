@@ -53,6 +53,7 @@ func (s *Server) RunWorkers(ctx context.Context, tick time.Duration) {
 					s.Log.Error("partitions", "err", err)
 				}
 				s.DB.ExecContext(ctx, `SELECT nfx_drop_expired_partitions(30, 90)`)
+				s.expireDedupRecords(ctx)
 				lastPartitions = time.Now()
 			}
 			select {
@@ -76,6 +77,16 @@ func (s *Server) Tick(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// expireDedupRecords deletes replay records that have outlived their window:
+// SNS MessageIds and API idempotency keys.
+func (s *Server) expireDedupRecords(ctx context.Context) {
+	for _, fn := range []string{"nfx_expire_ingest_message_ids", "nfx_expire_idempotency_keys"} {
+		if _, err := s.DB.ExecContext(ctx, `SELECT `+fn+`()`); err != nil && ctx.Err() == nil {
+			s.Log.Error("expire records", "fn", fn, "err", err)
+		}
+	}
 }
 
 func decodeB64(s string) ([]byte, error) { return base64.StdEncoding.DecodeString(s) }

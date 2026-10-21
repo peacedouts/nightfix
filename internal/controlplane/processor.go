@@ -135,6 +135,22 @@ func (s *Server) processEvent(ctx context.Context, tx *db.Tx, eventID string) er
 	}
 	a = sanitizeAlert(a)
 
+	// A state update that isn't newer than the latest one applied to this
+	// fingerprint (an SNS retry of an ALARM arriving after the OK, say) must
+	// not reopen or resolve anything. Checked across every alert with the
+	// fingerprint, since a stale firing past the reopen window would otherwise
+	// open a new alert; checked again under the row locks below.
+	if !a.StateAt.IsZero() {
+		var applied sql.NullTime
+		if err := tx.QueryRow(`SELECT max(state_at) FROM alerts WHERE fingerprint = $1`, a.Fingerprint).Scan(&applied); err != nil {
+			return err
+		}
+		if staleState(a, applied) {
+			s.Log.Info("alert event ignored: not newer than the alert's latest state", "event", eventID, "fingerprint", a.Fingerprint)
+			return errIgnore
+		}
+	}
+
 	svcID, suppressed, err := s.route(tx, a, defaultSvc)
 	if err != nil {
 		return err
@@ -196,11 +212,16 @@ func (s *Server) alertFiring(ctx context.Context, tx *db.Tx, a Alert, integID st
 
 	// Repeat firing of an open alert: update it, never page again.
 	var openID, prevSev string
-	err := tx.QueryRow(`SELECT id, severity FROM alerts WHERE fingerprint = $1 AND status = 'firing' FOR UPDATE`, a.Fingerprint).Scan(&openID, &prevSev)
+	var applied sql.NullTime
+	err := tx.QueryRow(`SELECT id, severity, state_at FROM alerts WHERE fingerprint = $1 AND status = 'firing' FOR UPDATE`, a.Fingerprint).
+		Scan(&openID, &prevSev, &applied)
 	if err == nil {
+		if staleState(a, applied) {
+			return errIgnore
+		}
 		if _, err := tx.Exec(`UPDATE alerts SET last_seen_at = now(), event_count = event_count + 1,
-			summary = $2, labels = $3, annotations = $4, severity = $5 WHERE id = $1`,
-			openID, a.Summary, labels, ann, a.Severity); err != nil {
+			summary = $2, labels = $3, annotations = $4, severity = $5, state_at = coalesce($6, state_at) WHERE id = $1`,
+			openID, a.Summary, labels, ann, a.Severity, stateAt(a)); err != nil {
 			return err
 		}
 		// A human resolve detaches alerts that are still firing; if one keeps
@@ -226,30 +247,35 @@ func (s *Server) alertFiring(ctx context.Context, tx *db.Tx, a Alert, integID st
 	var reopenID string
 	var prevIncident sql.NullString
 	err = tx.QueryRow(`
-		SELECT a.id, ia.incident_id FROM alerts a
+		SELECT a.id, ia.incident_id, a.state_at FROM alerts a
 		LEFT JOIN LATERAL (
 			SELECT incident_id FROM incident_alerts WHERE alert_id = a.id ORDER BY attached_at DESC LIMIT 1
 		) ia ON true
 		WHERE a.fingerprint = $1 AND a.status = 'resolved' AND a.resolved_at > now() - $2::interval
 		ORDER BY a.resolved_at DESC LIMIT 1 FOR UPDATE OF a`,
-		a.Fingerprint, pgInterval(svc.Reopen)).Scan(&reopenID, &prevIncident)
+		a.Fingerprint, pgInterval(svc.Reopen)).Scan(&reopenID, &prevIncident, &applied)
 	var alertID string
 	reopened := false
 	switch {
 	case err == nil:
+		if staleState(a, applied) {
+			return errIgnore // e.g. a retried ALARM older than the OK that resolved it
+		}
 		alertID, reopened = reopenID, true
 		if _, err := tx.Exec(`UPDATE alerts SET status = 'firing', resolved_at = NULL, last_seen_at = now(),
-			event_count = event_count + 1, summary = $2, labels = $3, annotations = $4, severity = $5 WHERE id = $1`,
-			alertID, a.Summary, labels, ann, a.Severity); err != nil {
+			event_count = event_count + 1, summary = $2, labels = $3, annotations = $4, severity = $5,
+			state_at = coalesce($6, state_at) WHERE id = $1`,
+			alertID, a.Summary, labels, ann, a.Severity, stateAt(a)); err != nil {
 			return err
 		}
 	case isNoRows(err):
 		alertID = ids.NewString()
 		res, err := tx.Exec(`INSERT INTO alerts (id, org_id, fingerprint, integration_id, service_id, status, severity,
-				summary, source, labels, annotations, suppressed, first_seen_at, last_seen_at)
-			VALUES ($1,$2,$3,$4,$5,'firing',$6,$7,$8,$9,$10,$11,$12,now())
+				summary, source, labels, annotations, suppressed, first_seen_at, last_seen_at, state_at)
+			VALUES ($1,$2,$3,$4,$5,'firing',$6,$7,$8,$9,$10,$11,$12,now(),$13)
 			ON CONFLICT (org_id, fingerprint) WHERE status <> 'resolved' DO NOTHING`,
-			alertID, tx.OrgID, a.Fingerprint, integID, svc.ID, a.Severity, a.Summary, a.Source, labels, ann, suppressed, a.OccurredAt)
+			alertID, tx.OrgID, a.Fingerprint, integID, svc.ID, a.Severity, a.Summary, a.Source, labels, ann, suppressed, a.OccurredAt,
+			stateAt(a))
 		if err != nil {
 			return err
 		}
@@ -293,10 +319,14 @@ func (s *Server) alertFiring(ctx context.Context, tx *db.Tx, a Alert, integID st
 
 func (s *Server) alertResolved(ctx context.Context, tx *db.Tx, a Alert) error {
 	var alertID string
+	// A resolve older than the firing it would clear (a retried OK arriving
+	// after a newer ALARM) leaves the alert firing.
 	err := tx.QueryRow(`UPDATE alerts SET status = 'resolved', resolved_at = now(), last_seen_at = now(),
-		event_count = event_count + 1 WHERE fingerprint = $1 AND status = 'firing' RETURNING id`, a.Fingerprint).Scan(&alertID)
+		event_count = event_count + 1, state_at = coalesce($2, state_at)
+		WHERE fingerprint = $1 AND status = 'firing' AND ($2::timestamptz IS NULL OR state_at IS NULL OR state_at < $2)
+		RETURNING id`, a.Fingerprint, stateAt(a)).Scan(&alertID)
 	if isNoRows(err) {
-		return nil // resolve for an alert we don't have open: nothing to do
+		return nil // resolve for an alert we don't have open (or a stale one): nothing to do
 	}
 	if err != nil {
 		return err
@@ -314,6 +344,17 @@ func (s *Server) alertResolved(ctx context.Context, tx *db.Tx, a Alert) error {
 		return err
 	}
 	return s.checkAlertsCleared(ctx, tx, incidentID)
+}
+
+// staleState reports whether a carries a source time that isn't newer than
+// the state already applied to the alert (applied is NULL when unknown).
+func staleState(a Alert, applied sql.NullTime) bool {
+	return !a.StateAt.IsZero() && applied.Valid && !a.StateAt.After(applied.Time)
+}
+
+// stateAt is a's source time for storing in alerts.state_at (NULL if none).
+func stateAt(a Alert) sql.NullTime {
+	return sql.NullTime{Time: a.StateAt, Valid: !a.StateAt.IsZero()}
 }
 
 func severityRank(s string) int {

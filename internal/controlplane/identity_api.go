@@ -131,9 +131,9 @@ func (s *Server) apiAddTeamMember(r *http.Request, p principal) (any, error) {
 				return httpError{403, "only an owner can add members to a team that holds the " + top + " role"}
 			}
 		}
-		var userID string
-		if err := tx.QueryRow(`SELECT id FROM nfx_org_user_by_email($1)`, req.Email).Scan(&userID); err != nil {
-			return httpError{404, "no member with that email has logged in yet"}
+		userID, err := s.memberIDByEmail(tx, req.Email)
+		if err != nil {
+			return err
 		}
 		if _, err := tx.Exec(`INSERT INTO team_members (org_id, team_id, user_id, source) VALUES ($1,$2,$3,'manual')
 			ON CONFLICT (org_id, team_id, user_id) DO UPDATE SET source = 'manual'`, p.OrgID, teamID, userID); err != nil {
@@ -164,6 +164,35 @@ func (s *Server) teamTopRole(tx *db.Tx, teamID string) (string, error) {
 	return top, rows.Err()
 }
 
+// memberIDByEmail finds the active member with a verified email address.
+// Two accounts can verify the same address (say, a password login and a
+// Google login), and a grant must not land on whichever comes back first.
+func (s *Server) memberIDByEmail(tx *db.Tx, email string) (string, error) {
+	rows, err := tx.Query(`SELECT id FROM nfx_org_user_by_email($1) LIMIT 2`, email)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var found []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", err
+		}
+		found = append(found, id)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	switch len(found) {
+	case 0:
+		return "", httpError{404, "no member with that verified email has logged in yet"}
+	case 1:
+		return found[0], nil
+	}
+	return "", httpError{409, "more than one member account has that email; ask them to sign in with a single account"}
+}
+
 func (s *Server) teamIDBySlug(tx *db.Tx, slug string) (string, error) {
 	var id string
 	err := tx.QueryRow(`SELECT id FROM teams WHERE slug = $1 AND archived_at IS NULL`, slug).Scan(&id)
@@ -176,15 +205,17 @@ func (s *Server) teamIDBySlug(tx *db.Tx, slug string) (string, error) {
 func (s *Server) apiListMembers(r *http.Request, p principal) (any, error) {
 	out := []map[string]any{}
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
-		rows, err := tx.Query(`SELECT id, email, name, status FROM nfx_org_users() ORDER BY email`)
+		rows, err := tx.Query(`SELECT id, email, name, status, email_verified FROM nfx_org_users() ORDER BY email`)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var id, email, name, status string
-			rows.Scan(&id, &email, &name, &status)
-			out = append(out, map[string]any{"id": ids.Encode("usr", id), "email": email, "name": name, "status": status})
+			var verified bool
+			rows.Scan(&id, &email, &name, &status, &verified)
+			out = append(out, map[string]any{"id": ids.Encode("usr", id), "email": email, "name": name, "status": status,
+				"email_verified": verified})
 		}
 		return rows.Err()
 	})
@@ -221,9 +252,8 @@ func (s *Server) apiCreateBinding(r *http.Request, p principal) (any, error) {
 		var err error
 		switch req.SubjectType {
 		case "user":
-			err = tx.QueryRow(`SELECT id FROM nfx_org_user_by_email($1)`, req.Subject).Scan(&subjectID)
-			if err != nil {
-				return httpError{404, "no member with that email has logged in yet"}
+			if subjectID, err = s.memberIDByEmail(tx, req.Subject); err != nil {
+				return err
 			}
 		case "team":
 			if subjectID, err = s.teamIDBySlug(tx, req.Subject); err != nil {

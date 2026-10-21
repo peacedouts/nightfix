@@ -3,6 +3,7 @@ package controlplane
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -42,7 +43,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status := http.StatusAccepted
+	status, result := http.StatusAccepted, "accepted"
 	err = s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
 		var typ string
 		var cfg db.JSON[map[string]string]
@@ -84,6 +85,16 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 				status = http.StatusOK
 				return nil
 			}
+			fresh, err := s.freshSNSNotification(tx, integrationID, m)
+			if err != nil {
+				return err
+			}
+			if !fresh {
+				// A repeat (SNS retry or replay): acknowledge it so SNS stops
+				// retrying, and store nothing.
+				status, result = http.StatusOK, "duplicate"
+				return nil
+			}
 		}
 		// Persist first; process asynchronously.
 		_, err := tx.Exec(`INSERT INTO alert_events (id, org_id, integration_id, raw) VALUES ($1,$2,$3,$4)`,
@@ -102,7 +113,40 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+	json.NewEncoder(w).Encode(map[string]string{"status": result})
+}
+
+// freshSNSNotification bounds replays of a verified SNS notification. Its
+// signed Timestamp must be within SNSMaxMessageAge, and its MessageId must
+// not have been seen on this integration before; it is recorded in the
+// caller's transaction, so it only counts as seen once the event is stored.
+// Returns false for a repeat.
+func (s *Server) freshSNSNotification(tx *db.Tx, integrationID string, m snsMessage) (bool, error) {
+	sent, err := time.Parse(time.RFC3339, m.Timestamp)
+	if err != nil {
+		return false, httpError{http.StatusBadRequest, "SNS Timestamp is not a valid time"}
+	}
+	now := time.Now()
+	if age := now.Sub(sent); age > s.Cfg.SNSMaxMessageAge {
+		s.Log.Warn("ingest: refused stale SNS notification", "integration", integrationID, "message_id", m.MessageID, "age", age.Round(time.Second))
+		return false, httpError{http.StatusUnauthorized, fmt.Sprintf("SNS message is older than %s", s.Cfg.SNSMaxMessageAge)}
+	}
+	if m.MessageID == "" || len(m.MessageID) > 256 {
+		return false, httpError{http.StatusBadRequest, "SNS MessageId is missing or malformed"}
+	}
+	// Keep the id until the message would be refused as stale anyway.
+	expires := sent
+	if now.After(expires) {
+		expires = now
+	}
+	res, err := tx.Exec(`INSERT INTO ingest_message_ids (org_id, integration_id, message_id, expires_at) VALUES ($1,$2,$3,$4)
+		ON CONFLICT (org_id, integration_id, message_id) DO NOTHING`,
+		tx.OrgID, integrationID, m.MessageID, expires.Add(s.Cfg.SNSMaxMessageAge))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 type httpError struct {

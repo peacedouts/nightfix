@@ -99,6 +99,7 @@ The database schema runs on managed Postgres without a superuser: CI runs every 
    ```js
    exports.onExecutePostLogin = async (event, api) => {
      api.accessToken.setCustomClaim("https://nightfix.dev/email", event.user.email);
+     api.accessToken.setCustomClaim("https://nightfix.dev/email_verified", event.user.email_verified);
      api.accessToken.setCustomClaim("https://nightfix.dev/groups", event.user.app_metadata.groups || []);
    };
    ```

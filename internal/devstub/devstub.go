@@ -330,20 +330,49 @@ func CloudWatchAlarm(alarm, state, cluster, service string) map[string]any {
 
 // SNSEnvelope wraps message in a signed SNS notification (SignatureVersion 2).
 func (s *Stub) SNSEnvelope(topicArn string, message any) []byte {
+	return s.SNSEnvelopeAt(topicArn, message, fmt.Sprintf("devstub-%d", time.Now().UnixNano()), time.Now())
+}
+
+// SNSEnvelopeAt is SNSEnvelope with a chosen MessageId and Timestamp, for
+// simulating SNS retries and late deliveries.
+func (s *Stub) SNSEnvelopeAt(topicArn string, message any, messageID string, at time.Time) []byte {
 	msg, _ := json.Marshal(message)
 	m := map[string]string{
 		"Type":             "Notification",
-		"MessageId":        fmt.Sprintf("devstub-%d", time.Now().UnixNano()),
+		"MessageId":        messageID,
 		"TopicArn":         topicArn,
 		"Subject":          "ALARM",
 		"Message":          string(msg),
-		"Timestamp":        time.Now().UTC().Format(time.RFC3339Nano),
+		"Timestamp":        at.UTC().Format(time.RFC3339Nano),
 		"SignatureVersion": "2",
 		"SigningCertURL":   s.BaseURL + "/sns/cert.pem",
 	}
 	sts := "Message\n" + m["Message"] + "\nMessageId\n" + m["MessageId"] + "\nSubject\n" + m["Subject"] +
 		"\nTimestamp\n" + m["Timestamp"] + "\nTopicArn\n" + m["TopicArn"] + "\nType\n" + m["Type"] + "\n"
-	h := sha256.Sum256([]byte(sts))
+	return s.signSNS(m, sts)
+}
+
+// SNSSubscriptionConfirmation is the signed message SNS sends when an
+// endpoint is subscribed to a topic, sent at the given time.
+func (s *Stub) SNSSubscriptionConfirmation(topicArn string, at time.Time) []byte {
+	m := map[string]string{
+		"Type":             "SubscriptionConfirmation",
+		"MessageId":        fmt.Sprintf("devstub-sub-%d", time.Now().UnixNano()),
+		"Token":            "devstub-token",
+		"TopicArn":         topicArn,
+		"Message":          "You have chosen to subscribe to the topic " + topicArn + ".",
+		"SubscribeURL":     s.BaseURL + "/sns/subscribe",
+		"Timestamp":        at.UTC().Format(time.RFC3339Nano),
+		"SignatureVersion": "2",
+		"SigningCertURL":   s.BaseURL + "/sns/cert.pem",
+	}
+	sts := "Message\n" + m["Message"] + "\nMessageId\n" + m["MessageId"] + "\nSubscribeURL\n" + m["SubscribeURL"] +
+		"\nTimestamp\n" + m["Timestamp"] + "\nToken\n" + m["Token"] + "\nTopicArn\n" + m["TopicArn"] + "\nType\n" + m["Type"] + "\n"
+	return s.signSNS(m, sts)
+}
+
+func (s *Stub) signSNS(m map[string]string, stringToSign string) []byte {
+	h := sha256.Sum256([]byte(stringToSign))
 	sig, _ := rsa.SignPKCS1v15(rand.Reader, s.snsKey, crypto.SHA256, h[:])
 	m["Signature"] = base64.StdEncoding.EncodeToString(sig)
 	b, _ := json.Marshal(m)

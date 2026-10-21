@@ -51,11 +51,18 @@ func (is *Issuer) Mint(alg string, claims map[string]any) string {
 	return signing + "." + b64.EncodeToString(sig)
 }
 
-// UserToken mints a typical access token for a user in an Auth0 Organization.
+// UserToken mints a typical access token for a user in an Auth0 Organization,
+// with a verified email (as the post-login Action in the README sets it).
 func (is *Issuer) UserToken(sub, email, auth0Org string, groups ...string) string {
-	return is.Mint("RS256", map[string]any{
+	return is.Mint("RS256", is.UserClaims(sub, email, auth0Org, groups...))
+}
+
+// UserClaims returns UserToken's claims, for tests that alter them.
+func (is *Issuer) UserClaims(sub, email, auth0Org string, groups ...string) map[string]any {
+	return map[string]any{
 		"iss": is.Issuer, "aud": []string{is.Audience}, "sub": sub, "org_id": auth0Org,
 		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
-		"https://nightfix.dev/email": email, "https://nightfix.dev/groups": groups,
-	})
+		"https://nightfix.dev/email": email, "https://nightfix.dev/email_verified": true,
+		"https://nightfix.dev/groups": groups,
+	}
 }

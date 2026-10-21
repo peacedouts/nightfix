@@ -40,6 +40,9 @@ export NIGHTFIX_STS_DEV_ENDPOINT="$STUB/sts/"       # devstub plays STS for IAM 
 
 say "Starting devstub (simulated ECS, SNS, Slack, PagerDuty)"
 bin/devstub --heal-after 4s > "$WORK/devstub.log" 2>&1 & PIDS+=($!)
+# It generates signing keys before listening; on a busy machine that can
+# outlast the steps below, and enrollment would fail against a closed port.
+for _ in $(seq 100); do curl -fsS -o /dev/null "$STUB/sns/cert.pem" 2>/dev/null && break; sleep 0.1; done
 
 say "Creating org"
 ORG_OUT="$(bin/nightfix org create --name "Acme" --slug acme)"
@@ -90,7 +93,8 @@ curl -fsS -X POST "$STUB/sns/publish" -d "{\"ingest_url\":\"$INGEST\",\"topic_ar
 state() { api "$API/v1/incidents/1" 2>/dev/null | json 'd["status"]' 2>/dev/null || true; }
 run_status() { local r; r="$(api "$API/v1/incidents/1" | json 'd.get("remediation_run","")')"; [ -n "$r" ] && api "$API/v1/runs/$r" | json 'd["status"]'; }
 
-for _ in $(seq 60); do [ "$(run_status 2>/dev/null)" != running ] && [ -n "$(run_status 2>/dev/null)" ] && break; sleep 0.5; done
+# Read the status once per pass: two reads could see "" (no incident yet) and then "running".
+for _ in $(seq 60); do s="$(run_status 2>/dev/null || true)"; [ -n "$s" ] && [ "$s" != running ] && break; sleep 0.5; done
 echo "remediation run: $(run_status)"
 
 if [ "$(run_status)" = succeeded ]; then

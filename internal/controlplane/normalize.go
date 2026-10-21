@@ -25,6 +25,11 @@ type Alert struct {
 	Labels      map[string]string `json:"labels"`
 	Annotations map[string]string `json:"annotations"`
 	OccurredAt  time.Time         `json:"occurred_at"`
+	// StateAt is when the source says this state began (CloudWatch
+	// StateChangeTime). Zero when the source has no such timestamp; then
+	// events apply in processing order. Otherwise an update that isn't newer
+	// than the alert's latest applied state is ignored.
+	StateAt time.Time `json:"-"`
 }
 
 // errIgnore marks an event that is stored but intentionally not processed
@@ -135,8 +140,9 @@ func normalizeCloudWatch(message string, severityMap map[string]string) (Alert, 
 		sev = "high" // unknown severity defaults toward paging
 	}
 	t, err := time.Parse("2006-01-02T15:04:05.000-0700", a.StateChangeTime)
+	stateAt := t
 	if err != nil {
-		t = time.Now()
+		t, stateAt = time.Now(), time.Time{}
 	}
 	summary := a.AlarmName
 	if a.NewStateReason != "" {
@@ -151,6 +157,7 @@ func normalizeCloudWatch(message string, severityMap map[string]string) (Alert, 
 		Labels:      capLabels(labels),
 		Annotations: capLabels(map[string]string{"description": a.AlarmDescription, "alarm_arn": a.AlarmArn}),
 		OccurredAt:  t,
+		StateAt:     stateAt,
 	}, nil
 }
 
@@ -190,8 +197,13 @@ func normalizeWebhook(integrationID string, body []byte, dedupeKeys []string) (A
 		w.Source = "webhook"
 	}
 	labels := capLabels(w.Labels)
-	fp := w.DedupKey
-	if fp == "" {
+	var fp string
+	if w.DedupKey != "" {
+		// Scoped to the integration: two integrations (or two tools) that
+		// happen to use the same key must not update each other's alert.
+		// migrations/0015 rewrote alerts stored before this.
+		fp = integrationID + ":" + truncate(w.DedupKey, 200)
+	} else {
 		h := sha256.New()
 		h.Write([]byte(integrationID))
 		for _, k := range dedupeKeys {
@@ -201,7 +213,7 @@ func normalizeWebhook(integrationID string, body []byte, dedupeKeys []string) (A
 		fp = hex.EncodeToString(h.Sum(nil))
 	}
 	return Alert{
-		Fingerprint: "wh:" + truncate(fp, 200),
+		Fingerprint: "wh:" + fp,
 		Status:      w.Status,
 		Severity:    w.Severity,
 		Summary:     truncate(w.Summary, 300),

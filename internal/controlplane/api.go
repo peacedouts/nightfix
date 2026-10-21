@@ -45,6 +45,13 @@ func (s *Server) APIHandler() http.Handler {
 				s.reply(w, nil, err)
 				return
 			}
+			if key := r.Header.Get(idempotencyHeader); key != "" && (r.Method == http.MethodPost || r.Method == http.MethodPut) {
+				s.withIdempotency(w, r, p, key, func(w http.ResponseWriter) {
+					v, err := fn(r, p)
+					s.reply(w, v, err)
+				})
+				return
+			}
 			v, err := fn(r, p)
 			s.reply(w, v, err)
 		})

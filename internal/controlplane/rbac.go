@@ -175,11 +175,35 @@ type Auth0Config struct {
 	OrgClaim    string // Auth0 Organizations: "org_id"
 	EmailClaim  string // custom claim added by an Auth0 Action
 	GroupsClaim string // custom claim with the user's IdP groups
+	// EmailVerifiedClaim says whether the email was verified (default
+	// "email_verified"). The namespaced claim an Auth0 Action sets,
+	// https://nightfix.dev/email_verified, is read as well.
+	EmailVerifiedClaim string
 }
 
 func (c Auth0Config) orgClaim() string    { return or(c.OrgClaim, "org_id") }
 func (c Auth0Config) emailClaim() string  { return or(c.EmailClaim, "https://nightfix.dev/email") }
 func (c Auth0Config) groupsClaim() string { return or(c.GroupsClaim, "https://nightfix.dev/groups") }
+
+// emailVerified reports whether the token says the user's email is verified:
+// at least one verification claim is true and none is false. Missing or
+// malformed means unverified.
+func (c Auth0Config) emailVerified(claims auth0.Claims) bool {
+	verified := false
+	for _, k := range []string{or(c.EmailVerifiedClaim, "email_verified"), "https://nightfix.dev/email_verified"} {
+		switch v := claims[k].(type) {
+		case nil:
+		case bool:
+			if !v {
+				return false
+			}
+			verified = true
+		default:
+			return false
+		}
+	}
+	return verified
+}
 
 func or(s, def string) string {
 	if s == "" {
@@ -254,11 +278,17 @@ func (s *Server) authUser(ctx context.Context, tok string) (principal, error) {
 	if email == "" {
 		return p, authError(fmt.Sprintf("token has no email claim (%s)", cfg.emailClaim()))
 	}
+	// People are named by email in role bindings, team membership and the
+	// audit trail, so an unverified one could pass for someone else: such a
+	// user is never provisioned and can't sign in until it's verified.
+	if !cfg.emailVerified(claims) {
+		return p, authError(fmt.Sprintf("your email address %s isn't verified; verify it with your identity provider, then sign in again", email))
+	}
 	p.Email = email
 	groups := claims.Strings(cfg.groupsClaim())
 
 	err = s.DB.WithOrg(ctx, p.OrgID, func(tx *db.Tx) error {
-		if err := tx.QueryRow(`SELECT nfx_upsert_user($1,$2,$3)`, claims.String("sub"), email, claims.String("name")).Scan(&p.UserID); err != nil {
+		if err := tx.QueryRow(`SELECT nfx_upsert_user($1,$2,$3,true)`, claims.String("sub"), email, claims.String("name")).Scan(&p.UserID); err != nil {
 			return err
 		}
 		var status string
@@ -320,13 +350,21 @@ func (s *Server) memberPrincipal(tx *db.Tx, userID string) (principal, error) {
 	p := principal{Kind: "user", OrgID: tx.OrgID, UserID: userID}
 	var status string
 	var lastLogin sql.NullTime
-	err := tx.QueryRow(`SELECT u.email, m.status, m.last_login_at FROM nfx_org_users() u JOIN org_members m ON m.user_id = u.id
-		WHERE u.id = $1`, userID).Scan(&p.Email, &status, &lastLogin)
+	var verified bool
+	err := tx.QueryRow(`SELECT u.email, u.email_verified, m.status, m.last_login_at FROM nfx_org_users() u JOIN org_members m ON m.user_id = u.id
+		WHERE u.id = $1`, userID).Scan(&p.Email, &verified, &status, &lastLogin)
 	if isNoRows(err) || (err == nil && status != "active") {
 		return p, httpError{http.StatusForbidden, "your Nightfix account is no longer a member of this org"}
 	}
 	if err != nil {
 		return p, err
+	}
+	// Decisions are recorded under the member's email, so it must be one
+	// the IdP verified (members from before verification was checked are
+	// refreshed by their next sign-in).
+	if !verified {
+		return p, httpError{http.StatusForbidden,
+			"your email address isn't verified in Nightfix; sign in once with a verified email to refresh your account, then try again"}
 	}
 	if !lastLogin.Valid || time.Since(lastLogin.Time) > s.Cfg.SlackMaxLoginAge {
 		return p, httpError{http.StatusForbidden, fmt.Sprintf(

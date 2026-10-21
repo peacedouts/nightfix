@@ -38,6 +38,10 @@ type Config struct {
 	// SNSCertURLPrefixes, if set, are extra allowed SigningCertURL prefixes.
 	// For local development only; production accepts only sns.*.amazonaws.com.
 	SNSCertURLPrefixes []string
+	// SNSMaxMessageAge bounds replays: an SNS notification whose signed
+	// Timestamp is older than this is refused. SNS keeps retrying a failed
+	// delivery for a while, so keep it generous. Default 1h.
+	SNSMaxMessageAge time.Duration
 	// STSEndpoint overrides the regional STS URL for IAM enrollment. Local
 	// development and tests only.
 	STSEndpoint   string
@@ -57,6 +61,9 @@ func (c *Config) defaults() {
 	}
 	if c.PollWait == 0 {
 		c.PollWait = 20 * time.Second
+	}
+	if c.SNSMaxMessageAge == 0 {
+		c.SNSMaxMessageAge = time.Hour
 	}
 	if c.SlackMaxLoginAge == 0 {
 		c.SlackMaxLoginAge = 7 * 24 * time.Hour
