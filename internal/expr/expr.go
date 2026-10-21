@@ -58,6 +58,29 @@ const MaxSourceLen = 4096
 // refused at compile time instead.
 var deniedFunctions = map[string]bool{"replace": true, "format": true, "join": true, "lists.range": true}
 
+// CEL shares list values instead of copying them, so a macro whose body
+// repeats its variable ([v, v]) doubles a value's logical size for the cost
+// of one call. Chained or nested, a few hundred bytes of expression build
+// structures that take minutes to compare or exhaust memory when converted,
+// and the cost limit never sees it. Each doubling needs one macro, so
+// bounding both the number of macros and how often a body uses its variable
+// bounds the blow-up (to MaxIterVarRefs^MaxComprehensions).
+const (
+	MaxComprehensions = 3
+	MaxIterVarRefs    = 4
+	maxResultValues   = 100_000 // backstop when converting a result
+)
+
+func identRefs(e celast.Expr, name string) int {
+	n := 0
+	celast.PreOrderVisit(e, celast.NewExprVisitor(func(x celast.Expr) {
+		if x.Kind() == celast.IdentKind && x.AsIdent() == name {
+			n++
+		}
+	}))
+	return n
+}
+
 // Check compiles an expression and returns a descriptive error if invalid.
 func Check(src string) error {
 	_, err := program(src)
@@ -83,13 +106,26 @@ func program(src string) (cel.Program, error) {
 		return nil, fmt.Errorf("invalid expression %q: %w", src, iss.Err())
 	}
 	var denied string
+	comprehensions := 0
 	celast.PreOrderVisit(ast.NativeRep().Expr(), celast.NewExprVisitor(func(x celast.Expr) {
-		if x.Kind() == celast.CallKind && deniedFunctions[x.AsCall().FunctionName()] && denied == "" {
-			denied = x.AsCall().FunctionName()
+		switch x.Kind() {
+		case celast.CallKind:
+			if deniedFunctions[x.AsCall().FunctionName()] && denied == "" {
+				denied = x.AsCall().FunctionName() + "() is not allowed"
+			}
+		case celast.ComprehensionKind:
+			comprehensions++
+			c := x.AsComprehension()
+			if n := identRefs(c.LoopStep(), c.IterVar()); n > MaxIterVarRefs && denied == "" {
+				denied = fmt.Sprintf("%s is used %d times in one macro body (the limit is %d)", c.IterVar(), n, MaxIterVarRefs)
+			}
 		}
 	}))
+	if comprehensions > MaxComprehensions && denied == "" {
+		denied = fmt.Sprintf("%d macros (map, filter, all, exists…); the limit is %d", comprehensions, MaxComprehensions)
+	}
 	if denied != "" {
-		return nil, fmt.Errorf("invalid expression %q: %s() is not allowed", src, denied)
+		return nil, fmt.Errorf("invalid expression %q: %s", src, denied)
 	}
 	p, err = e.Program(ast, cel.EvalOptions(cel.OptOptimize), cel.CostLimit(1_000_000))
 	if err != nil {
@@ -119,7 +155,8 @@ func Eval(src string, vars Vars) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("evaluate %q: %w", src, err)
 	}
-	return toNative(out)
+	budget := maxResultValues
+	return toNative(out, &budget)
 }
 
 // EvalBool evaluates src and requires a boolean result.
@@ -135,7 +172,10 @@ func EvalBool(src string, vars Vars) (bool, error) {
 	return b, nil
 }
 
-func toNative(v ref.Val) (any, error) {
+func toNative(v ref.Val, budget *int) (any, error) {
+	if *budget--; *budget < 0 {
+		return nil, fmt.Errorf("expression result is too large (over %d values)", maxResultValues)
+	}
 	switch v.Type() {
 	case types.NullType:
 		return nil, nil
@@ -154,7 +194,7 @@ func toNative(v ref.Val) (any, error) {
 		var out []any
 		it := l.Iterator()
 		for it.HasNext() == types.True {
-			e, err := toNative(it.Next())
+			e, err := toNative(it.Next(), budget)
 			if err != nil {
 				return nil, err
 			}
@@ -170,7 +210,7 @@ func toNative(v ref.Val) (any, error) {
 		it := m.Iterator()
 		for it.HasNext() == types.True {
 			k := it.Next()
-			e, err := toNative(m.Get(k))
+			e, err := toNative(m.Get(k), budget)
 			if err != nil {
 				return nil, err
 			}

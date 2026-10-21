@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/peacedouts/nightfix/internal/controlplane"
+	"github.com/peacedouts/nightfix/internal/db"
 	"github.com/peacedouts/nightfix/internal/signing"
 	"github.com/peacedouts/nightfix/internal/testdb"
 )
@@ -36,6 +37,7 @@ type ingestHarness struct {
 	pdMu   sync.Mutex
 	pd     []string
 	pdFail int
+	orgID  string
 }
 
 func setupIngest(t *testing.T, svc map[string]any) *ingestHarness {
@@ -78,6 +80,7 @@ func setupIngest(t *testing.T, svc map[string]any) *ingestHarness {
 		t.Fatal(err)
 	}
 	x.key = org.APIKey
+	x.orgID = org.OrgID
 	if svc == nil {
 		svc = map[string]any{}
 	}
@@ -225,5 +228,74 @@ func TestIngestCloudWatchRequiresTopic(t *testing.T) {
 	if code := x.call("POST", "/v1/integrations", map[string]any{"type": "cloudwatch", "name": "cw", "default_service": "checkout-api",
 		"topic_arn": "arn:aws:sns:us-east-1:123456789012:alarms"}, nil); code/100 != 2 {
 		t.Fatalf("cloudwatch integration with topic_arn: got %d", code)
+	}
+}
+
+// While a page backs off, the notifications queued behind it for the same
+// destination move back with it, so they aren't re-checked on every claim.
+func TestIngestBlockedNotificationsFollowTheHeadsBackoff(t *testing.T) {
+	x := setupIngest(t, nil)
+	x.pdFail = 2
+	x.send(map[string]any{"dedup_key": "A", "summary": "A down"})
+	x.tick() // page fails once
+	x.send(map[string]any{"dedup_key": "A", "summary": "A down", "status": "resolved"})
+	x.tick() // resolve queued behind the backed-off page
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		x.tick()
+		x.pdMu.Lock()
+		n := len(x.pd)
+		x.pdMu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	var pageNext, resolveNext time.Time
+	err := x.srv.DB.WithOrg(context.Background(), x.orgID, func(tx *db.Tx) error {
+		if err := tx.QueryRow(`SELECT next_attempt_at FROM notifications WHERE kind = 'page' AND status = 'pending'`).Scan(&pageNext); err != nil {
+			return err
+		}
+		return tx.QueryRow(`SELECT next_attempt_at FROM notifications WHERE kind = 'resolve' AND status = 'pending'`).Scan(&resolveNext)
+	})
+	if err != nil {
+		t.Fatalf("expected a pending page and resolve after two failures: %v", err)
+	}
+	if resolveNext.Before(pageNext) {
+		t.Fatalf("resolve is due at %v, before the page it waits for (%v)", resolveNext, pageNext)
+	}
+}
+
+// A CloudWatch integration with no pinned topic (created before topic_arn
+// was required) can be fixed in place instead of recreated.
+func TestIngestTopicCanBePinnedOnExistingIntegration(t *testing.T) {
+	x := setupIngest(t, nil)
+	var integ map[string]string
+	x.call("POST", "/v1/integrations", map[string]any{"type": "cloudwatch", "name": "cw", "default_service": "checkout-api",
+		"topic_arn": "arn:aws:sns:us-east-1:123456789012:old"}, &integ)
+	clear := func() {
+		t.Helper()
+		err := x.srv.DB.WithOrg(context.Background(), x.orgID, func(tx *db.Tx) error {
+			_, err := tx.Exec(`UPDATE integrations SET config = '{}' WHERE type = 'cloudwatch'`)
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	clear() // what a legacy integration looks like
+	topic := "arn:aws:sns:us-east-1:123456789012:alarms"
+	if code := x.call("PUT", "/v1/integrations/"+integ["id"]+"/topic", map[string]string{"topic_arn": topic}, nil); code != 200 {
+		t.Fatalf("pin topic: got %d", code)
+	}
+	var got string
+	x.srv.DB.WithOrg(context.Background(), x.orgID, func(tx *db.Tx) error {
+		return tx.QueryRow(`SELECT config->>'topic_arn' FROM integrations WHERE type = 'cloudwatch'`).Scan(&got)
+	})
+	if got != topic {
+		t.Fatalf("topic_arn is %q, want %q", got, topic)
+	}
+	if code := x.call("PUT", "/v1/integrations/"+integ["id"]+"/topic", map[string]string{"topic_arn": "not-an-arn"}, nil); code != 400 {
+		t.Fatalf("invalid topic: got %d, want 400", code)
 	}
 }

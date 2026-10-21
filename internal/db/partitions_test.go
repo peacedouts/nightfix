@@ -74,3 +74,11 @@ func TestPartitionMaintenance(t *testing.T) {
 		t.Fatalf("current partition dropped: %v", err)
 	}
 }
+
+func TestAppRoleCannotCreateInPublic(t *testing.T) {
+	pool := testdb.New(t)
+	_, err := pool.ExecContext(context.Background(), `CREATE TABLE public.planted (x int)`)
+	if err == nil {
+		t.Fatal("the app role could create objects in schema public")
+	}
+}

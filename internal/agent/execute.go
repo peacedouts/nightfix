@@ -303,8 +303,8 @@ func (a *Agent) runShell(ctx context.Context, v *verified, secrets map[string]an
 	}
 	result := map[string]any{
 		"exitCode": code,
-		"stdout":   truncateUTF8(out.red.apply(stdout.String()), agentapi.MaxOutputBytes),
-		"stderr":   truncateUTF8(out.red.apply(stderr.String()), agentapi.MaxOutputBytes),
+		"stdout":   resultText(out.red, stdout.String()),
+		"stderr":   resultText(out.red, stderr.String()),
 	}
 	if ctx.Err() != nil {
 		return result, &code, ctx.Err()
@@ -316,6 +316,20 @@ func (a *Agent) runShell(ctx context.Context, v *verified, secrets map[string]an
 		return result, &code, fmt.Errorf("script exited with code %d", code)
 	}
 	return result, &code, nil
+}
+
+// resultText redacts captured output and trims it to MaxOutputBytes. When the
+// capture was cut off, its last bytes may be the start of a secret that no
+// longer matches whole, so they're dropped (split) rather than kept. Redacting
+// first and then trimming isn't enough: replacements shorten the text, which
+// would pull a partial secret from past the cut back under the limit.
+func resultText(red *redactor, raw string) string {
+	if len(raw) > agentapi.MaxOutputBytes {
+		raw, _ = red.split(raw)
+	} else {
+		raw = red.apply(raw)
+	}
+	return truncateUTF8(raw, agentapi.MaxOutputBytes)
 }
 
 func envOr(k, def string) string {

@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	mrand "math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/peacedouts/nightfix/internal/agentapi"
 	"github.com/peacedouts/nightfix/internal/runbook"
@@ -384,4 +386,105 @@ type fakeIAM struct{}
 func (fakeIAM) Region() string { return "us-east-1" }
 func (fakeIAM) SignGetCallerIdentity(context.Context, string, map[string]string) (map[string][]string, error) {
 	return map[string][]string{}, nil
+}
+
+// streamAll feeds writes through split the way streamWriter does.
+func streamAll(r *redactor, writes ...string) string {
+	var out, tail string
+	for _, w := range writes {
+		e, k := r.split(tail + w)
+		out += e
+		tail = k
+	}
+	return out + r.apply(tail)
+}
+
+// Overlapping secrets, where one's end is another's start: no write split
+// may leak more than redacting the whole output at once would.
+func TestStreamRedactsOverlappingSecrets(t *testing.T) {
+	cases := []struct {
+		secrets    []string
+		full, leak string
+	}{
+		{[]string{"zzzzab", "abcdefghijk"}, "hello zzzzabcdefghijk bye", "cdefghij"},
+		{[]string{"abcabcXYZ123", "qqqqab"}, "...qqqqabcabcXYZ123...", "XYZ"},
+		{[]string{strings.Repeat("z", 20) + "ab", "ab" + "cdefghijklmnopqrstuvwxyz0123"},
+			strings.Repeat(".", 50) + strings.Repeat("z", 20) + "abcdefghijklmnopqrstuvwxyz0123" + strings.Repeat(".", 50), "mnopqrst"},
+	}
+	for _, c := range cases {
+		r := newRedactor(c.secrets)
+		for i := 1; i < len(c.full); i++ {
+			if got := streamAll(r, c.full[:i], c.full[i:]); strings.Contains(got, c.leak) {
+				t.Fatalf("secrets %v, split at %d leaked %q: %q", c.secrets, i, c.leak, got)
+			}
+		}
+	}
+}
+
+// Randomized: whatever the secrets and however the output is split into
+// writes, streaming never shows a secret that redacting all at once hides.
+func TestStreamRedactionMatchesWholeOutput(t *testing.T) {
+	rng := mrand.New(mrand.NewSource(1))
+	word := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = "abcz"[rng.Intn(4)]
+		}
+		return string(b)
+	}
+	for iter := 0; iter < 3000; iter++ {
+		var secrets []string
+		for i := 0; i < 1+rng.Intn(3); i++ {
+			secrets = append(secrets, word(4+rng.Intn(8)))
+		}
+		r := newRedactor(secrets)
+		full := word(10 + rng.Intn(60))
+		for i := 0; i < 1+rng.Intn(3); i++ {
+			at := rng.Intn(len(full))
+			full = full[:at] + secrets[rng.Intn(len(secrets))] + full[at:]
+		}
+		var writes []string
+		for rest := full; rest != ""; {
+			n := 1 + rng.Intn(len(rest))
+			writes, rest = append(writes, rest[:n]), rest[n:]
+		}
+		whole, got := r.apply(full), streamAll(r, writes...)
+		for _, s := range secrets {
+			if !strings.Contains(whole, s) && strings.Contains(got, s) {
+				t.Fatalf("secrets %q, writes %q: stream leaked %q: %q (whole: %q)", secrets, writes, s, got, whole)
+			}
+		}
+	}
+}
+
+func TestStreamNeverSplitsACharacter(t *testing.T) {
+	r := newRedactor([]string{"supersecretvalue"})
+	text := strings.Repeat("ünïcödé ", 20)
+	for i := 1; i < len(text); i++ {
+		if e, _ := r.split(text[:i]); !utf8.ValidString(e) {
+			t.Fatalf("write of %d bytes emitted a chunk ending mid-character", i)
+		}
+	}
+}
+
+// Captured output over the limit: a secret cut off at the limit must not
+// survive as a fragment, even after earlier replacements shorten the text.
+func TestResultTextDropsPartialSecretAtLimit(t *testing.T) {
+	sec := strings.Repeat("S", 90) + "TAILSECRET"
+	r := newRedactor([]string{sec})
+	extra := r.maxNeedle()
+	var b strings.Builder
+	b.WriteString("token=" + sec + "\nagain=" + sec + "\n")
+	for b.Len() < agentapi.MaxOutputBytes+extra-50 {
+		b.WriteString("x")
+	}
+	b.WriteString(sec)
+	raw := b.String()[:agentapi.MaxOutputBytes+extra] // what the capture buffer keeps
+	got := resultText(r, raw)
+	if len(got) > agentapi.MaxOutputBytes {
+		t.Fatalf("result is %d bytes", len(got))
+	}
+	if tail := got[len(got)-200:]; strings.Contains(tail, "SSSSSSSSSS") {
+		t.Fatalf("result ends with part of the secret: ...%q", tail[len(tail)-40:])
+	}
 }

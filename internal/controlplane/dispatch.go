@@ -354,7 +354,7 @@ func (s *Server) Output(ctx context.Context, a agentIdentity, attemptID string, 
 			return err
 		}
 		var stored int
-		if err := tx.QueryRow(`SELECT COALESCE(sum(length(data)), 0) FROM step_output_chunks WHERE attempt_id = $1`, attemptID).Scan(&stored); err != nil {
+		if err := tx.QueryRow(`SELECT COALESCE(sum(octet_length(data)), 0) FROM step_output_chunks WHERE attempt_id = $1`, attemptID).Scan(&stored); err != nil {
 			return err
 		}
 		for _, c := range b.Chunks {

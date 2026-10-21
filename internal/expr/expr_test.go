@@ -2,9 +2,11 @@ package expr
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEvalAgainstJSONResult(t *testing.T) {
@@ -78,5 +80,47 @@ func TestExpensiveFunctionsAreRefused(t *testing.T) {
 	// Ordinary string helpers still work.
 	if v, err := Eval(`"  42 ".trim() == "42" && "a-b".split("-").size() == 2 && "ABC".lowerAscii() == "abc"`, nil); err != nil || v != true {
 		t.Errorf("got %v, %v", v, err)
+	}
+}
+
+// Chained or nested macros whose bodies repeat their variable build
+// exponentially large shared structures inside the cost limit; one
+// expression could pin a worker for minutes or crash it.
+func TestMacroAmplificationIsBounded(t *testing.T) {
+	chain := func(depth int, body string) string {
+		s := `[1,2,3,4,5,6,7,8]`
+		for i := 0; i < depth; i++ {
+			v := fmt.Sprintf("v%d", i)
+			s = fmt.Sprintf("[%s].map(%s, %s)[0]", s, v, strings.ReplaceAll(body, "X", v))
+		}
+		return s
+	}
+	for _, src := range []string{
+		chain(4, "X+X"),
+		chain(4, "[X, X]"),
+		chain(2, "[X, X, X, X, X]") + ".size() > 0", // too many uses of the variable
+		chain(5, "X") + ".size() > 0",
+	} {
+		if err := Check(src); err == nil {
+			t.Errorf("accepted %s", src)
+		}
+	}
+	// Within the limits the worst case stays small and fast.
+	start := time.Now()
+	if _, err := Eval(chain(3, "[X, X, X, X]"), nil); err != nil {
+		t.Fatalf("bounded expression failed: %v", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("bounded expression took %v", d)
+	}
+	// Ordinary macro use still works.
+	if v, err := Eval(`alert.labels.exists(k, k == "service") && [1,2,3].filter(x, x > 1).size() == 2 && [1,2].all(x, x > 0)`,
+		Vars{"alert": map[string]any{"labels": map[string]any{"service": "a"}}}); err != nil || v != true {
+		t.Fatalf("got %v, %v", v, err)
+	}
+	// A huge result is refused instead of converted.
+	big := make([]any, maxResultValues+1)
+	if _, err := Eval(`params.items`, Vars{"params": map[string]any{"items": big}}); err == nil {
+		t.Fatal("oversized result converted")
 	}
 }
