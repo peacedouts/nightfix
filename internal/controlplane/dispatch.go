@@ -406,6 +406,18 @@ func (s *Server) Result(ctx context.Context, a agentIdentity, attemptID string, 
 		default:
 			return httpError{400, "invalid result status"}
 		}
+		// The control plane's own cancellations are already terminal above,
+		// so a "cancelled" report means the agent stopped the step itself
+		// (typically shutting down mid-step). The step may or may not have
+		// done its work: handle it like a lost agent (retry only if
+		// idempotent, otherwise a human decides) rather than leaving the run
+		// waiting on an attempt that will never finish.
+		if r.Status == "cancelled" {
+			r.Status = "lost"
+			if r.Error == "" {
+				r.Error = "the agent stopped the step before it finished"
+			}
+		}
 		var exit sql.NullInt64
 		if r.ExitCode != nil {
 			exit = sql.NullInt64{Int64: int64(*r.ExitCode), Valid: true}

@@ -324,7 +324,7 @@ func (a *Agent) verify(d agentapi.Dispatch) (*verified, error) {
 		return nil, errors.New("agent is frozen locally")
 	}
 	trust, labels := a.trust()
-	env, err := signing.OpenEnvelope(d.Envelope, trust, a.id.AgentID, time.Now())
+	env, err := signing.OpenEnvelope(d.Envelope, trust, a.id.OrgID, a.id.AgentID, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +372,8 @@ func (a *Agent) verify(d agentapi.Dispatch) (*verified, error) {
 func (a *Agent) trust() (signing.TrustConfig, map[string]string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	tc := signing.TrustConfig{Keys: map[string]string{}, RequiredSigners: a.id.Trust.RequiredSigners}
+	tc := signing.TrustConfig{Keys: map[string]string{}, RequiredSigners: a.id.Trust.RequiredSigners,
+		EnvelopeSigners: a.id.Trust.EnvelopeSigners}
 	for id, pub := range a.id.Trust.Keys {
 		tc.Keys[id] = pub
 	}

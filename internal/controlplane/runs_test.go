@@ -248,3 +248,30 @@ func TestRenewalKeepsPreviousCertUntilNewOneIsUsed(t *testing.T) {
 		t.Fatal("old serial stopped working after a retried renewal")
 	}
 }
+
+func TestAgentCancelledStepDoesNotStrandRun(t *testing.T) {
+	e := setupRunHarness(t)
+	ctx := context.Background()
+	id := e.startRun("    - id: s1\n      type: shell\n      run: echo hi\n")
+	a := e.poll()
+	e.ack(a)
+	// The agent stopped the step on its own (e.g. shutting down).
+	if err := e.s.Result(ctx, e.a, a, agentapi.Result{Status: "cancelled"}); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.run(id)["status"]; st != "needs_human" {
+		t.Fatalf("run status %v; a non-idempotent step the agent abandoned needs a human", st)
+	}
+
+	// An idempotent step is retried instead.
+	e2 := setupRunHarness(t)
+	id2 := e2.startRun("    - id: s1\n      type: shell\n      idempotent: true\n      retries: 1\n      run: echo hi\n")
+	a2 := e2.poll()
+	e2.ack(a2)
+	if err := e2.s.Result(ctx, e2.a, a2, agentapi.Result{Status: "cancelled"}); err != nil {
+		t.Fatal(err)
+	}
+	if next := e2.poll(); next == "" || next == a2 {
+		t.Fatalf("idempotent step wasn't re-dispatched (run %v)", e2.run(id2)["status"])
+	}
+}
