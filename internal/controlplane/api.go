@@ -254,6 +254,11 @@ func (s *Server) apiCreateIntegration(r *http.Request, p principal) (any, error)
 	if req.Type != "cloudwatch" && req.Type != "webhook" {
 		return nil, httpError{400, "type must be cloudwatch or webhook"}
 	}
+	// Without a pinned topic, any AWS account could subscribe this URL to its
+	// own topic and publish validly signed, forged alarms.
+	if req.Type == "cloudwatch" && !snsTopicArnRe.MatchString(req.TopicArn) {
+		return nil, httpError{400, "topic_arn is required for cloudwatch integrations (arn:aws:sns:<region>:<account>:<topic>)"}
+	}
 	for k, v := range req.SeverityMap {
 		if !validSeverity[v] {
 			return nil, httpError{400, "severity_map." + k + " must be critical, high, warning or info"}

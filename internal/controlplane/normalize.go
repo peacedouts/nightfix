@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Alert is the normalized form every integration maps into
@@ -256,9 +257,42 @@ func verifyWebhook(secret string, body []byte, header string, now time.Time) err
 	return nil
 }
 
+// truncate cuts s to at most n bytes without splitting a UTF-8 character
+// (Postgres rejects text with a partial character).
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
 	return s[:n]
+}
+
+// cleanText makes untrusted text storable: valid UTF-8 and no NUL bytes,
+// which Postgres rejects in text and jsonb.
+func cleanText(s string) string {
+	return strings.ReplaceAll(strings.ToValidUTF8(s, "\uFFFD"), "\x00", "")
+}
+
+func cleanMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[cleanText(k)] = cleanText(v)
+	}
+	return out
+}
+
+// sanitizeAlert is applied to every normalized alert before it's stored, so
+// no payload content can make processing fail.
+func sanitizeAlert(a Alert) Alert {
+	a.Fingerprint = cleanText(a.Fingerprint)
+	a.Summary = cleanText(a.Summary)
+	a.Source = cleanText(a.Source)
+	a.Labels = cleanMap(a.Labels)
+	a.Annotations = cleanMap(a.Annotations)
+	return a
 }

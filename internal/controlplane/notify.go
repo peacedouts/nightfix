@@ -41,6 +41,11 @@ func (s *Server) DeliverNotifications(ctx context.Context) (int, error) {
 			}
 			secret, err := s.Sealer.Open(cred, tx.OrgID)
 			if err != nil {
+				// A credential that can't be unsealed won't unseal next time
+				// either; failing it keeps it from blocking the outbox.
+				s.Log.Error("notification credential unreadable", "notification", id, "err", err)
+				_, err := tx.Exec(`UPDATE notifications SET status = 'failed', attempts = attempts + 1, last_error = $2 WHERE id = $1`,
+					id, "escalation target credential could not be decrypted")
 				return err
 			}
 			sendErr := s.send(ctx, typ, kind, string(secret), cfg.V, payload.V)
