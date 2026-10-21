@@ -460,9 +460,15 @@ func (s *Server) apiListAgents(r *http.Request, p principal) (any, error) {
 // ---------------------------------------------------------------------------
 
 func readRunbook(r *http.Request) (*runbook.Runbook, []byte, error) {
-	src, err := io.ReadAll(io.LimitReader(r.Body, 512<<10))
+	const maxRunbook = 512 << 10
+	src, err := io.ReadAll(io.LimitReader(r.Body, maxRunbook+1))
 	if err != nil {
 		return nil, nil, err
+	}
+	// Refuse rather than cut: a truncated runbook can still parse and lint,
+	// and would then be signed and executed missing its last lines.
+	if len(src) > maxRunbook {
+		return nil, nil, httpError{http.StatusRequestEntityTooLarge, "runbook exceeds 512 KiB"}
 	}
 	rb, err := runbook.Parse(src)
 	if err != nil {
@@ -521,6 +527,20 @@ func (s *Server) apiPublishRunbook(r *http.Request, p principal) (any, error) {
 		// The publisher must be allowed on the new content...
 		if err := p.can("responder", runbookResource(rb.Metadata.Team, rb.Metadata.Tags, selector(rb))); err != nil {
 			return err
+		}
+		// ...and on every service its triggers act on: an alert trigger
+		// changes how that service's incidents page (beforePaging holds the
+		// page), so it can't be attached to another team's service.
+		for _, t := range rb.Spec.Triggers {
+			for _, name := range t.Services {
+				var team sql.NullString
+				if err := tx.QueryRow(`SELECT team FROM services WHERE name = $1 AND archived_at IS NULL`, name).Scan(&team); err != nil {
+					return err
+				}
+				if err := p.can("responder", resource{Kind: "service", Team: team.String}); err != nil {
+					return httpError{403, "you can't attach triggers to service " + name}
+				}
+			}
 		}
 		var rbID string
 		var latest int

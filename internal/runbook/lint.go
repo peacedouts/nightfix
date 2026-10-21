@@ -85,7 +85,7 @@ func Lint(rb *Runbook) Issues {
 			add(path+".type", "must be string, int, bool, enum or duration")
 		}
 		if p.Pattern != "" {
-			if _, err := regexp.Compile(p.Pattern); err != nil {
+			if _, err := CompilePattern(p.Pattern); err != nil {
 				add(path+".pattern", "invalid regex: %v", err)
 			}
 		}
@@ -279,6 +279,8 @@ func lintStep(path string, s Step, rb *Runbook, add func(string, string, ...any)
 		for _, k := range sortedKeys(s.Env) {
 			if !envKeyRe.MatchString(k) {
 				add(path+".env."+k, "env names must match %s", envKeyRe)
+			} else if ReservedEnv(k) {
+				add(path+".env."+k, "%s is reserved: the shell or the agent acts on it", k)
 			}
 			lintTemplate(path+".env."+k, s.Env[k], true, add)
 			checkSecretRefs(path+".env."+k, s.Env[k], rb, add)

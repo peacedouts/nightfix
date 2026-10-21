@@ -233,6 +233,9 @@ func (a *Agent) runShell(ctx context.Context, v *verified, secrets map[string]an
 	// what a script needs to find programs. Values arrive only through env.
 	env := []string{"PATH=" + envOr("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME=" + dir, "TMPDIR=" + dir, "LANG=C.UTF-8"}
 	for k, tmpl := range v.step.Env {
+		if runbook.ReservedEnv(k) { // also refused at publish; checked again here
+			return nil, nil, fmt.Errorf("env %s is reserved", k)
+		}
 		val, err := expr.RenderString(tmpl, vars)
 		if err != nil {
 			return nil, nil, fmt.Errorf("env %s: %w", k, err)

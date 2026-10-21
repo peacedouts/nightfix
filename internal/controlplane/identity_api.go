@@ -118,6 +118,19 @@ func (s *Server) apiAddTeamMember(r *http.Request, p principal) (any, error) {
 		if err != nil {
 			return err
 		}
+		// Joining a team grants every role bound to it, so adding someone to
+		// an admin- or owner-bound team is the same as granting that role:
+		// only an owner may do it (otherwise an admin could add themselves to
+		// an owners team).
+		top, err := s.teamTopRole(tx, teamID)
+		if err != nil {
+			return err
+		}
+		if roleRank[top] >= roleRank["admin"] {
+			if err := p.atLeast("owner"); err != nil {
+				return httpError{403, "only an owner can add members to a team that holds the " + top + " role"}
+			}
+		}
 		var userID string
 		if err := tx.QueryRow(`SELECT id FROM nfx_org_user_by_email($1)`, req.Email).Scan(&userID); err != nil {
 			return httpError{404, "no member with that email has logged in yet"}
@@ -129,6 +142,26 @@ func (s *Server) apiAddTeamMember(r *http.Request, p principal) (any, error) {
 		return tx.Audit(r.Context(), p.actorType(), p.actor(), "team.member_add", "team", teamID, map[string]string{"user": userID})
 	})
 	return map[string]bool{"ok": err == nil}, err
+}
+
+// teamTopRole is the highest role bound to a team ("" if none).
+func (s *Server) teamTopRole(tx *db.Tx, teamID string) (string, error) {
+	rows, err := tx.Query(`SELECT role FROM role_bindings WHERE subject_type = 'team' AND subject_id = $1`, teamID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	top := ""
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return "", err
+		}
+		if roleRank[role] > roleRank[top] {
+			top = role
+		}
+	}
+	return top, rows.Err()
 }
 
 func (s *Server) teamIDBySlug(tx *db.Tx, slug string) (string, error) {

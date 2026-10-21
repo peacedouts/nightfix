@@ -3,6 +3,7 @@ package expr
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -56,5 +57,26 @@ func TestInvalidExpression(t *testing.T) {
 	}
 	if _, err := Eval(`missing.field`, Vars{}); err == nil {
 		t.Fatal("expected error for undeclared variable")
+	}
+}
+
+func TestExpensiveFunctionsAreRefused(t *testing.T) {
+	for _, src := range []string{
+		`"aaaaaaaaaa".replace("a","aaaaaaaaaa").replace("a","aaaaaaaaaa")`,
+		`"%s".format(["x"])`,
+		`["a","b"].join("-")`,
+		`lists.range(50000000).size() > 0`,
+		`alert.summary.replace("a", "b") == ""`,
+	} {
+		if err := Check(src); err == nil {
+			t.Errorf("Check(%s) accepted an expression that can exhaust memory", src)
+		}
+	}
+	if err := Check(strings.Repeat("1 + ", MaxSourceLen) + "1 == 2"); err == nil {
+		t.Error("overlong expression accepted")
+	}
+	// Ordinary string helpers still work.
+	if v, err := Eval(`"  42 ".trim() == "42" && "a-b".split("-").size() == 2 && "ABC".lowerAscii() == "abc"`, nil); err != nil || v != true {
+		t.Errorf("got %v, %v", v, err)
 	}
 }
