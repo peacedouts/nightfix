@@ -75,3 +75,37 @@ func (r *redactor) maxNeedle() int {
 	}
 	return len(r.needles[0])
 }
+
+// split returns the redacted part of raw that is safe to emit now, and the raw
+// tail to hold back. Fewer than maxNeedle() bytes are held, and the cut is
+// moved forward past any match it would otherwise land inside, so no secret
+// is ever divided between what is emitted and what is held.
+func (r *redactor) split(raw string) (emit, keep string) {
+	hold := r.maxNeedle() - 1
+	if hold <= 0 {
+		return raw, ""
+	}
+	cut := len(raw) - hold
+	if cut <= 0 {
+		return "", raw
+	}
+	for moved := true; moved; {
+		moved = false
+		for _, n := range r.needles {
+			// Any occurrence straddling cut starts within len(n)-1 bytes before it.
+			from := max(0, cut-len(n)+1)
+			for i := from; i < cut; {
+				j := strings.Index(raw[i:], n)
+				if j < 0 || i+j >= cut {
+					break
+				}
+				if end := i + j + len(n); end > cut {
+					cut, moved = end, true
+					break
+				}
+				i += j + 1
+			}
+		}
+	}
+	return r.apply(raw[:cut]), raw[cut:]
+}

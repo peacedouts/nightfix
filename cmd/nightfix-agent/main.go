@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -29,10 +30,19 @@ func main() {
 	orgID := flag.String("org", os.Getenv("NIGHTFIX_ORG_ID"), "org id (org_…), required for iam enrollment")
 	token := flag.String("enroll-token", os.Getenv("NIGHTFIX_ENROLL_TOKEN"), "enrollment token (token method only)")
 	stateDir := flag.String("state-dir", os.Getenv("NIGHTFIX_AGENT_STATE_DIR"), "where to keep identity; empty re-enrolls on every start")
-	signers := flag.String("required-signers", os.Getenv("NIGHTFIX_REQUIRED_SIGNERS"), "comma-separated signer key ids to pin locally (overrides the control plane)")
+	signers := flag.String("required-signers", os.Getenv("NIGHTFIX_REQUIRED_SIGNERS"), "comma-separated signers to pin locally, each key_id or key_id=base64-public-key (overrides the control plane; include the key for the full guarantee)")
 	allowlist := flag.String("allowlist", os.Getenv("NIGHTFIX_ALLOWLIST_FILE"), "allowlist file")
 	allowMode := flag.String("allowlist-mode", env("NIGHTFIX_ALLOWLIST_MODE", "off"), "off | warn | enforce")
-	freeze := flag.Bool("freeze", os.Getenv("NIGHTFIX_AGENT_FREEZE") == "true", "local kill switch: connect but run nothing")
+	freezeDefault := false
+	if v := os.Getenv("NIGHTFIX_AGENT_FREEZE"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			// Fail closed: an unreadable kill switch must not mean "run".
+			fail(fmt.Errorf("NIGHTFIX_AGENT_FREEZE=%q is not a boolean (use true or false)", v))
+		}
+		freezeDefault = b
+	}
+	freeze := flag.Bool("freeze", freezeDefault, "local kill switch: connect but run nothing")
 	slots := flag.Int("slots", 4, "max concurrent steps")
 	flag.Parse()
 
@@ -53,14 +63,22 @@ func main() {
 		fail(err)
 	}
 	var pinned []string
+	pinnedKeys := map[string]string{}
 	for _, s := range strings.Split(*signers, ",") {
-		if s = strings.TrimSpace(s); s != "" {
-			pinned = append(pinned, s)
+		if s = strings.TrimSpace(s); s == "" {
+			continue
+		}
+		id, pub, hasKey := strings.Cut(s, "=")
+		pinned = append(pinned, id)
+		if hasKey {
+			pinnedKeys[id] = pub
+		} else {
+			log.Warn("required signer pinned without its public key; the key still comes from the control plane", "key_id", id)
 		}
 	}
 	a, err := agent.New(agent.Config{
 		Endpoint: *endpoint, CAPEM: caPEM, EnrollMethod: *method, OrgID: *orgID, IAM: aws, EnrollToken: *token, StateDir: *stateDir,
-		RequiredSigners: pinned, AllowlistFile: *allowlist, AllowlistMode: *allowMode,
+		RequiredSigners: pinned, PinnedKeys: pinnedKeys, AllowlistFile: *allowlist, AllowlistMode: *allowMode,
 		Freeze: *freeze, Slots: *slots, AWS: aws, Log: log,
 	})
 	if err != nil {
