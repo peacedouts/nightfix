@@ -34,6 +34,8 @@ type CA struct {
 const AgentCertTTL = 24 * time.Hour
 
 // LoadOrCreateCA reads ca.crt/ca.key from dir, creating them if absent.
+// Local development only; deployments keep the CA in Postgres
+// (LoadOrCreateCAInDB).
 func LoadOrCreateCA(dir string) (*CA, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
@@ -44,25 +46,26 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 		if err != nil {
 			return nil, err
 		}
-		cb, _ := pem.Decode(certPEM)
-		kb, _ := pem.Decode(keyPEM)
-		if cb == nil || kb == nil {
-			return nil, errors.New("malformed CA files")
-		}
-		cert, err := x509.ParseCertificate(cb.Bytes)
-		if err != nil {
-			return nil, err
-		}
-		key, err := x509.ParseECPrivateKey(kb.Bytes)
-		if err != nil {
-			return nil, err
-		}
-		return &CA{Cert: cert, CertPEM: certPEM, key: key}, nil
+		return parseCA(certPEM, keyPEM)
 	}
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	certPEM, keyPEM, err := generateCA()
 	if err != nil {
 		return nil, err
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		return nil, err
+	}
+	return parseCA(certPEM, keyPEM)
+}
+
+// generateCA creates a new agent CA (P-256, 5 years).
+func generateCA() (certPEM, keyPEM []byte, err error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          randSerial(),
@@ -76,15 +79,28 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
+		return nil, nil, err
+	}
+	kder, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder}), nil
+}
+
+func parseCA(certPEM, keyPEM []byte) (*CA, error) {
+	cb, _ := pem.Decode(certPEM)
+	kb, _ := pem.Decode(keyPEM)
+	if cb == nil || kb == nil {
+		return nil, errors.New("malformed CA certificate or key")
+	}
+	cert, err := x509.ParseCertificate(cb.Bytes)
+	if err != nil {
 		return nil, err
 	}
-	cert, _ := x509.ParseCertificate(der)
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	kder, _ := x509.MarshalECPrivateKey(key)
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder}), 0o600); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+	key, err := x509.ParseECPrivateKey(kb.Bytes)
+	if err != nil {
 		return nil, err
 	}
 	return &CA{Cert: cert, CertPEM: certPEM, key: key}, nil

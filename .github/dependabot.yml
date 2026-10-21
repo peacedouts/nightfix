@@ -1,0 +1,16 @@
+# Keeps pinned dependencies current: action commit SHAs, Go modules, and
+# (once the Dockerfile's base images are pinned by digest) those digests.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

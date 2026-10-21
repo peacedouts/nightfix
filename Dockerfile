@@ -1,14 +1,20 @@
+# syntax=docker/dockerfile:1.7
 # Builds both binaries into small images.
 #   docker build --target controlplane -t nightfix .
 #   docker build --target agent -t nightfix-agent .
-FROM golang:1.24 AS build
+# Go cross-compiles, so the build stage runs natively and only the final
+# stages are per-architecture (amd64 and arm64/Graviton).
+FROM --platform=$BUILDPLATFORM golang:1.24 AS build
+ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/nightfix ./cmd/nightfix-agent
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/nightfix ./cmd/nightfix-agent
 
 FROM gcr.io/distroless/static-debian12:nonroot AS controlplane
+# AWS's RDS CA bundle, so database connections use sslmode=verify-full.
+ADD --chmod=0644 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /etc/ssl/rds/global-bundle.pem
 COPY --from=build /out/nightfix /usr/local/bin/nightfix
 ENTRYPOINT ["nightfix"]
 CMD ["serve"]
@@ -21,5 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home /var/lib/nightfix nightfix
 COPY --from=build /out/nightfix-agent /usr/local/bin/nightfix-agent
+# Scratch space for shell steps. Declared as a volume so ECS gives tasks a
+# writable /tmp with these permissions even with a read-only root filesystem.
+RUN chmod 1777 /tmp
+VOLUME ["/tmp"]
+ENV HOME=/tmp TMPDIR=/tmp
 USER nightfix
 ENTRYPOINT ["nightfix-agent"]

@@ -5,7 +5,12 @@ package db
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/pbkdf2"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -167,7 +172,7 @@ func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 		// Roles are cluster-wide, so migrators of different databases can race
 		// here; a duplicate is fine.
 		`DO $$ BEGIN
-		   BEGIN CREATE ROLE nfx_owner NOLOGIN BYPASSRLS; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END;
+		   BEGIN CREATE ROLE nfx_owner NOLOGIN; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END;
 		   BEGIN CREATE ROLE nfx_app LOGIN; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END;
 		 END $$`,
 		"GRANT nfx_owner TO " + me,
@@ -191,8 +196,14 @@ func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 		}
 	}
 	if appPassword != "" {
-		if _, err := conn.ExecContext(ctx, "ALTER ROLE nfx_app PASSWORD "+quoteLiteral(appPassword)); err != nil {
+		// Send a SCRAM verifier, not the password: if the statement ever
+		// errors, Postgres logs its text, and RDS exports those logs.
+		v, err := scramVerifier(appPassword)
+		if err != nil {
 			return err
+		}
+		if _, err := conn.ExecContext(ctx, "ALTER ROLE nfx_app PASSWORD "+quoteLiteral(v)); err != nil {
+			return errors.New("set nfx_app password: " + strings.SplitN(err.Error(), "PASSWORD", 2)[0])
 		}
 	}
 
@@ -250,4 +261,26 @@ func IsUniqueViolation(err error) bool {
 		return pqErr.SQLState() == "23505"
 	}
 	return false
+}
+
+// scramVerifier returns a SCRAM-SHA-256 verifier for password in the form
+// Postgres stores (RFC 5802, RFC 7677), so the plaintext never reaches the server.
+func scramVerifier(password string) (string, error) {
+	const iterations = 4096
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	salted, err := pbkdf2.Key(sha256.New, password, salt, iterations, sha256.Size)
+	if err != nil {
+		return "", err
+	}
+	mac := func(key []byte, msg string) []byte {
+		h := hmac.New(sha256.New, key)
+		h.Write([]byte(msg))
+		return h.Sum(nil)
+	}
+	stored := sha256.Sum256(mac(salted, "Client Key"))
+	b64 := base64.StdEncoding.EncodeToString
+	return fmt.Sprintf("SCRAM-SHA-256$%d:%s$%s:%s", iterations, b64(salt), b64(stored[:]), b64(mac(salted, "Server Key"))), nil
 }

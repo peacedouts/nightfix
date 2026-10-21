@@ -100,6 +100,9 @@ type NewOrg struct {
 	OrgID     string
 	APIKey    string // shown once
 	SigningID string
+	// SigningPin is "key_id=base64-public-key", the value customers pin in
+	// agents (--required-signers) so the control plane can't swap the key.
+	SigningPin string
 }
 
 // CreateOrg creates an org with its signing key, trust config, catch-all
@@ -141,7 +144,8 @@ func (s *Server) CreateOrg(ctx context.Context, name, slug string) (*NewOrg, err
 	if err != nil {
 		return nil, err
 	}
-	return &NewOrg{OrgID: orgID, APIKey: apiKey, SigningID: key.ID}, nil
+	return &NewOrg{OrgID: orgID, APIKey: apiKey, SigningID: key.ID,
+		SigningPin: key.ID + "=" + base64.StdEncoding.EncodeToString(key.Public)}, nil
 }
 
 // signingKey returns the org's active control-plane key, decrypted.

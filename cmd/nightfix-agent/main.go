@@ -50,7 +50,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var caPEM []byte
+	// The gateway CA: NIGHTFIX_CA_PEM (the certificate itself, convenient on
+	// ECS) or a file. Get it from https://<api>/v1/agent-ca.pem.
+	caPEM := []byte(os.Getenv("NIGHTFIX_CA_PEM"))
 	if *caFile != "" {
 		b, err := os.ReadFile(*caFile)
 		if err != nil {

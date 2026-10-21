@@ -337,7 +337,7 @@ func (s *Server) handleSlackCommand(w http.ResponseWriter, r *http.Request) {
 func (s *Server) slackRespond(responseURL, text string) {
 	ok := strings.HasPrefix(responseURL, slackResponseHost)
 	for _, p := range s.Cfg.SlackResponseURLPrefixes {
-		ok = ok || strings.HasPrefix(responseURL, p)
+		ok = ok || (p != "" && strings.HasPrefix(responseURL, p))
 	}
 	if !ok {
 		s.Log.Warn("slack interaction: refusing unexpected response_url host")

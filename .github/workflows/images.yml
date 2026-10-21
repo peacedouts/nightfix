@@ -1,0 +1,88 @@
+name: images
+
+# On every push to main: build both images for amd64 and arm64, push them
+# with an SBOM and build provenance, and sign them with Sigstore (keyless, so
+# the signature names this workflow on main).
+#
+#   agent:         ghcr.io/<owner>/nightfix-agent:sha-<commit>. Make the package
+#                  public in GitHub → Packages so customers can pull it.
+#   control plane: ECR :<commit>, once the AWS_PUSH_ROLE_ARN and ECR_REPOSITORY
+#                  repository variables are set (outputs of deploy/terraform).
+#
+# Only main builds images, and only immutable commit tags are published (no
+# :latest, no :main, no release tags). Anyone with write access can push a
+# tag, so tags never get a pushed or signed image. Customers pin a digest or
+# a sha- tag; deploys verify the signature names images.yml on main.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # Sigstore keyless signing
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/nightfix-agent
+          tags: |
+            type=sha,format=long
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: agent
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+      - name: Sign
+        run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/nightfix-agent@${{ steps.build.outputs.digest }}
+
+  controlplane:
+    if: vars.AWS_PUSH_ROLE_ARN != '' && vars.ECR_REPOSITORY != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # AWS OIDC and Sigstore keyless signing
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_PUSH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: controlplane
+          platforms: linux/arm64
+          push: true
+          tags: ${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+          sbom: true
+          provenance: mode=max
+      - name: Sign
+        run: cosign sign --yes ${{ vars.ECR_REPOSITORY }}@${{ steps.build.outputs.digest }}

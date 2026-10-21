@@ -41,7 +41,7 @@ Everything runs locally: a throwaway Postgres, the control plane, a real agent c
 These are scoped out of the skeleton, not changes of direction:
 
 - **Agent transport** is mutual-TLS HTTPS with long-polling, not a gRPC stream. Messages, signatures, leases and failure semantics follow `agent-protocol.md`; swapping the transport doesn't change them.
-- **Keys**: a local CA and a local AES-256-GCM sealer stand in for AWS Private CA and KMS envelope encryption. Signing-key rotation chaining isn't built; the agent accepts trust-config updates from the authenticated control plane, so pin `--required-signers` for the full guarantee.
+- **Keys**: with `NIGHTFIX_KMS_KEY_ID` set (as in the AWS deployment), the credential-sealing key is a KMS-wrapped data key and the agent CA lives in Postgres with its key sealed; locally, files in the state dir stand in. The agent CA is ours rather than AWS Private CA, and per-org runbook signing keys are sealed in Postgres rather than held in KMS. Signing-key rotation chaining isn't built; the agent accepts trust-config updates from the authenticated control plane, so pin `--required-signers` for the full guarantee.
 - **RBAC on reads**: scopes restrict writes (runs, publishing, incident actions); list endpoints aren't filtered by scope yet, so any member can view every incident and runbook. SCIM and custom roles come later.
 - **Login is cached nowhere**: each request with a user token re-syncs the user and their IdP teams. Fine for now; it'll want a short-lived session cache at scale.
 - **Critical-hold grants** (decision #29) aren't built, so critical incidents always page in parallel, which is the documented default.
@@ -63,25 +63,33 @@ internal/signing       bundles, envelopes, trust config, credential sealer
 internal/auth0         Auth0 access-token verification (JWKS, RS256); auth0test/ is a fake tenant
 internal/expr          CEL and ${{ }} templates
 internal/db            pool, per-org transactions, claims, migrator
-migrations/            schema, RLS policies, grants, SECURITY DEFINER functions
+migrations/            schema, RLS policies, grants, SECURITY DEFINER functions (never edit a shipped one; add a new file)
+deploy/                Terraform (control plane, agent module) and the deployment guide
+teaser/                the pre-launch site on nightfix.dev (deployed by the root wrangler.jsonc)
 examples/runbooks/     ecs-service-restart.yaml
 internal/e2e           end-to-end tests of the whole loop
 ```
 
-## Running against real AWS
+## Deploying
+
+`deploy/` has the Terraform for the hosted control plane (VPC, RDS, KMS, ECS Fargate, ALB + NLB, Cloudflare DNS), the customer agent module, and the GitHub workflows that build, sign and roll out images. Start with [deploy/README.md](deploy/README.md).
+
+The database schema runs on managed Postgres without a superuser: CI runs every test as an RDS-like admin (`CREATEROLE CREATEDB`, nothing more).
+
+## Running against real AWS by hand
 
 1. Postgres: `NIGHTFIX_ADMIN_DATABASE_URL=… NIGHTFIX_APP_DB_PASSWORD=… nightfix migrate`, then run `nightfix serve` with `NIGHTFIX_DATABASE_URL` pointing at `nfx_app`. See `cmd/nightfix/main.go` for every setting. Expose `NIGHTFIX_INGEST_ADDR` for SNS (HTTPS in front of it) and `NIGHTFIX_AGENT_ADDR` for agents.
 2. `nightfix org create --name Acme --slug acme` prints an owner API key.
-3. Create a service, escalation targets and a `cloudwatch` integration via the API (the demo script shows each call). Subscribe the integration's ingest URL to your SNS topic; the subscription is confirmed automatically after its signature is verified.
+3. Create a service, escalation targets and a `cloudwatch` integration via the API (the demo script shows each call). CloudWatch integrations require `topic_arn` (`arn:aws:sns:<region>:<account>:<topic>`); only that topic's notifications are accepted. Subscribe the integration's ingest URL to your SNS topic; the subscription is confirmed automatically after its signature is verified.
 4. Create an IAM enrollment rule for the agent's role, then run the agent in your VPC under that role. The role needs whatever your runbooks call — for the example, `ecs:DescribeServices` and `ecs:UpdateService` on the target service. `sts:GetCallerIdentity` needs no permission.
    ```bash
    curl -X POST $API/v1/enrollment-rules -H "Authorization: Bearer $KEY" \
      -d '{"method":"iam","role_arn":"arn:aws:iam::<account>:role/nightfix-agent","labels":{"env":"prod"},"max_agents":2}'
 
    nightfix-agent --endpoint https://<gateway>:8443 --ca-file ca.crt --org org_… \
-     --required-signers <your org signing key id>
+     --required-signers <key_id>=<base64 public key>
    ```
-   Rules match on account + role name (STS's assumed-role ARN doesn't carry the role's path). For hosts without an IAM role, use `"method":"token"` and `--enroll-method token --enroll-token …`.
+   Pin each signer as `key_id=base64-public-key` (`nightfix org create` prints it, and `GET /v1/signing-keys` returns it as `agent_pin`): with the key itself pinned, the control plane can't swap in a different key under the same id. A bare `key_id` only requires that some key with that id signed. Rules match on account + role name (STS's assumed-role ARN doesn't carry the role's path). For hosts without an IAM role, use `"method":"token"` and `--enroll-method token --enroll-token …`.
 5. Publish `examples/runbooks/ecs-service-restart.yaml` with `PUT /v1/runbooks/ecs-service-restart`, editing `services:` and the CloudWatch alarm name in `match:` to fit. Name the alarm's dimensions `ClusterName` and `ServiceName` (aliased to `alert.labels.cluster` / `.service`).
 
 ## User login with Auth0

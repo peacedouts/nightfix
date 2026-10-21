@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,12 @@ func (s *Server) APIHandler() http.Handler {
 		})
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	// The agent gateway's CA certificate (public). Fetched over the API's
+	// publicly trusted TLS, so installing an agent needs no file copying.
+	mux.HandleFunc("GET /v1/agent-ca.pem", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-pem-file")
+		w.Write(s.CA.CertPEM)
+	})
 	route("GET /v1/me", "viewer", func(_ *http.Request, p principal) (any, error) {
 		out := map[string]any{"org": ids.Encode("org", p.OrgID), "principal": p.actor(), "kind": p.Kind, "bindings": p.Bindings}
 		if p.Kind == "user" {
@@ -65,6 +72,7 @@ func (s *Server) APIHandler() http.Handler {
 	route("PUT /v1/routing-rules", "admin", s.apiPutRoutingRules)
 	route("POST /v1/enrollment-rules", "admin", s.apiCreateEnrollmentRule)
 	route("GET /v1/agents", "viewer", s.apiListAgents)
+	route("GET /v1/signing-keys", "viewer", s.apiSigningKeys)
 	route("POST /v1/runbooks/validate", "responder*", s.apiValidateRunbook)
 	route("PUT /v1/runbooks/{name}", "responder*", s.apiPublishRunbook)
 	route("GET /v1/runbooks/{name}", "viewer", s.apiGetRunbook)
@@ -1091,6 +1099,52 @@ func (s *Server) apiAudit(r *http.Request, p principal) (any, error) {
 			out = append(out, map[string]any{"seq": seq, "at": at, "actor": at1 + ":" + aid, "action": action, "resource": rt + ":" + rid})
 		}
 		return rows.Err()
+	})
+	return out, err
+}
+
+// apiSigningKeys lists the org's runbook signing keys (public halves only)
+// and the value to pin in agents: with key_id=public-key pinned, an agent
+// refuses runbooks unless that exact key signed them, whatever the control
+// plane later claims.
+func (s *Server) apiSigningKeys(r *http.Request, p principal) (any, error) {
+	var out map[string]any
+	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		rows, err := tx.Query(`SELECT key_id, owner, state, public_key, created_at FROM signing_keys
+			WHERE state <> 'retired' ORDER BY created_at`)
+		if err != nil {
+			return err
+		}
+		keys := []map[string]any{}
+		pub := map[string]string{}
+		for rows.Next() {
+			var id, owner, state string
+			var pk []byte
+			var at time.Time
+			if err := rows.Scan(&id, &owner, &state, &pk, &at); err != nil {
+				rows.Close()
+				return err
+			}
+			b64 := base64.StdEncoding.EncodeToString(pk)
+			pub[id] = b64
+			keys = append(keys, map[string]any{"key_id": id, "owner": owner, "state": state, "public_key": b64, "created_at": at})
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		var required stringArray
+		if err := tx.QueryRow(`SELECT required_signers FROM org_trust_config`).Scan(&required); err != nil {
+			return err
+		}
+		var pins []string
+		for _, id := range required {
+			if b64, ok := pub[id]; ok {
+				pins = append(pins, id+"="+b64)
+			}
+		}
+		out = map[string]any{"keys": keys, "required_signers": []string(required), "agent_pin": strings.Join(pins, ",")}
+		return nil
 	})
 	return out, err
 }

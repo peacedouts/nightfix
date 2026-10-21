@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"github.com/peacedouts/nightfix/internal/signing"
 	"io"
 	"math/big"
 	"net/http"
@@ -47,6 +48,8 @@ type Stub struct {
 	snsCert []byte
 
 	iam map[string]IAMIdentity
+
+	kmsKey *signing.Sealer // stands in for a KMS key
 }
 
 type ecsService struct {
@@ -63,7 +66,10 @@ func New(healIn time.Duration) *Stub {
 	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "devstub SNS signer"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().AddDate(1, 0, 0)}
 	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	return &Stub{services: map[string]*ecsService{}, healIn: healIn, heal: true, snsKey: key,
+	mk := make([]byte, 32)
+	rand.Read(mk)
+	kmsKey, _ := signing.NewSealer(mk)
+	return &Stub{services: map[string]*ecsService{}, healIn: healIn, heal: true, snsKey: key, kmsKey: kmsKey,
 		snsCert: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
 }
 
@@ -210,7 +216,30 @@ func (s *Stub) handleAWS(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// KMS: data keys bound to the key id and encryption context, like the real thing.
+	kmsAAD := func() string {
+		b, _ := json.Marshal(in["EncryptionContext"])
+		return fmt.Sprint(in["KeyId"]) + "|" + string(b)
+	}
 	switch target {
+	case "TrentService.GenerateDataKey":
+		s.Calls = append(s.Calls, "kms:GenerateDataKey")
+		dk := make([]byte, 32)
+		rand.Read(dk)
+		ct, _ := s.kmsKey.Seal(dk, kmsAAD())
+		json.NewEncoder(w).Encode(map[string]any{"KeyId": in["KeyId"], "CiphertextBlob": base64.StdEncoding.EncodeToString(ct),
+			"Plaintext": base64.StdEncoding.EncodeToString(dk)})
+		return
+	case "TrentService.Decrypt":
+		s.Calls = append(s.Calls, "kms:Decrypt")
+		ct, _ := base64.StdEncoding.DecodeString(fmt.Sprint(in["CiphertextBlob"]))
+		pt, err := s.kmsKey.Open(ct, kmsAAD())
+		if err != nil {
+			awsError(w, 400, "InvalidCiphertextException", "the ciphertext or encryption context is wrong")
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"KeyId": in["KeyId"], "Plaintext": base64.StdEncoding.EncodeToString(pt)})
+		return
 	case "AmazonEC2ContainerServiceV20141113.DescribeServices":
 		s.Calls = append(s.Calls, "ecs:DescribeServices")
 		cluster, _ := in["cluster"].(string)

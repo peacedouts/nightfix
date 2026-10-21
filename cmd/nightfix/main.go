@@ -6,11 +6,19 @@
 //
 // Configuration (environment):
 //
-//	NIGHTFIX_DATABASE_URL        app connection (as nfx_app)
-//	NIGHTFIX_ADMIN_DATABASE_URL  migration connection (can create roles)
-//	NIGHTFIX_APP_DB_PASSWORD     password to set for nfx_app during migrate
-//	NIGHTFIX_STATE_DIR           CA and local master key (default ./.state)
+//	NIGHTFIX_DATABASE_URL        app connection (as nfx_app), or build it from the parts below
+//	NIGHTFIX_ADMIN_DATABASE_URL  migration connection (can create roles), or from the parts below
+//	NIGHTFIX_DB_HOST / _PORT / _NAME   database location (port 5432, name nightfix by default)
+//	NIGHTFIX_DB_SSLMODE          default verify-full when NIGHTFIX_DB_HOST is set
+//	NIGHTFIX_DB_SSLROOTCERT      CA bundle for verify-full (the image ships the RDS bundle)
+//	NIGHTFIX_DB_ADMIN_USER / NIGHTFIX_DB_ADMIN_PASSWORD   migration credentials (RDS master)
+//	NIGHTFIX_APP_DB_PASSWORD     nfx_app's password: set during migrate, used to connect
+//	NIGHTFIX_KMS_KEY_ID          KMS key that wraps the sealing key. When set, the sealing key and
+//	                             agent CA live in Postgres (no disk needed); otherwise the state dir.
+//	NIGHTFIX_STATE_DIR           CA and local master key (default ./.state); local development
 //	NIGHTFIX_MASTER_KEY          base64 32-byte key for sealing credentials (overrides the state dir)
+//	NIGHTFIX_PUBLIC_API_URL      base URL of the API (for Slack request URLs)
+//	NIGHTFIX_ORG_KEY_SECRET_PREFIX  org create stores the owner API key in Secrets Manager as <prefix><slug>
 //	NIGHTFIX_API_ADDR            default :8080
 //	NIGHTFIX_INGEST_ADDR         default :8081
 //	NIGHTFIX_AGENT_ADDR          default :8443 (mutual TLS)
@@ -33,6 +41,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -40,6 +49,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/peacedouts/nightfix/internal/agent/awscall"
 	"github.com/peacedouts/nightfix/internal/auth0"
 	"github.com/peacedouts/nightfix/internal/controlplane"
 	"github.com/peacedouts/nightfix/internal/db"
@@ -56,7 +66,7 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "migrate":
-		err = db.Migrate(ctx, mustEnv("NIGHTFIX_ADMIN_DATABASE_URL"), os.Getenv("NIGHTFIX_APP_DB_PASSWORD"))
+		err = db.Migrate(ctx, databaseURL(true), os.Getenv("NIGHTFIX_APP_DB_PASSWORD"))
 		if err == nil {
 			fmt.Println("migrations applied")
 		}
@@ -129,21 +139,63 @@ func sealer() (*signing.Sealer, error) {
 	return signing.NewSealer(raw)
 }
 
+// databaseURL returns the app (or admin) connection string: the full URL if
+// given, otherwise built from NIGHTFIX_DB_* parts, which is how ECS injects
+// RDS credentials from Secrets Manager.
+func databaseURL(admin bool) string {
+	full, user, passVar := "NIGHTFIX_DATABASE_URL", "nfx_app", "NIGHTFIX_APP_DB_PASSWORD"
+	if admin {
+		full, passVar = "NIGHTFIX_ADMIN_DATABASE_URL", "NIGHTFIX_DB_ADMIN_PASSWORD"
+		user = os.Getenv("NIGHTFIX_DB_ADMIN_USER")
+	}
+	if v := os.Getenv(full); v != "" {
+		return v
+	}
+	host := os.Getenv("NIGHTFIX_DB_HOST")
+	if host == "" || user == "" {
+		fmt.Fprintf(os.Stderr, "set %s, or NIGHTFIX_DB_HOST with credentials\n", full)
+		os.Exit(2)
+	}
+	q := url.Values{"sslmode": {env("NIGHTFIX_DB_SSLMODE", "verify-full")}}
+	if rc := env("NIGHTFIX_DB_SSLROOTCERT", "/etc/ssl/rds/global-bundle.pem"); q.Get("sslmode") == "verify-full" || q.Get("sslmode") == "verify-ca" {
+		q.Set("sslrootcert", rc)
+	}
+	u := url.URL{Scheme: "postgres", User: url.UserPassword(user, mustEnv(passVar)),
+		Host: host + ":" + env("NIGHTFIX_DB_PORT", "5432"), Path: "/" + env("NIGHTFIX_DB_NAME", "nightfix"), RawQuery: q.Encode()}
+	return u.String()
+}
+
 func newServer(ctx context.Context) (*controlplane.Server, error) {
-	pool, err := db.Open(ctx, mustEnv("NIGHTFIX_DATABASE_URL"))
-	if err != nil {
-		return nil, err
-	}
-	sl, err := sealer()
-	if err != nil {
-		return nil, err
-	}
-	ca, err := controlplane.LoadOrCreateCA(stateDir())
+	pool, err := db.Open(ctx, databaseURL(false))
 	if err != nil {
 		return nil, err
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	var sl *signing.Sealer
+	var ca *controlplane.CA
+	if keyID := os.Getenv("NIGHTFIX_KMS_KEY_ID"); keyID != "" {
+		// Stateless: keys live in Postgres, the sealing key wrapped by KMS.
+		aws, err := awscall.New(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if sl, err = controlplane.BootstrapSealer(ctx, pool, aws, keyID); err != nil {
+			return nil, err
+		}
+		if ca, err = controlplane.LoadOrCreateCAInDB(ctx, pool, sl); err != nil {
+			return nil, err
+		}
+	} else {
+		log.Warn("NIGHTFIX_KMS_KEY_ID is not set: keys are kept in the state directory. Local development only.", "dir", stateDir())
+		if sl, err = sealer(); err != nil {
+			return nil, err
+		}
+		if ca, err = controlplane.LoadOrCreateCA(stateDir()); err != nil {
+			return nil, err
+		}
+	}
 	cfg := controlplane.Config{
+		PublicAPIURL:       os.Getenv("NIGHTFIX_PUBLIC_API_URL"),
 		PublicIngestURL:    env("NIGHTFIX_PUBLIC_INGEST_URL", "http://127.0.0.1:8081"),
 		SNSCertURLPrefixes: []string{os.Getenv("NIGHTFIX_SNS_DEV_CERT_PREFIX")},
 		STSEndpoint:        os.Getenv("NIGHTFIX_STS_DEV_ENDPOINT"),
@@ -176,11 +228,38 @@ func orgCmd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// In a deployment, the owner key goes straight into Secrets Manager and is
+	// never printed, so it can't end up in task logs.
+	prefix := os.Getenv("NIGHTFIX_ORG_KEY_SECRET_PREFIX")
+	if prefix == "" {
+		o, err := srv.CreateOrg(ctx, *name, *slug)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("org:         %s\nsigning key: %s\nagent pin:   --required-signers %s\napi key:     %s   (shown once)\n",
+			ids.Encode("org", o.OrgID), o.SigningID, o.SigningPin, o.APIKey)
+		return nil
+	}
+	aws, err := awscall.New(ctx)
+	if err != nil {
+		return err
+	}
+	secret := prefix + *slug
+	// Create the secret first, so a missing permission fails before the org
+	// exists with a key nobody has.
+	if _, err := aws.Call(ctx, "secretsmanager", "CreateSecret", map[string]any{"Name": secret, "SecretString": "pending",
+		"Description": "Nightfix owner API key for org " + *slug + ". Copy it to your password manager, then delete this secret."}); err != nil {
+		return fmt.Errorf("create secret %s: %w", secret, err)
+	}
 	o, err := srv.CreateOrg(ctx, *name, *slug)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("org:         %s\nsigning key: %s\napi key:     %s   (shown once)\n", ids.Encode("org", o.OrgID), o.SigningID, o.APIKey)
+	if _, err := aws.Call(ctx, "secretsmanager", "PutSecretValue", map[string]any{"SecretId": secret, "SecretString": o.APIKey}); err != nil {
+		return fmt.Errorf("org %s was created but its key couldn't be stored in %s: %w", ids.Encode("org", o.OrgID), secret, err)
+	}
+	fmt.Printf("org:         %s\nsigning key: %s\nagent pin:   --required-signers %s\napi key:     stored in Secrets Manager as %s\n",
+		ids.Encode("org", o.OrgID), o.SigningID, o.SigningPin, secret)
 	return nil
 }
 

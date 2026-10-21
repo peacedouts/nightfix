@@ -1,0 +1,103 @@
+name: deploy
+
+# Roll out a control-plane image that images.yml already pushed:
+#   1. resolve the commit's image to a digest and verify its Sigstore
+#      signature names images.yml on main
+#   2. register new revisions of the migrate, service and admin task
+#      definitions, pinned to that digest
+#   3. run migrations and stop on failure
+#   4. update the service and wait until it's stable (the ECS deployment
+#      circuit breaker rolls back automatically if new tasks don't get healthy)
+#
+# Runs in the "production" GitHub environment, which must be restricted to
+# main (see deploy/README.md); add a required reviewer when the plan allows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag (a commit SHA on main). Empty means this commit.
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      TAG: ${{ inputs.image_tag || github.sha }}
+      CLUSTER: ${{ vars.ECS_CLUSTER }}
+    steps:
+      - name: Check the tag is a commit SHA
+        run: |
+          if ! [[ "$TAG" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::image_tag must be a full 40-character commit SHA from main"; exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      # Deploy by digest, and only an image this repository's images.yml
+      # built and signed from main. A pushed-but-unsigned image, or one signed
+      # by any other workflow or ref, is refused.
+      - name: Resolve and verify the image
+        id: image
+        env:
+          REPO: ${{ vars.ECR_REPOSITORY }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          digest=$(aws ecr describe-images --repository-name "${REPO#*/}" --image-ids imageTag="$TAG" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          cosign verify "$REPO@$digest" \
+            --certificate-identity "https://github.com/$GH_REPO/.github/workflows/images.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          echo "Verified $REPO@$digest (signed by images.yml on main)"
+          echo "ref=$REPO@$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Register task definitions
+        id: taskdefs
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          register() {
+            aws ecs describe-task-definition --task-definition "$1" --query taskDefinition \
+              | jq --arg img "$IMAGE" '.containerDefinitions[0].image = $img
+                  | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+              > td.json
+            aws ecs register-task-definition --cli-input-json file://td.json --query taskDefinition.taskDefinitionArn --output text
+          }
+          echo "migrate=$(register "${{ vars.ECS_MIGRATE_FAMILY }}")" >> "$GITHUB_OUTPUT"
+          echo "service=$(register "${{ vars.ECS_TASK_FAMILY }}")" >> "$GITHUB_OUTPUT"
+          # The admin task (create-org.sh) runs the same build.
+          register "${{ vars.ECS_ADMIN_FAMILY }}" > /dev/null
+
+      - name: Run migrations
+        run: |
+          net="awsvpcConfiguration={subnets=[${{ vars.PRIVATE_SUBNETS }}],securityGroups=[${{ vars.TASKS_SECURITY_GROUP }}],assignPublicIp=DISABLED}"
+          task=$(aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE --task-definition "${{ steps.taskdefs.outputs.migrate }}" \
+            --network-configuration "$net" --query 'tasks[0].taskArn' --output text)
+          echo "migrate task: $task"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task"
+          code=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" --query 'tasks[0].containers[0].exitCode' --output text)
+          if [ "$code" != "0" ]; then
+            echo "::error::migrations failed (exit $code); see the migrate logs in CloudWatch. Nothing was rolled out."
+            exit 1
+          fi
+
+      - name: Roll out
+        run: |
+          aws ecs update-service --cluster "$CLUSTER" --service "${{ vars.ECS_SERVICE }}" \
+            --task-definition "${{ steps.taskdefs.outputs.service }}" > /dev/null
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "${{ vars.ECS_SERVICE }}"
+          echo "Deployed $TAG"

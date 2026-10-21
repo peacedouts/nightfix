@@ -2,7 +2,7 @@
 # Walking-skeleton demo: a CloudWatch alarm auto-fixes itself and nobody is paged.
 #
 #   scripts/demo.sh              # happy path: auto-remediated, no page
-#   DEMO_SCENARIO=fail scripts/demo.sh   # the fix doesn't work: on-call is paged
+#   DEMO_SCENARIO=fail scripts/demo.sh   # the fix doesn't work: on-call is paged; the page resolves when the alarm clears
 #
 # Runs everything locally: Postgres, the control plane, an agent, and devstub
 # (simulated ECS, SNS, Slack and PagerDuty). Needs Go, PostgreSQL server
@@ -99,6 +99,10 @@ if [ "$(run_status)" = succeeded ]; then
   for _ in $(seq 30); do [ "$(state)" = resolved ] && break; sleep 0.3; done
 else
   for _ in $(seq 30); do [ "$(state)" = triggered ] && break; sleep 0.3; done
+  say "On-call fixes it by hand (rolls back the bad image) — CloudWatch reports OK"
+  curl -fsS -X POST "$STUB/sns/publish" -d "{\"ingest_url\":\"$INGEST\",\"topic_arn\":\"$TOPIC\",\"alarm\":\"ecs-unhealthy-checkout\",\"state\":\"OK\",\"cluster\":\"prod-east\",\"service\":\"checkout-api\"}" >/dev/null
+  # Nightfix resolves the incident and the upstream PagerDuty page with it.
+  for _ in $(seq 30); do [ "$(state)" = resolved ] && break; sleep 0.3; done
 fi
 sleep 1
 

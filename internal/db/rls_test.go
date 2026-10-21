@@ -174,6 +174,55 @@ func TestClaimScopesToClaimedOrg(t *testing.T) {
 	}
 }
 
+// Managed Postgres has no superuser, so nfx_owner can't have BYPASSRLS.
+// Every table with row-level security must have a policy, and every tenant
+// policy must admit nfx_owner (for the SECURITY DEFINER functions) as well
+// as the current org.
+func TestEveryRLSTableHasOwnerAwarePolicies(t *testing.T) {
+	pool := testdb.New(t)
+	rows, err := pool.QueryContext(context.Background(), `
+		SELECT c.relname, coalesce(string_agg(p.qual || ' / ' || coalesce(p.with_check, ''), '; '), '')
+		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_policies p ON p.schemaname = 'public' AND p.tablename = c.relname
+		WHERE n.nspname = 'public' AND c.relkind IN ('r','p') AND c.relrowsecurity
+		GROUP BY c.relname ORDER BY c.relname`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var table, quals string
+		if err := rows.Scan(&table, &quals); err != nil {
+			t.Fatal(err)
+		}
+		n++
+		if quals == "" {
+			t.Errorf("%s has row-level security but no policy", table)
+		} else if strings.Count(quals, "nfx_owner") < 2 {
+			t.Errorf("%s: policy must admit nfx_owner in USING and WITH CHECK: %s", table, quals)
+		}
+	}
+	if n < 20 {
+		t.Fatalf("expected the tenant tables, found %d", n)
+	}
+	var bypass bool
+	if err := pool.QueryRowContext(context.Background(), `SELECT rolbypassrls FROM pg_roles WHERE rolname = 'nfx_app'`).Scan(&bypass); err != nil || bypass {
+		t.Fatalf("nfx_app must never bypass RLS (bypass=%v, err=%v)", bypass, err)
+	}
+}
+
+// The audit-chain check runs as nfx_owner, where "no org" is NULL rather than
+// an error; it must refuse rather than report an empty chain as intact.
+func TestAuditChainCheckNeedsAnOrg(t *testing.T) {
+	pool := testdb.New(t)
+	var broken sql.NullInt64
+	err := pool.QueryRowContext(context.Background(), `SELECT nfx_verify_audit_chain()`).Scan(&broken)
+	if err == nil || !strings.Contains(err.Error(), "no org set") {
+		t.Fatalf("expected a refusal without an org, got %v (%v)", err, broken)
+	}
+}
+
 func TestSecurityDefinerFunctionsSearchTempLast(t *testing.T) {
 	pool := testdb.New(t)
 	var bad []string
@@ -225,6 +274,35 @@ func TestAuditChainIgnoresSessionTimeZone(t *testing.T) {
 		}
 		if broken.Valid {
 			t.Fatalf("verifying in %s reported the chain broken at seq %d", tz, broken.Int64)
+		}
+	}
+}
+
+// The partition worker calls nfx_ensure_partitions as the app role. It must
+// create days that migrations didn't pre-create; with pg_catalog first on its
+// search_path, an unqualified CREATE TABLE once failed with "permission
+// denied for schema pg_catalog", which would have broken ingest days later.
+func TestEnsurePartitionsCreatesNewDays(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	if _, err := pool.ExecContext(ctx, `SELECT nfx_ensure_partitions(10)`); err != nil {
+		t.Fatalf("nfx_ensure_partitions: %v", err)
+	}
+	for _, table := range []string{"alert_events", "step_output_chunks"} {
+		var name string
+		err := pool.QueryRowContext(ctx, `SELECT format('%s_%s', $1::text, to_char(current_date + 10, 'YYYYMMDD'))`, table).Scan(&name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema, quals string
+		err = pool.QueryRowContext(ctx, `SELECT n.nspname, coalesce((SELECT qual FROM pg_policies p
+			WHERE p.tablename = c.relname AND p.policyname = 'tenant_isolation'), '')
+			FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = $1`, name).Scan(&schema, &quals)
+		if err != nil {
+			t.Fatalf("partition %s wasn't created: %v", name, err)
+		}
+		if schema != "public" || !strings.Contains(quals, "nfx_owner") {
+			t.Fatalf("partition %s: schema %q, policy %q", name, schema, quals)
 		}
 	}
 }

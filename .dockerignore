@@ -1,0 +1,6 @@
+.git
+bin
+website
+deploy
+**/node_modules
+.state
