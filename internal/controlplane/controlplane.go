@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -172,19 +173,23 @@ func (s *Server) signingKey(tx *db.Tx) (signing.Key, error) {
 // trustConfig returns the org's trust config as sent to agents.
 func trustConfig(tx *db.Tx) (signing.TrustConfig, error) {
 	tc := signing.TrustConfig{Keys: map[string]string{}}
-	rows, err := tx.Query(`SELECT key_id, public_key FROM signing_keys WHERE state <> 'retired'`)
+	rows, err := tx.Query(`SELECT key_id, public_key, owner FROM signing_keys WHERE state <> 'retired'`)
 	if err != nil {
 		return tc, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id string
+		var id, owner string
 		var pub []byte
-		if err := rows.Scan(&id, &pub); err != nil {
+		if err := rows.Scan(&id, &pub, &owner); err != nil {
 			return tc, err
 		}
 		tc.Keys[id] = base64.StdEncoding.EncodeToString(pub)
+		if owner == "control_plane" {
+			tc.EnvelopeSigners = append(tc.EnvelopeSigners, id)
+		}
 	}
+	sort.Strings(tc.EnvelopeSigners)
 	if err := rows.Err(); err != nil {
 		return tc, err
 	}

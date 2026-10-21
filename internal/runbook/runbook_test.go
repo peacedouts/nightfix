@@ -152,14 +152,25 @@ func TestPatternsMatchTheWholeValue(t *testing.T) {
 }
 
 func TestReservedEnv(t *testing.T) {
-	for _, k := range []string{"BASH_ENV", "ENV", "PATH", "IFS", "LD_PRELOAD", "BASH_FUNC_x", "DYLD_INSERT_LIBRARIES", "PS4"} {
+	for _, k := range []string{"BASH_ENV", "ENV", "PATH", "IFS", "LD_PRELOAD", "BASH_FUNC_x", "DYLD_INSERT_LIBRARIES", "PS4",
+		"GCONV_PATH", "JAVA_TOOL_OPTIONS", "GIT_SSH_COMMAND", "GIT_CONFIG_COUNT", "AWS_CONFIG_FILE", "LESSOPEN", "PYTHONUSERBASE"} {
 		if !ReservedEnv(k) {
 			t.Errorf("%s not reserved", k)
 		}
 	}
-	for _, k := range []string{"PGHOST", "AWS_REGION", "SERVICE"} {
+	for _, k := range []string{"PGHOST", "AWS_REGION", "SERVICE", "PYTHONUNBUFFERED"} {
 		if ReservedEnv(k) {
 			t.Errorf("%s reserved", k)
 		}
+	}
+}
+
+func TestPatternCannotEscapeItsAnchors(t *testing.T) {
+	if _, err := CompilePattern("a)|(.*"); err == nil {
+		t.Fatal("a pattern that closes the anchoring group was accepted")
+	}
+	re, err := CompilePattern("prod|staging")
+	if err != nil || !re.MatchString("staging") || re.MatchString("staging; rm -rf /") {
+		t.Fatalf("alternation not anchored as a whole: %v", err)
 	}
 }

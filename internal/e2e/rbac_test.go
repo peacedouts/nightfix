@@ -3,6 +3,8 @@ package e2e
 import (
 	"strings"
 	"testing"
+
+	"github.com/peacedouts/nightfix/internal/db"
 )
 
 // Regression tests for RBAC and publishing found in QA review.
@@ -68,6 +70,17 @@ spec:
 	}
 	expect("dave", dave, "PUT", "/v1/runbooks/payments-check", rb("ledger"), 403, "service ledger")
 	expect("dave", dave, "PUT", "/v1/runbooks/payments-check", rb("payments-api"), 200, "")
+
+	// A removed member gets 403 with a clear reason (it used to surface as 401).
+	if err := e.db.WithOrg(e.ctx, e.rawOrg, func(tx *db.Tx) error {
+		_, err := tx.Exec(`UPDATE org_members SET status = 'removed' WHERE user_id = (SELECT id FROM nfx_org_user_by_email('dave@acme.dev'))`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expect("dave-removed", dave, "GET", "/v1/me", nil, 403, "removed from this org")
+	// Bad credentials are still a 401.
+	expect("bogus-key", "nfx_not_a_real_key", "GET", "/v1/me", nil, 401, "invalid API key")
 
 	// An oversized runbook is refused, not truncated and published.
 	big := runbookYAML(t, "2m") + "# " + strings.Repeat("x", 520<<10) + "\n"

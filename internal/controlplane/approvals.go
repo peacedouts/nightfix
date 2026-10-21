@@ -452,11 +452,13 @@ func (s *Server) apiPutApprovalChannel(r *http.Request, p principal) (any, error
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM approval_channels WHERE team_id IS NOT DISTINCT FROM $1::uuid`, team); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`INSERT INTO approval_channels (id, org_id, team_id, credential, created_by) VALUES ($1,$2,$3,$4,$5)`,
-			id, p.OrgID, team, sealed, p.actor()); err != nil {
+		// Replace the URL in place: notifications already sent reference the
+		// channel row, so deleting it to insert a new one fails once the
+		// channel has been used (and races with a concurrent PUT).
+		if err := tx.QueryRow(`INSERT INTO approval_channels (id, org_id, team_id, credential, created_by) VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT (org_id, coalesce(team_id, '00000000-0000-0000-0000-000000000000'))
+			DO UPDATE SET credential = EXCLUDED.credential, created_by = EXCLUDED.created_by, created_at = now()
+			RETURNING id`, id, p.OrgID, team, sealed, p.actor()).Scan(&id); err != nil {
 			return err
 		}
 		// The webhook URL is itself a credential: never logged or returned.

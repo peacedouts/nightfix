@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
+	"strings"
 	"time"
 
 	"github.com/peacedouts/nightfix/internal/db"
@@ -64,8 +65,19 @@ func (s *Server) DeliverNotifications(ctx context.Context) (int, error) {
 				}
 			}
 			backoff := time.Duration(1<<min(attempts, 6)) * time.Second
-			_, err = tx.Exec(`UPDATE notifications SET status = $2, attempts = $3, last_error = $4,
-				next_attempt_at = now() + $5::interval WHERE id = $1`, id, status, attempts, sendErr.Error(), pgInterval(backoff))
+			if _, err := tx.Exec(`UPDATE notifications SET status = $2, attempts = $3, last_error = $4,
+				next_attempt_at = now() + $5::interval WHERE id = $1`, id, status, attempts, sendErr.Error(), pgInterval(backoff)); err != nil {
+				return err
+			}
+			// Notifications queued behind this one for the same destination
+			// can't go before it (in-order delivery), so move them back too.
+			// Otherwise every claim re-checks the whole blocked backlog.
+			_, err = tx.Exec(`UPDATE notifications p SET next_attempt_at = greatest(p.next_attempt_at, h.next_attempt_at)
+				FROM notifications h
+				WHERE h.id = $1 AND h.status = 'pending' AND p.org_id = h.org_id AND p.status = 'pending'
+				  AND (p.created_at, p.id) > (h.created_at, h.id)
+				  AND ((h.target_id IS NOT NULL AND p.target_id = h.target_id AND p.incident_id IS NOT DISTINCT FROM h.incident_id)
+				    OR (h.channel_id IS NOT NULL AND p.channel_id = h.channel_id))`, id)
 			return err
 		})
 		if err != nil {
@@ -129,14 +141,22 @@ func pagerDutySeverity(s string) string {
 	}
 }
 
+// slackEscape makes a value safe to put in Slack message text. Slack parses
+// <…> as control sequences (<!channel>, <@U…>, <https://x|label>) even
+// inside backticks, and alert summaries, run errors and approver comments
+// are untrusted, so &, < and > are escaped as Slack documents.
+func slackEscape(v any) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(fmt.Sprint(v))
+}
+
 func slackText(kind string, p map[string]any) string {
-	num, title, svc, reason := p["incident_number"], p["title"], p["service"], p["reason"]
+	num, title, svc, reason := p["incident_number"], slackEscape(p["title"]), slackEscape(p["service"]), slackEscape(p["reason"])
 	if num == nil {
 		return fmt.Sprintf(":gear: %v", reason) // approval updates for runs outside an incident
 	}
 	switch kind {
 	case "page":
-		return fmt.Sprintf(":rotating_light: <!here> *Incident #%v* on `%v` (%v): %v\n%v", num, svc, p["severity"], title, reason)
+		return fmt.Sprintf(":rotating_light: <!here> *Incident #%v* on `%v` (%v): %v\n%v", num, svc, slackEscape(p["severity"]), title, reason)
 	case "resolve":
 		if p["resolution"] == "auto_remediated" {
 			return fmt.Sprintf(":white_check_mark: *Incident #%v* on `%v` auto-remediated: %v", num, svc, reason)

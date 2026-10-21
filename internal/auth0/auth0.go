@@ -31,7 +31,19 @@ type Verifier struct {
 	mu        sync.Mutex
 	keys      map[string]*rsa.PublicKey
 	fetchedAt time.Time
+	lastTry   time.Time // last fetch attempt, successful or not
+	lastErr   error
+
+	fetchMu sync.Mutex // one JWKS fetch at a time
 }
+
+// JWKS refetch limits. The kid is read before the signature is checked, so
+// anyone can send tokens with made-up kids; these bound how often that can
+// make us call Auth0, including while Auth0 is failing.
+const (
+	jwksRefetchInterval = 30 * time.Second
+	jwksRetryWithoutKey = 5 * time.Second // when no keys have ever loaded
+)
 
 // New builds a verifier for an Auth0 domain like "acme.us.auth0.com".
 func New(domain, audience string) *Verifier {
@@ -168,27 +180,51 @@ func numClaim(c Claims, k string) (int64, bool) {
 // key returns the signing key for kid, refreshing the JWKS when an unknown
 // kid appears (key rotation) — at most every 30 seconds.
 func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
+	if k, ok, err := v.cached(kid); ok || err != nil {
+		return k, err
+	}
+	// Serialize fetches: concurrent requests with unknown kids share one.
+	v.fetchMu.Lock()
+	defer v.fetchMu.Unlock()
+	if k, ok, err := v.cached(kid); ok || err != nil {
+		return k, err
+	}
 	v.mu.Lock()
-	k, ok := v.keys[kid]
-	stale := time.Since(v.fetchedAt) > 30*time.Second
+	v.lastTry = time.Now()
 	v.mu.Unlock()
-	if ok {
-		return k, nil
-	}
-	if !stale && v.keys != nil {
-		return nil, errors.New("token signed with an unknown key")
-	}
 	keys, err := v.fetch(ctx)
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if err != nil {
+		v.lastErr = err
 		return nil, err
 	}
-	v.mu.Lock()
-	v.keys, v.fetchedAt = keys, time.Now()
-	v.mu.Unlock()
+	v.keys, v.fetchedAt, v.lastErr = keys, time.Now(), nil
 	if k, ok := keys[kid]; ok {
 		return k, nil
 	}
 	return nil, errors.New("token signed with an unknown key")
+}
+
+// cached returns the key for kid if known. ok=false with a nil error means
+// a fetch is due; a non-nil error means one was tried too recently.
+func (v *Verifier) cached(kid string) (*rsa.PublicKey, bool, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if k, ok := v.keys[kid]; ok {
+		return k, true, nil
+	}
+	wait := jwksRefetchInterval
+	if v.keys == nil {
+		wait = jwksRetryWithoutKey
+	}
+	if !v.lastTry.IsZero() && time.Since(v.lastTry) < wait {
+		if v.lastErr != nil && v.keys == nil {
+			return nil, false, v.lastErr
+		}
+		return nil, false, errors.New("token signed with an unknown key")
+	}
+	return nil, false, nil
 }
 
 func (v *Verifier) fetch(ctx context.Context) (map[string]*rsa.PublicKey, error) {

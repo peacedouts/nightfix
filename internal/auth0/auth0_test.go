@@ -4,7 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,5 +63,61 @@ func TestVerify(t *testing.T) {
 	other := auth0test.New(t)
 	if _, err := v.Verify(ctx, other.Mint("RS256", base())); err == nil {
 		t.Error("foreign key accepted")
+	}
+}
+
+// Unknown kids are attacker-controlled (they're read before the signature is
+// checked), so they must not turn into a JWKS fetch per request — not when
+// many arrive at once, and not while Auth0 is failing.
+func TestJWKSFetchesAreBounded(t *testing.T) {
+	var fetches atomic.Int32
+	failing := atomic.Bool{}
+	is := auth0test.New(t)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		if failing.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		resp, err := http.Get(is.Srv.URL)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer resp.Body.Close()
+		io.Copy(w, resp.Body)
+	}))
+	defer proxy.Close()
+	v := &auth0.Verifier{Issuer: is.Issuer, Audience: is.Audience, JWKSURL: proxy.URL}
+	claims := map[string]any{"iss": is.Issuer, "aud": is.Audience, "sub": "auth0|u1", "exp": time.Now().Add(time.Hour).Unix()}
+	ctx := context.Background()
+	if _, err := v.Verify(ctx, is.Mint("RS256", claims)); err != nil {
+		t.Fatalf("valid token rejected: %v", err)
+	}
+
+	// 50 concurrent tokens with an unknown kid: one refetch at most.
+	other := auth0test.New(t)
+	fetches.Store(0)
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); v.Verify(ctx, other.Mint("RS256", claims)) }()
+	}
+	wg.Wait()
+	if n := fetches.Load(); n > 1 {
+		t.Fatalf("%d JWKS fetches for 50 unknown-kid tokens, want at most 1", n)
+	}
+
+	// A fresh verifier while Auth0 is down: repeated requests don't each fetch.
+	failing.Store(true)
+	fetches.Store(0)
+	down := &auth0.Verifier{Issuer: is.Issuer, Audience: is.Audience, JWKSURL: proxy.URL}
+	for i := 0; i < 20; i++ {
+		if _, err := down.Verify(ctx, is.Mint("RS256", claims)); err == nil {
+			t.Fatal("token accepted with no keys")
+		}
+	}
+	if n := fetches.Load(); n != 1 {
+		t.Fatalf("%d JWKS fetches during an outage, want 1", n)
 	}
 }

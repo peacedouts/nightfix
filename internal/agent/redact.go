@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // Redacted replaces secret values in output.
@@ -77,33 +78,41 @@ func (r *redactor) maxNeedle() int {
 }
 
 // split returns the redacted part of raw that is safe to emit now, and the raw
-// tail to hold back. Fewer than maxNeedle() bytes are held, and the cut is
-// moved forward past any match it would otherwise land inside, so no secret
-// is ever divided between what is emitted and what is held.
+// tail to hold back for the next write.
+//
+// Anything that could still become a secret once more output arrives starts
+// within the last maxNeedle()-1 bytes, so the cut starts there. It then only
+// moves back: to the start of any complete match it would divide, and to a
+// UTF-8 character boundary. Moving forward past a match could emit the start
+// of an overlapping secret that only completes later.
 func (r *redactor) split(raw string) (emit, keep string) {
 	hold := r.maxNeedle() - 1
-	if hold <= 0 {
-		return raw, ""
+	if hold < 0 {
+		hold = 0
 	}
 	cut := len(raw) - hold
 	if cut <= 0 {
 		return "", raw
 	}
-	for moved := true; moved; {
+	for moved := true; moved && cut > 0; {
 		moved = false
+		for cut > 0 && cut < len(raw) && !utf8.RuneStart(raw[cut]) {
+			cut--
+			moved = true
+		}
 		for _, n := range r.needles {
-			// Any occurrence straddling cut starts within len(n)-1 bytes before it.
-			from := max(0, cut-len(n)+1)
-			for i := from; i < cut; {
-				j := strings.Index(raw[i:], n)
-				if j < 0 || i+j >= cut {
+			// A complete match containing raw[cut-1:cut+1] starts within
+			// len(n)-1 bytes before cut.
+			for from := max(0, cut-len(n)+1); from < cut; {
+				j := strings.Index(raw[from:], n)
+				if j < 0 || from+j >= cut {
 					break
 				}
-				if end := i + j + len(n); end > cut {
-					cut, moved = end, true
+				if start := from + j; start+len(n) > cut {
+					cut, moved = start, true
 					break
 				}
-				i += j + 1
+				from += j + 1
 			}
 		}
 	}

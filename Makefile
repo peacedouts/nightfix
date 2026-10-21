@@ -5,7 +5,8 @@ build:
 
 # Starts a throwaway local Postgres (port 54329) if NIGHTFIX_TEST_ADMIN_DSN isn't set.
 test:
-	@DSN="$${NIGHTFIX_TEST_ADMIN_DSN:-$$(scripts/dev-postgres.sh start)}"; \
+	@set -e; DSN="$${NIGHTFIX_TEST_ADMIN_DSN:-$$(scripts/dev-postgres.sh start)}"; \
+	[ -n "$$DSN" ] || { echo "no Postgres for the tests (scripts/dev-postgres.sh start failed)" >&2; exit 1; }; \
 	NIGHTFIX_TEST_ADMIN_DSN="$$DSN" go test ./...
 
 lint:

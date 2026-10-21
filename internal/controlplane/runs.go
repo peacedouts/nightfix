@@ -399,11 +399,11 @@ func (s *Server) concurrencyBlocked(tx *db.Tx, rb *runbook.Runbook, params map[s
 		limit = 1
 	}
 	var running int
-	if err := tx.QueryRow(`SELECT count(*) FROM runbook_runs WHERE runbook_name = $1 AND params = $2::jsonb AND status = 'running'`,
+	if err := tx.QueryRow(`SELECT count(*) FROM runbook_runs WHERE runbook_name = $1 AND params = $2::jsonb AND status IN ('running','awaiting_approval')`,
 		rb.Metadata.Name, db.JSON[map[string]any]{V: params}).Scan(&running); err != nil {
 		return "", err
 	}
-	if running >= limit {
+	if running >= limit { // a run waiting at an approval gate still holds its slot
 		return fmt.Sprintf("concurrency: %d run(s) of %s with these parameters already in progress (limit %d)", running, rb.Metadata.Name, limit), nil
 	}
 	return "", nil

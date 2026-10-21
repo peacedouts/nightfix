@@ -2,18 +2,29 @@ package agent
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
+	"math/big"
+	mrand "math/rand"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/peacedouts/nightfix/internal/agentapi"
 	"github.com/peacedouts/nightfix/internal/runbook"
@@ -251,5 +262,229 @@ func TestPinnedKeysAreValidated(t *testing.T) {
 	_, err = New(Config{Endpoint: "https://127.0.0.1:1", PinnedKeys: map[string]string{"b": base64.StdEncoding.EncodeToString(make([]byte, 32))}})
 	if err == nil {
 		t.Error("pinned key for a signer that isn't required was accepted")
+	}
+}
+
+func certPair(t *testing.T, notAfter time.Time) (string, string) {
+	t.Helper()
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "x"},
+		NotBefore: notAfter.Add(-24 * time.Hour), NotAfter: notAfter}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kd, _ := x509.MarshalPKCS8PrivateKey(k)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd}))
+}
+
+// An agent whose stored identity expired (down more than 24h) or was revoked
+// must enroll again instead of retrying hello forever.
+func TestRejectedIdentityReenrolls(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		notAfter time.Duration
+	}{{"expired", -time.Hour}, {"revoked", 12 * time.Hour}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var hellos, enrolls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/agent/v1/hello":
+					hellos.Add(1)
+					http.Error(w, "unknown or revoked agent certificate", http.StatusUnauthorized)
+				case "/agent/v1/enroll/challenge", "/agent/v1/enroll":
+					enrolls.Add(1)
+					http.Error(w, "not in this test", http.StatusServiceUnavailable)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			dir := t.TempDir()
+			cert, key := certPair(t, time.Now().Add(tc.notAfter))
+			if err := saveIdentity(dir, &identity{AgentID: "a", OrgID: "o", CertPEM: cert, KeyPEM: key}); err != nil {
+				t.Fatal(err)
+			}
+			a, err := New(Config{Endpoint: srv.URL, EnrollMethod: "iam", OrgID: "org_x", IAM: fakeIAM{}, StateDir: dir,
+				Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			a.Run(ctx)
+			if enrolls.Load() == 0 {
+				t.Fatalf("no re-enrollment after %d rejected hellos", hellos.Load())
+			}
+		})
+	}
+}
+
+// A token-enrolled agent can't re-enroll by itself: it must stop with a
+// clear error rather than retry forever.
+func TestRejectedTokenIdentityStops(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unknown or revoked agent certificate", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	cert, key := certPair(t, time.Now().Add(12*time.Hour))
+	saveIdentity(dir, &identity{AgentID: "a", OrgID: "o", CertPEM: cert, KeyPEM: key})
+	a, _ := New(Config{Endpoint: srv.URL, EnrollMethod: "token", EnrollToken: "nfxenroll_x", StateDir: dir,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	if err := a.Run(ctx); err == nil || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "new token") {
+		t.Fatalf("got %v, want a clear re-enroll error", err)
+	}
+}
+
+func TestUnwritableStateDirFailsBeforeEnrolling(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere")
+	}
+	dir := t.TempDir()
+	os.Chmod(dir, 0o500)
+	defer os.Chmod(dir, 0o700)
+	if err := checkStateDir(dir); err == nil {
+		t.Fatal("unwritable state dir accepted")
+	}
+}
+
+func TestNoCAFileUsesSystemRoots(t *testing.T) {
+	c, err := newClient("https://example.invalid", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.http.Transport.(*http.Transport).TLSClientConfig.RootCAs != nil {
+		t.Fatal("an empty CA pool trusts nothing; without --ca-file the system roots should be used")
+	}
+}
+
+func TestConcurrentIdentitySaves(t *testing.T) {
+	dir := t.TempDir()
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := saveIdentity(dir, &identity{AgentID: strings.Repeat("a", 1000+i)}); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	id, err := loadIdentity(dir)
+	if err != nil || !strings.HasPrefix(id.AgentID, "aaaa") {
+		t.Fatalf("identity corrupted by concurrent saves: %v", err)
+	}
+}
+
+type fakeIAM struct{}
+
+func (fakeIAM) Region() string { return "us-east-1" }
+func (fakeIAM) SignGetCallerIdentity(context.Context, string, map[string]string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
+// streamAll feeds writes through split the way streamWriter does.
+func streamAll(r *redactor, writes ...string) string {
+	var out, tail string
+	for _, w := range writes {
+		e, k := r.split(tail + w)
+		out += e
+		tail = k
+	}
+	return out + r.apply(tail)
+}
+
+// Overlapping secrets, where one's end is another's start: no write split
+// may leak more than redacting the whole output at once would.
+func TestStreamRedactsOverlappingSecrets(t *testing.T) {
+	cases := []struct {
+		secrets    []string
+		full, leak string
+	}{
+		{[]string{"zzzzab", "abcdefghijk"}, "hello zzzzabcdefghijk bye", "cdefghij"},
+		{[]string{"abcabcXYZ123", "qqqqab"}, "...qqqqabcabcXYZ123...", "XYZ"},
+		{[]string{strings.Repeat("z", 20) + "ab", "ab" + "cdefghijklmnopqrstuvwxyz0123"},
+			strings.Repeat(".", 50) + strings.Repeat("z", 20) + "abcdefghijklmnopqrstuvwxyz0123" + strings.Repeat(".", 50), "mnopqrst"},
+	}
+	for _, c := range cases {
+		r := newRedactor(c.secrets)
+		for i := 1; i < len(c.full); i++ {
+			if got := streamAll(r, c.full[:i], c.full[i:]); strings.Contains(got, c.leak) {
+				t.Fatalf("secrets %v, split at %d leaked %q: %q", c.secrets, i, c.leak, got)
+			}
+		}
+	}
+}
+
+// Randomized: whatever the secrets and however the output is split into
+// writes, streaming never shows a secret that redacting all at once hides.
+func TestStreamRedactionMatchesWholeOutput(t *testing.T) {
+	rng := mrand.New(mrand.NewSource(1))
+	word := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = "abcz"[rng.Intn(4)]
+		}
+		return string(b)
+	}
+	for iter := 0; iter < 3000; iter++ {
+		var secrets []string
+		for i := 0; i < 1+rng.Intn(3); i++ {
+			secrets = append(secrets, word(4+rng.Intn(8)))
+		}
+		r := newRedactor(secrets)
+		full := word(10 + rng.Intn(60))
+		for i := 0; i < 1+rng.Intn(3); i++ {
+			at := rng.Intn(len(full))
+			full = full[:at] + secrets[rng.Intn(len(secrets))] + full[at:]
+		}
+		var writes []string
+		for rest := full; rest != ""; {
+			n := 1 + rng.Intn(len(rest))
+			writes, rest = append(writes, rest[:n]), rest[n:]
+		}
+		whole, got := r.apply(full), streamAll(r, writes...)
+		for _, s := range secrets {
+			if !strings.Contains(whole, s) && strings.Contains(got, s) {
+				t.Fatalf("secrets %q, writes %q: stream leaked %q: %q (whole: %q)", secrets, writes, s, got, whole)
+			}
+		}
+	}
+}
+
+func TestStreamNeverSplitsACharacter(t *testing.T) {
+	r := newRedactor([]string{"supersecretvalue"})
+	text := strings.Repeat("ünïcödé ", 20)
+	for i := 1; i < len(text); i++ {
+		if e, _ := r.split(text[:i]); !utf8.ValidString(e) {
+			t.Fatalf("write of %d bytes emitted a chunk ending mid-character", i)
+		}
+	}
+}
+
+// Captured output over the limit: a secret cut off at the limit must not
+// survive as a fragment, even after earlier replacements shorten the text.
+func TestResultTextDropsPartialSecretAtLimit(t *testing.T) {
+	sec := strings.Repeat("S", 90) + "TAILSECRET"
+	r := newRedactor([]string{sec})
+	extra := r.maxNeedle()
+	var b strings.Builder
+	b.WriteString("token=" + sec + "\nagain=" + sec + "\n")
+	for b.Len() < agentapi.MaxOutputBytes+extra-50 {
+		b.WriteString("x")
+	}
+	b.WriteString(sec)
+	raw := b.String()[:agentapi.MaxOutputBytes+extra] // what the capture buffer keeps
+	got := resultText(r, raw)
+	if len(got) > agentapi.MaxOutputBytes {
+		t.Fatalf("result is %d bytes", len(got))
+	}
+	if tail := got[len(got)-200:]; strings.Contains(tail, "SSSSSSSSSS") {
+		t.Fatalf("result ends with part of the secret: ...%q", tail[len(tail)-40:])
 	}
 }

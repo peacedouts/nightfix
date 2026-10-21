@@ -194,7 +194,7 @@ func (s *Server) checkAlertsCleared(ctx context.Context, tx *db.Tx, incID string
 		if err := tx.QueryRow(`SELECT status, runbook_name FROM runbook_runs WHERE id = $1`, inc.RemediationRunID.String).Scan(&runStatus, &name); err != nil {
 			return err
 		}
-		if runStatus == "running" {
+		if runStatus == "running" || runStatus == "awaiting_approval" {
 			return s.timeline(tx, incID, "remediation.waiting", "system", "", "All alerts cleared while the remediation run is still in progress; waiting for it to finish", nil)
 		}
 		if runStatus == "succeeded" {

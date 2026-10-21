@@ -328,7 +328,7 @@ func (s *Server) handleSlackCommand(w http.ResponseWriter, r *http.Request) {
 		s.Log.Error("slack command", "org", orgID, "err", err)
 		reply(":warning: Nightfix couldn't link your account. Try again.")
 	default:
-		reply(fmt.Sprintf(":link: Linked. Your Slack account now approves as %s in Nightfix.", email))
+		reply(fmt.Sprintf(":link: Linked. Your Slack account now approves as %s in Nightfix.", slackEscape(email)))
 	}
 }
 
@@ -354,9 +354,9 @@ func (s *Server) slackRespond(responseURL, text string) {
 // has a Slack app for interactivity, or API instructions when it doesn't.
 func slackApprovalMessage(p map[string]any) map[string]any {
 	a, _ := p["approval"].(map[string]any)
-	text := fmt.Sprintf(":raised_hand: *Approval needed* — incident #%v on `%v`: %v", p["incident_number"], p["service"], p["reason"])
+	text := fmt.Sprintf(":raised_hand: *Approval needed* — incident #%v on `%v`: %v", p["incident_number"], slackEscape(p["service"]), slackEscape(p["reason"]))
 	if p["incident_number"] == nil {
-		text = fmt.Sprintf(":raised_hand: *Approval needed* — %v started `%v`. %v", a["requested_by"], a["runbook"], p["reason"])
+		text = fmt.Sprintf(":raised_hand: *Approval needed* — %v started `%v`. %v", slackEscape(a["requested_by"]), slackEscape(a["runbook"]), slackEscape(p["reason"]))
 	}
 	blocks := []any{map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": text}}}
 	if a["interactive"] == true {
@@ -365,7 +365,7 @@ func slackApprovalMessage(p map[string]any) map[string]any {
 				"text": map[string]any{"type": "plain_text", "text": "Approve"},
 				"confirm": map[string]any{
 					"title":   map[string]any{"type": "plain_text", "text": "Approve this step?"},
-					"text":    map[string]any{"type": "mrkdwn", "text": fmt.Sprintf("`%v` will continue with *%v*.", a["runbook"], a["step_name"])},
+					"text":    map[string]any{"type": "mrkdwn", "text": fmt.Sprintf("`%v` will continue with *%v*.", slackEscape(a["runbook"]), slackEscape(a["step_name"]))},
 					"confirm": map[string]any{"type": "plain_text", "text": "Approve"},
 					"deny":    map[string]any{"type": "plain_text", "text": "Cancel"},
 				}},
@@ -374,7 +374,7 @@ func slackApprovalMessage(p map[string]any) map[string]any {
 		}})
 	} else {
 		blocks = append(blocks, map[string]any{"type": "context", "elements": []any{map[string]any{"type": "mrkdwn",
-			"text": fmt.Sprintf("Approve with `POST /v1/runs/%v/steps/%v/approve`, or reject with `…/reject`.", a["run"], a["step"])}}})
+			"text": fmt.Sprintf("Approve with `POST /v1/runs/%v/steps/%v/approve`, or reject with `…/reject`.", slackEscape(a["run"]), slackEscape(a["step"]))}}})
 	}
 	return map[string]any{"text": text, "blocks": blocks}
 }

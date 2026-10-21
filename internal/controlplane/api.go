@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,7 +27,12 @@ func (s *Server) APIHandler() http.Handler {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			p, err := s.authenticate(r)
 			if err != nil {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+				var ae authError
+				if errors.As(err, &ae) {
+					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": ae.Error()})
+				} else {
+					s.reply(w, nil, err) // httpError keeps its status; anything else is a logged 500
+				}
 				return
 			}
 			// Don't reassign minRole: it's shared by every request on this route.
@@ -55,6 +61,7 @@ func (s *Server) APIHandler() http.Handler {
 	route("GET /v1/services", "viewer", s.apiListServices)
 	route("POST /v1/services/{name}/escalation-targets", "admin", s.apiCreateTarget)
 	route("POST /v1/integrations", "admin", s.apiCreateIntegration)
+	route("PUT /v1/integrations/{id}/topic", "admin", s.apiSetIntegrationTopic)
 	route("PUT /v1/routing-rules", "admin", s.apiPutRoutingRules)
 	route("POST /v1/enrollment-rules", "admin", s.apiCreateEnrollmentRule)
 	route("GET /v1/agents", "viewer", s.apiListAgents)
@@ -237,6 +244,41 @@ func (s *Server) apiCreateTarget(r *http.Request, p principal) (any, error) {
 			map[string]string{"type": req.Type, "service": r.PathValue("name")})
 	})
 	return map[string]string{"id": ids.Encode("tgt", id), "type": req.Type}, err
+}
+
+// apiSetIntegrationTopic pins the SNS topic of an existing CloudWatch
+// integration. Ingest refuses SNS messages when no topic is pinned, so
+// integrations created before topic_arn was required need this to work.
+func (s *Server) apiSetIntegrationTopic(r *http.Request, p principal) (any, error) {
+	id, err := ids.Decode("int", r.PathValue("id"))
+	if err != nil {
+		return nil, httpError{404, "not found"}
+	}
+	var req struct {
+		TopicArn string `json:"topic_arn"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		return nil, err
+	}
+	if !snsTopicArnRe.MatchString(req.TopicArn) {
+		return nil, httpError{400, "topic_arn must be an SNS topic ARN (arn:aws:sns:<region>:<account>:<topic>)"}
+	}
+	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		var typ string
+		if err := tx.QueryRow(`SELECT type FROM integrations WHERE id = $1 FOR UPDATE`, id).Scan(&typ); err != nil {
+			return err
+		}
+		if typ != "cloudwatch" {
+			return httpError{400, "only cloudwatch integrations have an SNS topic"}
+		}
+		if _, err := tx.Exec(`UPDATE integrations SET config = config || jsonb_build_object('topic_arn', $2::text) WHERE id = $1`,
+			id, req.TopicArn); err != nil {
+			return err
+		}
+		return tx.Audit(r.Context(), p.actorType(), p.actor(), "integration.topic_set", "integration", id,
+			map[string]string{"topic_arn": req.TopicArn})
+	})
+	return map[string]string{"id": ids.Encode("int", id), "topic_arn": req.TopicArn}, err
 }
 
 func (s *Server) apiCreateIntegration(r *http.Request, p principal) (any, error) {

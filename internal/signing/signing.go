@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/peacedouts/nightfix/internal/canonical"
@@ -51,6 +52,10 @@ func (k Key) Sign(msg []byte) []byte { return ed25519.Sign(k.Private, msg) }
 type TrustConfig struct {
 	Keys            map[string]string `json:"keys"` // key_id -> base64 public key
 	RequiredSigners []string          `json:"required_signers"`
+	// EnvelopeSigners are the control-plane keys allowed to sign dispatch
+	// envelopes. Customer co-signer keys can sign runbook bundles but must
+	// never be able to dispatch work on their own.
+	EnvelopeSigners []string `json:"envelope_signers"`
 }
 
 func (tc TrustConfig) publicKey(id string) (ed25519.PublicKey, error) {
@@ -180,11 +185,15 @@ func SealEnvelope(k Key, e Envelope) (SignedEnvelope, error) {
 // MaxClockSkew is tolerated when checking envelope expiry.
 const MaxClockSkew = 30 * time.Second
 
-// OpenEnvelope verifies the signature, the target agent and the expiry.
+// OpenEnvelope verifies the signing key, the signature, the target org and
+// agent, and the expiry.
 // Dispatch envelopes are signed by the control-plane key only; the bundle's
 // required signers decide what may run.
-func OpenEnvelope(se SignedEnvelope, tc TrustConfig, agentID string, now time.Time) (Envelope, error) {
+func OpenEnvelope(se SignedEnvelope, tc TrustConfig, orgID, agentID string, now time.Time) (Envelope, error) {
 	var e Envelope
+	if !slices.Contains(tc.EnvelopeSigners, se.KeyID) {
+		return e, fmt.Errorf("dispatch envelope is signed by %q, which is not a control-plane key", se.KeyID)
+	}
 	pub, err := tc.publicKey(se.KeyID)
 	if err != nil {
 		return e, err
@@ -195,6 +204,9 @@ func OpenEnvelope(se SignedEnvelope, tc TrustConfig, agentID string, now time.Ti
 	}
 	if err := decodeStrict([]byte(se.Payload), &e); err != nil {
 		return e, fmt.Errorf("decode envelope: %w", err)
+	}
+	if e.OrgID != orgID {
+		return e, fmt.Errorf("envelope is for org %s, not this agent's org", e.OrgID)
 	}
 	if e.AgentID != agentID {
 		return e, fmt.Errorf("envelope is for agent %s, not this agent", e.AgentID)

@@ -188,6 +188,14 @@ func or(s, def string) string {
 	return s
 }
 
+// authError is a credential problem the caller should see (401). Anything
+// else that fails during authentication is reported as an internal error, so
+// database errors don't reach clients and an outage doesn't look like bad
+// credentials.
+type authError string
+
+func (e authError) Error() string { return string(e) }
+
 func (s *Server) authenticate(r *http.Request) (principal, error) {
 	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	switch {
@@ -196,7 +204,7 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 	case ok && auth0.LooksLikeJWT(tok) && s.Cfg.Auth0.Verifier != nil:
 		return s.authUser(r.Context(), tok)
 	default:
-		return principal{}, fmt.Errorf("missing credentials (Authorization: Bearer <Auth0 access token or nfx_ API key>)")
+		return principal{}, authError("missing credentials (Authorization: Bearer <Auth0 access token or nfx_ API key>)")
 	}
 }
 
@@ -205,7 +213,10 @@ func (s *Server) authAPIKey(ctx context.Context, tok string) (principal, error) 
 	var role string
 	if err := s.DB.QueryRowContext(ctx, `SELECT org_id, key_id, role FROM nfx_route_api_key($1)`, hashSecret(tok)).
 		Scan(&p.OrgID, &p.KeyID, &role); err != nil {
-		return p, fmt.Errorf("invalid API key")
+		if isNoRows(err) {
+			return p, authError("invalid API key")
+		}
+		return p, err
 	}
 	p.Bindings = []binding{{Role: role, Source: "api_key"}}
 	err := s.DB.WithOrg(ctx, p.OrgID, func(tx *db.Tx) error {
@@ -223,22 +234,25 @@ func (s *Server) authUser(ctx context.Context, tok string) (principal, error) {
 	cfg := s.Cfg.Auth0
 	claims, err := cfg.Verifier.Verify(ctx, tok)
 	if err != nil {
-		return principal{}, fmt.Errorf("invalid token: %v", err)
+		return principal{}, authError("invalid token: " + err.Error())
 	}
 	authOrg := claims.String(cfg.orgClaim())
 	if authOrg == "" {
-		return principal{}, fmt.Errorf("token has no %s claim; log in through your organization", cfg.orgClaim())
+		return principal{}, authError(fmt.Sprintf("token has no %s claim; log in through your organization", cfg.orgClaim()))
 	}
 	p := principal{Kind: "user"}
 	if err := s.DB.QueryRowContext(ctx, `SELECT org_id FROM nfx_route_auth0_org($1)`, authOrg).Scan(&p.OrgID); err != nil {
-		return p, fmt.Errorf("this Auth0 organization is not linked to a Nightfix org")
+		if isNoRows(err) {
+			return p, authError("this Auth0 organization is not linked to a Nightfix org")
+		}
+		return p, err
 	}
 	email := claims.String(cfg.emailClaim())
 	if email == "" {
 		email = claims.String("email")
 	}
 	if email == "" {
-		return p, fmt.Errorf("token has no email claim (%s)", cfg.emailClaim())
+		return p, authError(fmt.Sprintf("token has no email claim (%s)", cfg.emailClaim()))
 	}
 	p.Email = email
 	groups := claims.Strings(cfg.groupsClaim())
