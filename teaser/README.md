@@ -9,6 +9,8 @@ teaser/
 ├── wrangler.jsonc        Worker config (static assets only)
 └── public/
     ├── index.html        the page
+    ├── og.png            1200×630 link preview image
+    ├── fonts/            Instrument Serif + Sans (SIL OFL), self-hosted
     ├── 404.html
     ├── favicon.svg
     ├── robots.txt
