@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/google/cel-go/cel"
+	celast "github.com/google/cel-go/common/ast"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/common/types/traits"
@@ -35,7 +36,9 @@ var (
 
 func getEnv() (*cel.Env, error) {
 	envOnce.Do(func() {
-		opts := []cel.EnvOption{ext.Strings(), ext.Encoders(), ext.Math(), ext.Lists()}
+		// ext.Lists is left out: lists.range builds its whole list before
+		// the cost limit is checked, so a large range exhausts memory.
+		opts := []cel.EnvOption{ext.Strings(), ext.Encoders(), ext.Math()}
 		for _, v := range Variables {
 			opts = append(opts, cel.Variable(v, cel.DynType))
 		}
@@ -43,6 +46,17 @@ func getEnv() (*cel.Env, error) {
 	})
 	return env, envErr
 }
+
+// MaxSourceLen bounds an expression's source text.
+const MaxSourceLen = 4096
+
+// deniedFunctions can build output far larger than their input in a single
+// call. CEL's cost limit charges them a flat amount per call and checks it
+// only after the call returns, so chaining a few of them allocates gigabytes
+// and crashes the process (a Go out-of-memory error can't be recovered).
+// Expressions run on the shared control plane and on agents, so they're
+// refused at compile time instead.
+var deniedFunctions = map[string]bool{"replace": true, "format": true, "join": true, "lists.range": true}
 
 // Check compiles an expression and returns a descriptive error if invalid.
 func Check(src string) error {
@@ -61,9 +75,21 @@ func program(src string) (cel.Program, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(src) > MaxSourceLen {
+		return nil, fmt.Errorf("expression is %d bytes; the limit is %d", len(src), MaxSourceLen)
+	}
 	ast, iss := e.Compile(src)
 	if iss != nil && iss.Err() != nil {
 		return nil, fmt.Errorf("invalid expression %q: %w", src, iss.Err())
+	}
+	var denied string
+	celast.PreOrderVisit(ast.NativeRep().Expr(), celast.NewExprVisitor(func(x celast.Expr) {
+		if x.Kind() == celast.CallKind && deniedFunctions[x.AsCall().FunctionName()] && denied == "" {
+			denied = x.AsCall().FunctionName()
+		}
+	}))
+	if denied != "" {
+		return nil, fmt.Errorf("invalid expression %q: %s() is not allowed", src, denied)
 	}
 	p, err = e.Program(ast, cel.EvalOptions(cel.OptOptimize), cel.CostLimit(1_000_000))
 	if err != nil {

@@ -34,6 +34,8 @@ type snsMessage struct {
 	SubscribeURL     string `json:"SubscribeURL"`
 }
 
+var snsTopicArnRe = regexp.MustCompile(`^arn:aws(-cn|-us-gov)?:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]{1,256}(\.fifo)?$`)
+
 var snsHostRe = regexp.MustCompile(`^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$`)
 
 // allowedSNSURL reports whether u is an SNS-owned URL (or an explicitly

@@ -314,6 +314,13 @@ func (s *Server) onAttemptFinished(ctx context.Context, tx *db.Tx, attemptID str
 			}
 			return s.advance(ctx, tx, run.ID)
 		}
+		if step.OnFailure == "escalate" {
+			// Pages even when the runbook-level onFailure is notify or none.
+			if run.Context == nil {
+				run.Context = map[string]any{}
+			}
+			run.Context["escalate"] = true
+		}
 		runStatus := "failed"
 		if state == "timed_out" {
 			runStatus = "timed_out"
@@ -377,4 +384,27 @@ func (s *Server) ProcessOverdueRuns(ctx context.Context) (int, error) {
 		}
 		n++
 	}
+}
+
+// concurrencyBlocked takes a transaction-scoped lock on the runbook, then
+// enforces policy.concurrency: at most that many runs (default 1) with the
+// same parameters at once. The lock is held to commit, so every check made
+// after it in the same transaction (cooldown, maxRunsPerHour) is race-free.
+func (s *Server) concurrencyBlocked(tx *db.Tx, rb *runbook.Runbook, params map[string]any) (string, error) {
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended($1 || '/' || $2, 0))`, tx.OrgID, rb.Metadata.Name); err != nil {
+		return "", err
+	}
+	limit := rb.Spec.Policy.Concurrency
+	if limit <= 0 {
+		limit = 1
+	}
+	var running int
+	if err := tx.QueryRow(`SELECT count(*) FROM runbook_runs WHERE runbook_name = $1 AND params = $2::jsonb AND status = 'running'`,
+		rb.Metadata.Name, db.JSON[map[string]any]{V: params}).Scan(&running); err != nil {
+		return "", err
+	}
+	if running >= limit {
+		return fmt.Sprintf("concurrency: %d run(s) of %s with these parameters already in progress (limit %d)", running, rb.Metadata.Name, limit), nil
+	}
+	return "", nil
 }

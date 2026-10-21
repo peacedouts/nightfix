@@ -173,3 +173,58 @@ func TestClaimScopesToClaimedOrg(t *testing.T) {
 		t.Fatal("processed event was claimed twice")
 	}
 }
+
+func TestSecurityDefinerFunctionsSearchTempLast(t *testing.T) {
+	pool := testdb.New(t)
+	var bad []string
+	rows, err := pool.QueryContext(context.Background(), `
+		SELECT p.proname, coalesce(array_to_string(p.proconfig, ','), '')
+		FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname = 'public' AND p.prosecdef`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, cfg string
+		rows.Scan(&name, &cfg)
+		if !strings.Contains(cfg, "search_path=pg_catalog, public, pg_temp") {
+			bad = append(bad, name+" ("+cfg+")")
+		}
+	}
+	if len(bad) > 0 {
+		t.Fatalf("SECURITY DEFINER functions without pg_temp last in search_path: %v", bad)
+	}
+}
+
+func TestAuditChainIgnoresSessionTimeZone(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	org := testdb.CreateOrg(t, pool, "acme")
+	for _, tz := range []string{"America/New_York", "Asia/Kolkata"} {
+		err := pool.WithOrg(ctx, org, func(tx *db.Tx) error {
+			if _, err := tx.Exec(`SET LOCAL TimeZone = '` + tz + `'`); err != nil {
+				return err
+			}
+			return tx.Audit(ctx, "user", "u", "test.action", "thing", "1", map[string]string{"tz": tz})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tz := range []string{"UTC", "Pacific/Auckland"} {
+		var broken sql.NullInt64
+		err := pool.WithOrg(ctx, org, func(tx *db.Tx) error {
+			if _, err := tx.Exec(`SET LOCAL TimeZone = '` + tz + `'`); err != nil {
+				return err
+			}
+			return tx.QueryRow(`SELECT nfx_verify_audit_chain()`).Scan(&broken)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if broken.Valid {
+			t.Fatalf("verifying in %s reported the chain broken at seq %d", tz, broken.Int64)
+		}
+	}
+}

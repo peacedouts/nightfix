@@ -68,7 +68,8 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 			if err := s.verifySNS(ctx, m); err != nil {
 				return httpError{http.StatusUnauthorized, "SNS signature: " + err.Error()}
 			}
-			if want := cfg.V["topic_arn"]; want != "" && m.TopicArn != want {
+			// Fail closed: an integration without a pinned topic accepts nothing.
+			if want := cfg.V["topic_arn"]; want == "" || m.TopicArn != want {
 				return httpError{http.StatusUnauthorized, "unexpected SNS topic"}
 			}
 			switch m.Type {

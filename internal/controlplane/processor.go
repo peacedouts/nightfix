@@ -3,10 +3,14 @@ package controlplane
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 
 	"github.com/peacedouts/nightfix/internal/db"
 	"github.com/peacedouts/nightfix/internal/expr"
@@ -21,17 +25,31 @@ func (s *Server) ProcessAlertEvents(ctx context.Context) (int, error) {
 	n := 0
 	for {
 		claimed, err := s.DB.Claim(ctx, "nfx_claim_alert_event", func(tx *db.Tx, id string) error {
+			// The savepoint lets a failed event be recorded instead of rolled
+			// back: events are claimed oldest first across every org, so one
+			// that fails on every attempt would stall all alert processing.
+			if _, err := tx.Exec(`SAVEPOINT process_event`); err != nil {
+				return err
+			}
 			perr := s.processEvent(ctx, tx, id)
 			msg := sql.NullString{}
 			if perr != nil && !errors.Is(perr, errIgnore) {
-				// A malformed event is recorded and never retried; a database
-				// error rolls back and the event is claimed again.
+				// Only a transient failure (connection, deadlock, shutdown) is
+				// retried. Anything else would fail the same way next time, so
+				// the event is recorded with its error and never retried.
 				var pe processError
-				if !errors.As(perr, &pe) {
+				if !errors.As(perr, &pe) && isTransient(perr) {
 					return perr
 				}
-				msg = sql.NullString{String: pe.Error(), Valid: true}
-				s.Log.Warn("alert event rejected", "event", id, "err", pe)
+				if _, err := tx.Exec(`ROLLBACK TO SAVEPOINT process_event`); err != nil {
+					return err
+				}
+				msg = sql.NullString{String: truncate(cleanText(perr.Error()), 1000), Valid: true}
+				if errors.As(perr, &pe) {
+					s.Log.Warn("alert event rejected", "event", id, "err", perr)
+				} else {
+					s.Log.Error("alert event failed and will not be retried", "event", id, "err", perr)
+				}
 			}
 			_, err := tx.Exec(`UPDATE alert_events SET processed_at = now(), error = $2 WHERE id = $1`, id, msg)
 			return err
@@ -115,6 +133,7 @@ func (s *Server) processEvent(ctx context.Context, tx *db.Tx, eventID string) er
 	if err != nil {
 		return processError{err}
 	}
+	a = sanitizeAlert(a)
 
 	svcID, suppressed, err := s.route(tx, a, defaultSvc)
 	if err != nil {
@@ -184,6 +203,16 @@ func (s *Server) alertFiring(ctx context.Context, tx *db.Tx, a Alert, integID st
 			openID, a.Summary, labels, ann, a.Severity); err != nil {
 			return err
 		}
+		// A human resolve detaches alerts that are still firing; if one keeps
+		// firing it must open (or join) a new incident, not go quiet.
+		var attached bool
+		if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM incident_alerts ia JOIN incidents i ON i.id = ia.incident_id
+			WHERE ia.alert_id = $1 AND ia.detached_at IS NULL AND i.status <> 'resolved')`, openID).Scan(&attached); err != nil {
+			return err
+		}
+		if !attached && !suppressed {
+			return s.openOrJoinIncident(ctx, tx, svc, openID, a)
+		}
 		if severityRank(a.Severity) > severityRank(prevSev) {
 			return s.alertSeverityRaised(ctx, tx, openID, a)
 		}
@@ -246,11 +275,17 @@ func (s *Server) alertFiring(ctx context.Context, tx *db.Tx, a Alert, integID st
 		if st != "resolved" {
 			return s.attachAlert(ctx, tx, prevIncident.String, alertID, a)
 		}
-		if resolvedAt.Valid && time.Since(resolvedAt.Time) < svc.Reopen {
-			if err := s.reopenIncident(ctx, tx, prevIncident.String, alertID, a); err != nil {
-				return err
-			}
-			return nil
+		// Reopen only if no other incident has taken its place: with the
+		// default grouping (one open incident per service) a new incident may
+		// already hold the same group key, and reopening would collide with it.
+		var taken bool
+		if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM incidents o JOIN incidents p ON p.id = $1
+			WHERE o.service_id = p.service_id AND o.group_key = p.group_key AND o.status <> 'resolved' AND o.id <> p.id)`,
+			prevIncident.String).Scan(&taken); err != nil {
+			return err
+		}
+		if !taken && resolvedAt.Valid && time.Since(resolvedAt.Time) < svc.Reopen {
+			return s.reopenIncident(ctx, tx, prevIncident.String, alertID, a)
 		}
 	}
 	return s.openOrJoinIncident(ctx, tx, svc, alertID, a)
@@ -306,4 +341,24 @@ func groupKey(svc serviceRow, labels map[string]string) string {
 		parts = append(parts, labels[l])
 	}
 	return strings.Join(parts, "/")
+}
+
+// isTransient reports whether an error might succeed on retry: the database
+// connection, a serialization failure or deadlock, or shutdown. Data errors
+// (bad input, constraint violations) and bugs are not.
+func isTransient(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) || errors.Is(err, sql.ErrTxDone) {
+		return true
+	}
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		switch pqErr.Code.Class() {
+		case "08", "40", "53", "55", "57", "58": // connection, rollback, resources, lock, operator, system
+			return true
+		}
+		return false
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }

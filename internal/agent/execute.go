@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/peacedouts/nightfix/internal/agentapi"
 	"github.com/peacedouts/nightfix/internal/expr"
@@ -78,7 +79,7 @@ func (a *Agent) execute(ctx context.Context, v *verified) agentapi.Result {
 		for name, src := range v.step.Outputs {
 			val, err := expr.Eval(src, vars)
 			if err != nil {
-				res.Status, res.Error = "failed", fmt.Sprintf("output %s: %v", name, err)
+				res.Status, res.Error = "failed", out.red.apply(fmt.Sprintf("output %s: %v", name, err))
 				break
 			}
 			res.Outputs[name] = out.red.redactAny(val)
@@ -232,6 +233,9 @@ func (a *Agent) runShell(ctx context.Context, v *verified, secrets map[string]an
 	// what a script needs to find programs. Values arrive only through env.
 	env := []string{"PATH=" + envOr("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME=" + dir, "TMPDIR=" + dir, "LANG=C.UTF-8"}
 	for k, tmpl := range v.step.Env {
+		if runbook.ReservedEnv(k) { // also refused at publish; checked again here
+			return nil, nil, fmt.Errorf("env %s is reserved", k)
+		}
 		val, err := expr.RenderString(tmpl, vars)
 		if err != nil {
 			return nil, nil, fmt.Errorf("env %s: %w", k, err)
@@ -254,13 +258,23 @@ func (a *Agent) runShell(ctx context.Context, v *verified, secrets map[string]an
 
 	cmd := exec.Command("bash", "-euo", "pipefail", "-c", v.step.Run)
 	cmd.Dir, cmd.Env = dir, env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Own process group so timeouts kill the whole tree; Pdeathsig so the
+	// script dies with the agent instead of running on unobserved.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	// A background child can keep stdout open after bash exits; without a
+	// WaitDelay, Wait would block until the step timeout (or forever if the
+	// child escaped the process group).
+	cmd.WaitDelay = 2 * time.Second
+	// The result buffers keep a little extra so a secret cut by the 1 MiB
+	// limit is still redacted before the buffer is trimmed to the limit.
+	extra := out.red.maxNeedle()
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = io.MultiWriter(&limited{w: &stdout, n: agentapi.MaxOutputBytes}, out.writer("stdout"))
-	cmd.Stderr = io.MultiWriter(&limited{w: &stderr, n: agentapi.MaxOutputBytes}, out.writer("stderr"))
+	cmd.Stdout = io.MultiWriter(&limited{w: &stdout, n: agentapi.MaxOutputBytes + extra}, out.writer("stdout"))
+	cmd.Stderr = io.MultiWriter(&limited{w: &stderr, n: agentapi.MaxOutputBytes + extra}, out.writer("stderr"))
 	if err := cmd.Start(); err != nil {
 		return nil, nil, err
 	}
+	pgid := cmd.Process.Pid
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	var waitErr error
@@ -268,24 +282,37 @@ func (a *Agent) runShell(ctx context.Context, v *verified, secrets map[string]an
 	case waitErr = <-done:
 	case <-ctx.Done():
 		// SIGTERM the whole process group, then SIGKILL after 10s.
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		syscall.Kill(-pgid, syscall.SIGTERM)
 		select {
 		case waitErr = <-done:
 		case <-time.After(10 * time.Second):
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			waitErr = <-done
+			syscall.Kill(-pgid, syscall.SIGKILL)
+			select {
+			case waitErr = <-done:
+			case <-time.After(10 * time.Second):
+				waitErr = errors.New("script did not exit after SIGKILL")
+			}
 		}
 	}
-	code := cmd.ProcessState.ExitCode()
+	// Nothing a step started may outlive it: it would run unobserved, with
+	// no timeout, holding the step's temp dir and secret files.
+	syscall.Kill(-pgid, syscall.SIGKILL)
+	code := -1
+	if cmd.ProcessState != nil {
+		code = cmd.ProcessState.ExitCode()
+	}
 	result := map[string]any{
 		"exitCode": code,
-		"stdout":   out.red.apply(stdout.String()),
-		"stderr":   out.red.apply(stderr.String()),
+		"stdout":   truncateUTF8(out.red.apply(stdout.String()), agentapi.MaxOutputBytes),
+		"stderr":   truncateUTF8(out.red.apply(stderr.String()), agentapi.MaxOutputBytes),
 	}
 	if ctx.Err() != nil {
 		return result, &code, ctx.Err()
 	}
-	if waitErr != nil {
+	if waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) {
+		return result, &code, fmt.Errorf("script exited with code %d", code)
+	}
+	if code != 0 {
 		return result, &code, fmt.Errorf("script exited with code %d", code)
 	}
 	return result, &code, nil
@@ -326,13 +353,18 @@ type streamer struct {
 	attempt string
 	red     *redactor
 
-	mu      sync.Mutex
-	seq     int
-	pending []agentapi.OutputChunk
-	tails   map[string]string // per stream: held-back tail awaiting a newline
-	done    chan struct{}
-	wg      sync.WaitGroup
+	mu        sync.Mutex
+	seq       int
+	pending   []agentapi.OutputChunk
+	tails     map[string]string // per stream: raw bytes held back in case a secret continues in the next write
+	sent      int               // bytes queued for upload so far (the per-attempt cap)
+	truncated bool
+	done      chan struct{}
+	wg        sync.WaitGroup
 }
+
+// truncatedMarker is appended once when an attempt's output exceeds the cap.
+const truncatedMarker = "\n[output truncated: limit reached]\n"
 
 func newStreamer(a *Agent, attempt string) *streamer {
 	s := &streamer{a: a, attempt: attempt, red: newRedactor(nil), tails: map[string]string{}, done: make(chan struct{})}
@@ -354,11 +386,51 @@ func newStreamer(a *Agent, attempt string) *streamer {
 	return s
 }
 
+// add redacts data and queues it in chunks of at most MaxChunkBytes, stopping
+// at MaxOutputBytes per attempt with a single truncation marker.
 func (s *streamer) add(stream, data string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.seq++
-	s.pending = append(s.pending, agentapi.OutputChunk{Seq: s.seq, Stream: stream, Data: s.red.apply(data)})
+	s.addLocked(stream, s.red.apply(data))
+}
+
+func (s *streamer) addLocked(stream, data string) {
+	if s.truncated {
+		return
+	}
+	if room := agentapi.MaxOutputBytes - s.sent; len(data) > room {
+		data = truncateUTF8(data, room)
+		s.truncated = true
+	}
+	for len(data) > 0 {
+		piece := truncateUTF8(data, agentapi.MaxChunkBytes)
+		if piece == "" { // a single rune larger than the chunk size can't happen, but never loop forever
+			piece = data
+		}
+		data = data[len(piece):]
+		s.sent += len(piece)
+		s.seq++
+		s.pending = append(s.pending, agentapi.OutputChunk{Seq: s.seq, Stream: stream, Data: piece})
+	}
+	if s.truncated {
+		s.seq++
+		s.pending = append(s.pending, agentapi.OutputChunk{Seq: s.seq, Stream: "log", Data: truncatedMarker})
+	}
+}
+
+// truncateUTF8 returns the longest prefix of s that is at most n bytes and
+// doesn't end inside a multi-byte rune.
+func truncateUTF8(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // log records an executor message (not process output).
@@ -369,24 +441,18 @@ type streamWriter struct {
 	stream string
 }
 
-// Write redacts on whole lines so a secret split across two writes is still
-// caught; a long line without a newline is flushed once it is big enough.
+// Write redacts everything that can no longer be part of a secret and holds
+// back the rest. A secret can be split across writes, contain newlines, or
+// sit inside a very long line, so the only safe boundary is "fewer bytes
+// remain than the longest needle" — never a newline or a fixed cut.
 func (w streamWriter) Write(p []byte) (int, error) {
 	s := w.s
 	s.mu.Lock()
-	buf := s.tails[w.stream] + string(p)
-	var emit string
-	if i := strings.LastIndexByte(buf, '\n'); i >= 0 {
-		emit, buf = buf[:i+1], buf[i+1:]
-	}
-	if hold := s.red.maxNeedle(); len(buf) > agentapi.MaxChunkBytes/2+hold {
-		cut := len(buf) - hold
-		emit, buf = emit+buf[:cut], buf[cut:]
-	}
-	s.tails[w.stream] = buf
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	emit, keep := s.red.split(s.tails[w.stream] + string(p))
+	s.tails[w.stream] = keep
 	if emit != "" {
-		s.add(w.stream, emit)
+		s.addLocked(w.stream, emit)
 	}
 	return len(p), nil
 }
@@ -417,8 +483,8 @@ func (s *streamer) close() {
 	tails := s.tails
 	s.tails = map[string]string{}
 	s.mu.Unlock()
-	for stream, t := range tails {
-		if t != "" {
+	for _, stream := range []string{"stdout", "stderr"} {
+		if t := tails[stream]; t != "" {
 			s.add(stream, t)
 		}
 	}

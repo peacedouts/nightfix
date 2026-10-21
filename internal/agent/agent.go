@@ -6,12 +6,15 @@ package agent
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -46,10 +49,15 @@ type Config struct {
 	// RequiredSigners, when set, is the locally pinned list of signers every
 	// runbook bundle must carry. It always wins over the control plane's list.
 	RequiredSigners []string
-	AllowlistFile   string
-	AllowlistMode   string // off | warn | enforce
-	Freeze          bool   // local kill switch: connect for visibility, run nothing
-	Slots           int
+	// PinnedKeys maps a pinned signer's key id to its base64 Ed25519 public
+	// key. A pinned key is always used instead of whatever the control plane
+	// sends for that id; without it, a compromised control plane could pair a
+	// pinned id with a key of its own.
+	PinnedKeys    map[string]string
+	AllowlistFile string
+	AllowlistMode string // off | warn | enforce
+	Freeze        bool   // local kill switch: connect for visibility, run nothing
+	Slots         int
 
 	AWS AWSCaller
 	Log *slog.Logger
@@ -78,6 +86,20 @@ func New(cfg Config) (*Agent, error) {
 	}
 	if cfg.AllowlistMode == "" {
 		cfg.AllowlistMode = "off"
+	}
+	switch cfg.AllowlistMode {
+	case "off", "warn", "enforce":
+	default:
+		// A typo must not quietly behave like "warn".
+		return nil, fmt.Errorf("allowlist mode %q: must be off, warn or enforce", cfg.AllowlistMode)
+	}
+	for id, pub := range cfg.PinnedKeys {
+		if !contains(cfg.RequiredSigners, id) {
+			return nil, fmt.Errorf("pinned key %s is not a required signer", id)
+		}
+		if b, err := base64.StdEncoding.DecodeString(pub); err != nil || len(b) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("pinned key %s: not a base64 Ed25519 public key", id)
+		}
 	}
 	c, err := newClient(cfg.Endpoint, cfg.CAPEM)
 	if err != nil {
@@ -133,30 +155,51 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 
-	backoff := time.Second
-	for ctx.Err() == nil {
-		if err := a.hello(ctx); err != nil {
-			a.cfg.Log.Warn("hello failed; retrying", "err", err, "in", backoff)
-			sleep(ctx, jitter(backoff))
-			backoff = min(backoff*2, time.Minute)
-			continue
-		}
-		backoff = time.Second
-		break
-	}
-	go a.heartbeatLoop(ctx)
-	go a.renewLoop(ctx)
+	// Steps die with the agent (agent-protocol.md §8): on shutdown, cancel
+	// everything in flight so scripts are killed rather than orphaned.
+	defer a.cancelAll()
 
+	backoff := time.Second
+	started, needHello := false, true
 	for ctx.Err() == nil {
+		// Hello again after any failed poll: it's how in-flight attempts are
+		// reconciled after an outage and how new trust config and labels
+		// reach a running agent.
+		if needHello {
+			if err := a.hello(ctx); err != nil {
+				if ctx.Err() == nil {
+					a.cfg.Log.Warn("hello failed; retrying", "err", err, "in", backoff)
+					sleep(ctx, jitter(backoff))
+					backoff = min(backoff*2, time.Minute)
+				}
+				continue
+			}
+			needHello = false
+			backoff = time.Second
+			if !started {
+				started = true
+				go a.heartbeatLoop(ctx)
+				go a.renewLoop(ctx)
+			}
+		}
 		if err := a.pollOnce(ctx); err != nil && ctx.Err() == nil {
-			a.cfg.Log.Warn("poll failed; retrying", "err", err, "in", backoff)
+			a.cfg.Log.Warn("poll failed; reconnecting", "err", err, "in", backoff)
 			sleep(ctx, jitter(backoff))
 			backoff = min(backoff*2, time.Minute)
+			needHello = true
 			continue
 		}
 		backoff = time.Second
 	}
 	return ctx.Err()
+}
+
+func (a *Agent) cancelAll() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, cancel := range a.inflight {
+		cancel()
+	}
 }
 
 func (a *Agent) capabilities() []string { return []string{"shell", "aws", "wait"} }
@@ -181,8 +224,10 @@ func (a *Agent) hello(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	a.mu.Lock()
 	a.id.Labels = w.Labels
 	a.id.Trust = w.TrustConfig
+	a.mu.Unlock()
 	return saveIdentity(a.cfg.StateDir, a.id)
 }
 
@@ -278,7 +323,8 @@ func (a *Agent) verify(d agentapi.Dispatch) (*verified, error) {
 	if a.cfg.Freeze {
 		return nil, errors.New("agent is frozen locally")
 	}
-	env, err := signing.OpenEnvelope(d.Envelope, a.id.Trust, a.id.AgentID, time.Now())
+	trust, labels := a.trust()
+	env, err := signing.OpenEnvelope(d.Envelope, trust, a.id.AgentID, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -291,11 +337,11 @@ func (a *Agent) verify(d agentapi.Dispatch) (*verified, error) {
 	if env.RunbookDigest != d.Bundle.Digest {
 		return nil, errors.New("envelope digest does not match the bundle")
 	}
-	rb, err := signing.VerifyBundle(d.Bundle, a.id.Trust, a.cfg.RequiredSigners)
+	rb, err := signing.VerifyBundle(d.Bundle, trust, a.cfg.RequiredSigners)
 	if err != nil {
 		return nil, err
 	}
-	if a.allowlist != nil && !a.allowlist.allows(rb.Metadata.Name, d.Bundle.Digest) {
+	if a.allowlist != nil && !a.allowlist.allows(rb.Metadata.Name, d.Bundle.Digest, d.Bundle.Version) {
 		msg := fmt.Sprintf("runbook %s (%s) is not on the local allowlist", rb.Metadata.Name, d.Bundle.Digest)
 		if a.cfg.AllowlistMode == "enforce" {
 			return nil, errors.New(msg)
@@ -313,11 +359,27 @@ func (a *Agent) verify(d agentapi.Dispatch) (*verified, error) {
 		return nil, fmt.Errorf("parameters failed local validation: %w", err)
 	}
 	for k, want := range rb.Spec.Target.AgentSelector {
-		if a.id.Labels[k] != want {
-			return nil, fmt.Errorf("runbook targets %s=%s; this agent has %s=%q", k, want, k, a.id.Labels[k])
+		if labels[k] != want {
+			return nil, fmt.Errorf("runbook targets %s=%s; this agent has %s=%q", k, want, k, labels[k])
 		}
 	}
 	return &verified{env: env, rb: rb, step: step}, nil
+}
+
+// trust returns the trust config to verify with — the control plane's, with
+// locally pinned keys always replacing whatever it sent for those ids — and
+// the agent's current labels.
+func (a *Agent) trust() (signing.TrustConfig, map[string]string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	tc := signing.TrustConfig{Keys: map[string]string{}, RequiredSigners: a.id.Trust.RequiredSigners}
+	for id, pub := range a.id.Trust.Keys {
+		tc.Keys[id] = pub
+	}
+	for id, pub := range a.cfg.PinnedKeys {
+		tc.Keys[id] = pub
+	}
+	return tc, a.id.Labels
 }
 
 func (a *Agent) handleDispatch(ctx context.Context, d agentapi.Dispatch) {
@@ -368,7 +430,9 @@ func (a *Agent) sendResult(ctx context.Context, attemptID string, res agentapi.R
 			return
 		}
 		var se *statusError
-		if errors.As(err, &se) && se.Code/100 == 4 {
+		// 408 and 429 are transient; any other 4xx means the control plane
+		// won't take this result, so retrying can't help.
+		if errors.As(err, &se) && se.Code/100 == 4 && se.Code != 408 && se.Code != 429 {
 			a.cfg.Log.Warn("result refused", "attempt", attemptID, "err", err)
 			return
 		}
@@ -416,9 +480,17 @@ func loadAllowlist(path string) (*allowlist, error) {
 	return &al, nil
 }
 
-func (al *allowlist) allows(name, digest string) bool {
+func (al *allowlist) allows(name, digest string, version int) bool {
 	for _, r := range al.Runbooks {
-		if r.Name == name && (r.Digest == digest || r.Version == "*") {
+		if r.Name != name {
+			continue
+		}
+		switch {
+		case r.Digest != "":
+			if r.Digest == digest {
+				return true
+			}
+		case r.Version == "*", r.Version == strconv.Itoa(version):
 			return true
 		}
 	}
