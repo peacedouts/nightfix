@@ -46,9 +46,14 @@ type client struct {
 }
 
 func newClient(endpoint string, caPEM []byte) (*client, error) {
-	pool := x509.NewCertPool()
-	if len(caPEM) > 0 && !pool.AppendCertsFromPEM(caPEM) {
-		return nil, errors.New("could not parse CA certificate")
+	// Without a CA file, trust the system roots (a publicly trusted
+	// gateway). An empty pool would trust nothing at all.
+	var pool *x509.CertPool
+	if len(caPEM) > 0 {
+		pool = x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, errors.New("could not parse CA certificate")
+		}
 	}
 	c := &client{endpoint: endpoint}
 	tlsCfg := &tls.Config{
@@ -177,11 +182,54 @@ func saveIdentity(dir string, id *identity) error {
 		return err
 	}
 	b, _ := json.MarshalIndent(id, "", "  ")
-	tmp := filepath.Join(dir, "identity.json.tmp")
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	// A unique temp file (created 0600) so concurrent saves can't clobber
+	// each other's half-written file before the atomic rename.
+	f, err := os.CreateTemp(dir, "identity-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, filepath.Join(dir, "identity.json"))
+}
+
+// checkStateDir makes sure the identity can be saved before enrolling.
+func checkStateDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("state dir %s: %w", dir, err)
+	}
+	f, err := os.CreateTemp(dir, ".write-test-*")
+	if err != nil {
+		return fmt.Errorf("state dir %s is not writable: %w", dir, err)
+	}
+	f.Close()
+	return os.Remove(f.Name())
+}
+
+// expired reports whether the identity's certificate is no longer valid.
+func (id *identity) expired(now time.Time) bool {
+	block, _ := pem.Decode([]byte(id.CertPEM))
+	if block == nil {
+		return true
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	return err != nil || now.After(cert.NotAfter)
 }
 
 func (c *client) enroll(ctx context.Context, token, version string) (*identity, error) {

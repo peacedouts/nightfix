@@ -2,16 +2,25 @@ package agent
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -252,4 +261,127 @@ func TestPinnedKeysAreValidated(t *testing.T) {
 	if err == nil {
 		t.Error("pinned key for a signer that isn't required was accepted")
 	}
+}
+
+func certPair(t *testing.T, notAfter time.Time) (string, string) {
+	t.Helper()
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "x"},
+		NotBefore: notAfter.Add(-24 * time.Hour), NotAfter: notAfter}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kd, _ := x509.MarshalPKCS8PrivateKey(k)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd}))
+}
+
+// An agent whose stored identity expired (down more than 24h) or was revoked
+// must enroll again instead of retrying hello forever.
+func TestRejectedIdentityReenrolls(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		notAfter time.Duration
+	}{{"expired", -time.Hour}, {"revoked", 12 * time.Hour}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var hellos, enrolls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/agent/v1/hello":
+					hellos.Add(1)
+					http.Error(w, "unknown or revoked agent certificate", http.StatusUnauthorized)
+				case "/agent/v1/enroll/challenge", "/agent/v1/enroll":
+					enrolls.Add(1)
+					http.Error(w, "not in this test", http.StatusServiceUnavailable)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			dir := t.TempDir()
+			cert, key := certPair(t, time.Now().Add(tc.notAfter))
+			if err := saveIdentity(dir, &identity{AgentID: "a", OrgID: "o", CertPEM: cert, KeyPEM: key}); err != nil {
+				t.Fatal(err)
+			}
+			a, err := New(Config{Endpoint: srv.URL, EnrollMethod: "iam", OrgID: "org_x", IAM: fakeIAM{}, StateDir: dir,
+				Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			a.Run(ctx)
+			if enrolls.Load() == 0 {
+				t.Fatalf("no re-enrollment after %d rejected hellos", hellos.Load())
+			}
+		})
+	}
+}
+
+// A token-enrolled agent can't re-enroll by itself: it must stop with a
+// clear error rather than retry forever.
+func TestRejectedTokenIdentityStops(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unknown or revoked agent certificate", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	cert, key := certPair(t, time.Now().Add(12*time.Hour))
+	saveIdentity(dir, &identity{AgentID: "a", OrgID: "o", CertPEM: cert, KeyPEM: key})
+	a, _ := New(Config{Endpoint: srv.URL, EnrollMethod: "token", EnrollToken: "nfxenroll_x", StateDir: dir,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	if err := a.Run(ctx); err == nil || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "new token") {
+		t.Fatalf("got %v, want a clear re-enroll error", err)
+	}
+}
+
+func TestUnwritableStateDirFailsBeforeEnrolling(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere")
+	}
+	dir := t.TempDir()
+	os.Chmod(dir, 0o500)
+	defer os.Chmod(dir, 0o700)
+	if err := checkStateDir(dir); err == nil {
+		t.Fatal("unwritable state dir accepted")
+	}
+}
+
+func TestNoCAFileUsesSystemRoots(t *testing.T) {
+	c, err := newClient("https://example.invalid", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.http.Transport.(*http.Transport).TLSClientConfig.RootCAs != nil {
+		t.Fatal("an empty CA pool trusts nothing; without --ca-file the system roots should be used")
+	}
+}
+
+func TestConcurrentIdentitySaves(t *testing.T) {
+	dir := t.TempDir()
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := saveIdentity(dir, &identity{AgentID: strings.Repeat("a", 1000+i)}); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	id, err := loadIdentity(dir)
+	if err != nil || !strings.HasPrefix(id.AgentID, "aaaa") {
+		t.Fatalf("identity corrupted by concurrent saves: %v", err)
+	}
+}
+
+type fakeIAM struct{}
+
+func (fakeIAM) Region() string { return "us-east-1" }
+func (fakeIAM) SignGetCallerIdentity(context.Context, string, map[string]string) (map[string][]string, error) {
+	return map[string][]string{}, nil
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
+	"strings"
 	"time"
 
 	"github.com/peacedouts/nightfix/internal/db"
@@ -129,14 +130,22 @@ func pagerDutySeverity(s string) string {
 	}
 }
 
+// slackEscape makes a value safe to put in Slack message text. Slack parses
+// <…> as control sequences (<!channel>, <@U…>, <https://x|label>) even
+// inside backticks, and alert summaries, run errors and approver comments
+// are untrusted, so &, < and > are escaped as Slack documents.
+func slackEscape(v any) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(fmt.Sprint(v))
+}
+
 func slackText(kind string, p map[string]any) string {
-	num, title, svc, reason := p["incident_number"], p["title"], p["service"], p["reason"]
+	num, title, svc, reason := p["incident_number"], slackEscape(p["title"]), slackEscape(p["service"]), slackEscape(p["reason"])
 	if num == nil {
 		return fmt.Sprintf(":gear: %v", reason) // approval updates for runs outside an incident
 	}
 	switch kind {
 	case "page":
-		return fmt.Sprintf(":rotating_light: <!here> *Incident #%v* on `%v` (%v): %v\n%v", num, svc, p["severity"], title, reason)
+		return fmt.Sprintf(":rotating_light: <!here> *Incident #%v* on `%v` (%v): %v\n%v", num, svc, slackEscape(p["severity"]), title, reason)
 	case "resolve":
 		if p["resolution"] == "auto_remediated" {
 			return fmt.Sprintf(":white_check_mark: *Incident #%v* on `%v` auto-remediated: %v", num, svc, reason)

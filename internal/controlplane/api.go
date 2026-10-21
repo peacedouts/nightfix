@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,7 +27,12 @@ func (s *Server) APIHandler() http.Handler {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			p, err := s.authenticate(r)
 			if err != nil {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+				var ae authError
+				if errors.As(err, &ae) {
+					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": ae.Error()})
+				} else {
+					s.reply(w, nil, err) // httpError keeps its status; anything else is a logged 500
+				}
 				return
 			}
 			// Don't reassign minRole: it's shared by every request on this route.

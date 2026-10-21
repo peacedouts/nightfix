@@ -12,9 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -127,31 +129,18 @@ func (a *Agent) ID() string {
 // Run enrolls if needed, then serves until ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
 	id, err := loadIdentity(a.cfg.StateDir)
-	if err != nil {
-		switch a.cfg.EnrollMethod {
-		case "token":
-			if a.cfg.EnrollToken == "" {
-				return errors.New("token enrollment needs an enrollment token")
-			}
-			id, err = a.c.enroll(ctx, a.cfg.EnrollToken, Version)
-		case "", "iam":
-			if a.cfg.OrgID == "" || a.cfg.IAM == nil {
-				return errors.New("iam enrollment needs the org id (org_…) and AWS credentials")
-			}
-			id, err = a.c.enrollIAM(ctx, a.cfg.OrgID, a.cfg.IAM, Version)
-		default:
-			return fmt.Errorf("unknown enrollment method %q", a.cfg.EnrollMethod)
-		}
-		if err != nil {
-			return err
-		}
-		if err := saveIdentity(a.cfg.StateDir, id); err != nil {
-			return err
-		}
-		a.cfg.Log.Info("enrolled", "agent", id.AgentID, "labels", id.Labels)
+	if err == nil && id.expired(time.Now()) {
+		// Down for longer than the certificate lives (24h): it can't be
+		// renewed, so enroll again rather than retrying it forever.
+		a.cfg.Log.Warn("stored identity has expired; enrolling again", "agent", id.AgentID)
+		err = errors.New("identity expired")
 	}
-	a.id = id
-	if err := a.c.setCert(id.CertPEM, id.KeyPEM); err != nil {
+	if err != nil {
+		if id, err = a.enroll(ctx); err != nil {
+			return err
+		}
+	}
+	if err := a.useIdentity(id); err != nil {
 		return err
 	}
 
@@ -167,11 +156,29 @@ func (a *Agent) Run(ctx context.Context) error {
 		// reach a running agent.
 		if needHello {
 			if err := a.hello(ctx); err != nil {
-				if ctx.Err() == nil {
-					a.cfg.Log.Warn("hello failed; retrying", "err", err, "in", backoff)
-					sleep(ctx, jitter(backoff))
-					backoff = min(backoff*2, time.Minute)
+				if ctx.Err() != nil {
+					continue
 				}
+				if identityRejected(err) {
+					// Revoked, replaced or expired: this identity will never
+					// work again. IAM agents can prove who they are again;
+					// a token is single-use, so a human has to re-enroll.
+					if a.cfg.EnrollMethod == "token" {
+						return fmt.Errorf("the gateway no longer accepts this agent's identity (%v); enroll it again with a new token", err)
+					}
+					a.cfg.Log.Warn("the gateway rejected this agent's identity; enrolling again", "err", err)
+					if id, eerr := a.enroll(ctx); eerr != nil {
+						a.cfg.Log.Warn("re-enrollment failed; retrying", "err", eerr, "in", backoff)
+					} else if eerr := a.useIdentity(id); eerr != nil {
+						return eerr
+					} else {
+						continue
+					}
+				} else {
+					a.cfg.Log.Warn("hello failed; retrying", "err", err, "in", backoff)
+				}
+				sleep(ctx, jitter(backoff))
+				backoff = min(backoff*2, time.Minute)
 				continue
 			}
 			needHello = false
@@ -192,6 +199,74 @@ func (a *Agent) Run(ctx context.Context) error {
 		backoff = time.Second
 	}
 	return ctx.Err()
+}
+
+// enroll proves the agent's identity and saves it. The state directory is
+// checked first: enrolling and then failing to save would use up a
+// single-use token, or an agent slot, on every restart.
+func (a *Agent) enroll(ctx context.Context) (*identity, error) {
+	if err := checkStateDir(a.cfg.StateDir); err != nil {
+		return nil, err
+	}
+	var id *identity
+	var err error
+	switch a.cfg.EnrollMethod {
+	case "token":
+		if a.cfg.EnrollToken == "" {
+			return nil, errors.New("token enrollment needs an enrollment token")
+		}
+		id, err = a.c.enroll(ctx, a.cfg.EnrollToken, Version)
+	case "", "iam":
+		if a.cfg.OrgID == "" || a.cfg.IAM == nil {
+			return nil, errors.New("iam enrollment needs the org id (org_…) and AWS credentials")
+		}
+		id, err = a.c.enrollIAM(ctx, a.cfg.OrgID, a.cfg.IAM, Version)
+	default:
+		return nil, fmt.Errorf("unknown enrollment method %q", a.cfg.EnrollMethod)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := saveIdentity(a.cfg.StateDir, id); err != nil {
+		return nil, err
+	}
+	a.cfg.Log.Info("enrolled", "agent", id.AgentID, "labels", id.Labels)
+	return id, nil
+}
+
+func (a *Agent) useIdentity(id *identity) error {
+	if err := a.c.setCert(id.CertPEM, id.KeyPEM); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.id = id
+	a.mu.Unlock()
+	return nil
+}
+
+// persist saves the current identity. It holds the agent lock so hello and
+// certificate renewal can't interleave their writes.
+func (a *Agent) persist() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return saveIdentity(a.cfg.StateDir, a.id)
+}
+
+// identityRejected reports whether the gateway refused the agent's
+// certificate itself (revoked, replaced, expired or unknown), as opposed to
+// an outage.
+func identityRejected(err error) bool {
+	var se *statusError
+	if errors.As(err, &se) && se.Code == http.StatusUnauthorized {
+		return true
+	}
+	msg := err.Error()
+	for _, s := range []string{"tls: expired certificate", "tls: bad certificate", "tls: certificate required", "tls: revoked certificate", "tls: unknown certificate"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Agent) cancelAll() {
@@ -228,7 +303,7 @@ func (a *Agent) hello(ctx context.Context) error {
 	a.id.Labels = w.Labels
 	a.id.Trust = w.TrustConfig
 	a.mu.Unlock()
-	return saveIdentity(a.cfg.StateDir, a.id)
+	return a.persist()
 }
 
 func (a *Agent) heartbeatLoop(ctx context.Context) {
@@ -266,8 +341,14 @@ func (a *Agent) renewLoop(ctx context.Context) {
 			continue
 		}
 		if err := a.c.setCert(cert, key); err == nil {
+			a.mu.Lock()
 			a.id.CertPEM, a.id.KeyPEM = cert, key
-			saveIdentity(a.cfg.StateDir, a.id)
+			a.mu.Unlock()
+			if err := a.persist(); err != nil {
+				// The new certificate works in memory; on restart the old one
+				// is still accepted until it expires, then the agent re-enrolls.
+				a.cfg.Log.Error("could not save the renewed certificate", "err", err)
+			}
 			a.cfg.Log.Info("certificate renewed")
 		}
 	}

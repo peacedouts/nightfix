@@ -36,7 +36,12 @@ func (s *Server) AgentHandler() http.Handler {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			a, err := s.authenticateAgent(r)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusUnauthorized)
+				var ae authError
+				if errors.As(err, &ae) {
+					http.Error(w, ae.Error(), http.StatusUnauthorized)
+				} else {
+					s.reply(w, nil, err)
+				}
 				return
 			}
 			fn(w, r, a)
@@ -95,14 +100,17 @@ func (s *Server) AgentHandler() http.Handler {
 // to a non-revoked agent and the URI SAN must match it.
 func (s *Server) authenticateAgent(r *http.Request) (agentIdentity, error) {
 	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
-		return agentIdentity{}, errors.New("client certificate required")
+		return agentIdentity{}, authError("client certificate required")
 	}
 	cert := r.TLS.VerifiedChains[0][0]
 	a := agentIdentity{Serial: SerialHex(cert.SerialNumber)}
 	var isCurrent, hasPrev bool
 	if err := s.DB.QueryRowContext(r.Context(), `SELECT org_id, agent_id, is_current, has_prev FROM nfx_route_agent($1)`, a.Serial).
 		Scan(&a.OrgID, &a.AgentID, &isCurrent, &hasPrev); err != nil {
-		return a, errors.New("unknown or revoked agent certificate")
+		if isNoRows(err) {
+			return a, authError("unknown or revoked agent certificate")
+		}
+		return a, err
 	}
 	want := AgentURI(a.OrgID, a.AgentID)
 	for _, u := range cert.URIs {
@@ -120,7 +128,7 @@ func (s *Server) authenticateAgent(r *http.Request) (agentIdentity, error) {
 			return a, nil
 		}
 	}
-	return a, errors.New("certificate identity does not match the agent")
+	return a, authError("certificate identity does not match the agent")
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
