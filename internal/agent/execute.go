@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -59,6 +60,12 @@ func (a *Agent) execute(ctx context.Context, v *verified) agentapi.Result {
 		err = fmt.Errorf("step type %q is not supported by this agent", v.step.Type)
 	}
 
+	// A response that carries secret material is redacted like a resolved
+	// secret, whatever the step does with it.
+	if m := secretMaterial(v.step, result); len(m) > 0 {
+		out.red = newRedactor(append(values, m...))
+	}
+
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		res.Status = "timed_out"
@@ -85,7 +92,63 @@ func (a *Agent) execute(ctx context.Context, v *verified) agentapi.Result {
 			res.Outputs[name] = out.red.redactAny(val)
 		}
 	}
+	// The control plane accepts results up to 4 MiB of JSON. A result over
+	// that was refused and dropped, and the step ended up "lost"; fail it
+	// with a clear reason instead.
+	if b, err := json.Marshal(res.Outputs); err == nil && len(b) > maxOutputsBytes {
+		res.Status, res.Outputs = "failed", nil
+		res.Error = fmt.Sprintf("step outputs are %d bytes of JSON; the limit is %d (output less, or extract fields)", len(b), maxOutputsBytes)
+	}
+	res.Error = truncateUTF8(res.Error, maxErrorBytes)
 	return res
+}
+
+// Result size limits, well under the control plane's 4 MiB request limit.
+const (
+	maxOutputsBytes = 1 << 20
+	maxErrorBytes   = 16 << 10
+)
+
+// secretMaterial returns the secret values in an AWS response.
+func secretMaterial(step runbook.Step, res map[string]any) []string {
+	service, action := step.Service, step.Action
+	if step.Type == "wait" && step.Check != nil && step.Check.AWS != nil {
+		service, action = step.Check.AWS.Service, step.Check.AWS.Action
+	}
+	var out []string
+	str := func(m any, k string) {
+		if mm, ok := m.(map[string]any); ok {
+			if s, ok := mm[k].(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	param := func(p any) {
+		if mm, ok := p.(map[string]any); ok && mm["Type"] == "SecureString" {
+			str(mm, "Value")
+		}
+	}
+	list := func(k string, fn func(any)) {
+		if l, ok := res[k].([]any); ok {
+			for _, e := range l {
+				fn(e)
+			}
+		}
+	}
+	switch service + ":" + action {
+	case "secretsmanager:GetSecretValue":
+		str(res, "SecretString")
+		str(res, "SecretBinary")
+	case "secretsmanager:BatchGetSecretValue":
+		list("SecretValues", func(e any) { str(e, "SecretString"); str(e, "SecretBinary") })
+	case "ssm:GetParameter":
+		param(res["Parameter"])
+	case "ssm:GetParameters", "ssm:GetParametersByPath":
+		list("Parameters", param)
+	case "kms:Decrypt", "kms:GenerateDataKey", "kms:GenerateRandom":
+		str(res, "Plaintext")
+	}
+	return out
 }
 
 func (a *Agent) resolveSecrets(ctx context.Context, v *verified) (map[string]any, []string, error) {
@@ -371,7 +434,8 @@ type streamer struct {
 	seq       int
 	pending   []agentapi.OutputChunk
 	tails     map[string]string // per stream: raw bytes held back in case a secret continues in the next write
-	sent      int               // bytes queued for upload so far (the per-attempt cap)
+	states    map[string]*scanState
+	sent      int // bytes queued for upload so far (the per-attempt cap)
 	truncated bool
 	done      chan struct{}
 	wg        sync.WaitGroup
@@ -381,7 +445,7 @@ type streamer struct {
 const truncatedMarker = "\n[output truncated: limit reached]\n"
 
 func newStreamer(a *Agent, attempt string) *streamer {
-	s := &streamer{a: a, attempt: attempt, red: newRedactor(nil), tails: map[string]string{}, done: make(chan struct{})}
+	s := &streamer{a: a, attempt: attempt, red: newRedactor(nil), tails: map[string]string{}, states: map[string]*scanState{}, done: make(chan struct{})}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -418,8 +482,8 @@ func (s *streamer) addLocked(stream, data string) {
 	}
 	for len(data) > 0 {
 		piece := truncateUTF8(data, agentapi.MaxChunkBytes)
-		if piece == "" { // a single rune larger than the chunk size can't happen, but never loop forever
-			piece = data
+		if piece == "" { // binary output: no character boundary near the limit
+			piece = data[:min(len(data), agentapi.MaxChunkBytes)]
 		}
 		data = data[len(piece):]
 		s.sent += len(piece)
@@ -441,8 +505,12 @@ func truncateUTF8(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
+	// Back off at most one character's worth; past that it isn't UTF-8
+	// (binary output), so cut where asked.
+	for k, m := 0, n; k < utf8.UTFMax && m > 0; k, m = k+1, m-1 {
+		if utf8.RuneStart(s[m]) {
+			return s[:m]
+		}
 	}
 	return s[:n]
 }
@@ -463,7 +531,7 @@ func (w streamWriter) Write(p []byte) (int, error) {
 	s := w.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	emit, keep := s.red.split(s.tails[w.stream] + string(p))
+	emit, keep := s.red.scan(s.state(w.stream), s.tails[w.stream]+string(p), false)
 	s.tails[w.stream] = keep
 	if emit != "" {
 		s.addLocked(w.stream, emit)
@@ -472,6 +540,15 @@ func (w streamWriter) Write(p []byte) (int, error) {
 }
 
 func (s *streamer) writer(stream string) io.Writer { return streamWriter{s, stream} }
+
+func (s *streamer) state(stream string) *scanState {
+	st := s.states[stream]
+	if st == nil {
+		st = &scanState{}
+		s.states[stream] = st
+	}
+	return st
+}
 
 func (s *streamer) flush() {
 	s.mu.Lock()
@@ -494,14 +571,15 @@ func (s *streamer) flush() {
 
 func (s *streamer) close() {
 	s.mu.Lock()
-	tails := s.tails
-	s.tails = map[string]string{}
-	s.mu.Unlock()
 	for _, stream := range []string{"stdout", "stderr"} {
-		if t := tails[stream]; t != "" {
-			s.add(stream, t)
+		if t := s.tails[stream]; t != "" {
+			if emit, _ := s.red.scan(s.state(stream), t, true); emit != "" {
+				s.addLocked(stream, emit)
+			}
 		}
 	}
+	s.tails = map[string]string{}
+	s.mu.Unlock()
 	close(s.done)
 	s.wg.Wait()
 }

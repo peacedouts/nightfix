@@ -20,11 +20,16 @@ func (s *Server) RunWorkers(ctx context.Context, tick time.Duration) {
 		fn   func(context.Context) (int, error)
 	}{
 		{"alerts", s.ProcessAlertEvents},
-		{"notifications", s.DeliverNotifications},
 		{"deadlines", s.ProcessDueIncidents},
 		{"leases", s.ProcessExpiredLeases},
 		{"run-timeouts", s.ProcessOverdueRuns},
 		{"approval-expiry", s.ProcessExpiredGates},
+	}
+	// Notifications get several workers that claim independently, so one
+	// slow endpoint can't hold up anyone else's pages.
+	for range s.Cfg.NotifyWorkers {
+		s.workers.Add(1)
+		go s.notifyWorker(ctx, tick)
 	}
 	for _, l := range loops {
 		go func(name string, fn func(context.Context) (int, error)) {
@@ -63,6 +68,20 @@ func (s *Server) RunWorkers(ctx context.Context, tick time.Duration) {
 			}
 		}
 	}()
+}
+
+// WaitWorkers waits, up to timeout, for RunWorkers' notification workers
+// to finish what they claimed after its context is cancelled, so a page
+// sent during shutdown is recorded rather than sent again by another
+// instance.
+func (s *Server) WaitWorkers(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() { s.workers.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		s.Log.Warn("notification workers still busy at shutdown")
+	}
 }
 
 // Tick runs every background loop once, synchronously. Tests use it to step

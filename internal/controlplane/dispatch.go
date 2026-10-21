@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
+
 	"github.com/peacedouts/nightfix/internal/agentapi"
 	"github.com/peacedouts/nightfix/internal/db"
 	"github.com/peacedouts/nightfix/internal/ids"
@@ -85,14 +87,27 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 		if err := tx.QueryRow(`SELECT labels, max_agents FROM enrollment_rules WHERE id = $1 FOR UPDATE`, ruleID).Scan(&labels, &max); err != nil {
 			return err
 		}
-		// Agents without persistent disk (Fargate) re-enroll on every start, so
-		// count only agents that are live or just enrolled, not old identities.
-		if err := tx.QueryRow(`SELECT count(*) FROM agents WHERE enrollment_rule_id = $1 AND revoked_at IS NULL
-			AND (last_seen_at > now() - interval '10 minutes' OR created_at > now() - interval '10 minutes')`, ruleID).Scan(&active); err != nil {
-			return err
-		}
-		if active >= max {
-			return httpError{403, fmt.Sprintf("enrollment rule allows at most %d live agents", max)}
+		if req.Method == "token" {
+			// A token is limited-use: max_agents counts every agent it ever
+			// enrolled. Counting only live agents let a leaked token enroll
+			// again as soon as the first agent had been quiet for 10 minutes.
+			if err := tx.QueryRow(`SELECT count(*) FROM agents WHERE enrollment_rule_id = $1`, ruleID).Scan(&active); err != nil {
+				return err
+			}
+			if active >= max {
+				return httpError{403, fmt.Sprintf("this enrollment token has been used for %d agent(s), its limit; create a new one", active)}
+			}
+		} else {
+			// IAM agents prove their role on every enrollment, and agents
+			// without persistent disk (Fargate) re-enroll on every start, so
+			// count only agents that are live or just enrolled.
+			if err := tx.QueryRow(`SELECT count(*) FROM agents WHERE enrollment_rule_id = $1 AND revoked_at IS NULL
+				AND (last_seen_at > now() - interval '10 minutes' OR created_at > now() - interval '10 minutes')`, ruleID).Scan(&active); err != nil {
+				return err
+			}
+			if active >= max {
+				return httpError{403, fmt.Sprintf("enrollment rule allows at most %d live agents", max)}
+			}
 		}
 		agentID := ids.NewString()
 		certPEM, serial, exp, err := s.CA.IssueAgentCert([]byte(req.CSRPEM), orgID, agentID)
@@ -122,6 +137,18 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 func (s *Server) Renew(ctx context.Context, a agentIdentity, req agentapi.RenewRequest) (*agentapi.RenewResponse, error) {
 	var out agentapi.RenewResponse
 	err := s.DB.WithOrg(ctx, a.OrgID, func(tx *db.Tx) error {
+		// A certificate is renewed only while the rule that enrolled the
+		// agent hasn't been revoked, so revoking an IAM rule or a token
+		// doesn't leave its agents running indefinitely. (A rule's expiry
+		// only ends its enrollment window.)
+		var ruleRevoked bool
+		if err := tx.QueryRow(`SELECT e.revoked_at IS NOT NULL FROM agents a JOIN enrollment_rules e ON e.id = a.enrollment_rule_id
+			WHERE a.id = $1`, a.AgentID).Scan(&ruleRevoked); err != nil {
+			return err
+		}
+		if ruleRevoked {
+			return httpError{403, "the enrollment rule for this agent has been revoked; re-enroll it under an active rule"}
+		}
 		certPEM, serial, exp, err := s.CA.IssueAgentCert([]byte(req.CSRPEM), a.OrgID, a.AgentID)
 		if err != nil {
 			return httpError{400, err.Error()}
@@ -200,8 +227,9 @@ func (s *Server) pollOnce(ctx context.Context, a agentIdentity, req agentapi.Pol
 		var labels db.JSON[map[string]string]
 		var frozenLocal bool
 		var revoked sql.NullTime
+		var caps pq.StringArray
 		if err := tx.QueryRow(`UPDATE agents SET status = 'online', last_seen_at = now() WHERE id = $1
-			RETURNING labels, frozen_local, revoked_at`, a.AgentID).Scan(&labels, &frozenLocal, &revoked); err != nil {
+			RETURNING labels, frozen_local, revoked_at, COALESCE(capabilities, '{}')`, a.AgentID).Scan(&labels, &frozenLocal, &revoked, &caps); err != nil {
 			return err
 		}
 		if revoked.Valid {
@@ -238,10 +266,16 @@ func (s *Server) pollOnce(ctx context.Context, a agentIdentity, req agentapi.Pol
 
 		var attemptID, runID, stepID string
 		var idx, n int
+		// Only steps this agent says it can run (Hello's capabilities), so a
+		// mixed fleet doesn't hand a step to an agent that would refuse it.
+		// An agent that reported none is offered anything, as before.
 		err = tx.QueryRow(`SELECT a.id, a.run_id, a.step_id, a.step_index, a.attempt_number
 			FROM step_attempts a JOIN runbook_runs r ON r.id = a.run_id
+			JOIN runbook_versions v ON v.id = r.runbook_version_id
 			WHERE a.state = 'queued' AND r.status = 'running' AND r.target_selector <@ $1::jsonb
-			ORDER BY a.created_at LIMIT 1 FOR UPDATE OF a SKIP LOCKED`, labels).Scan(&attemptID, &runID, &stepID, &idx, &n)
+			  AND (cardinality($2::text[]) = 0
+			       OR (v.canonical_json::jsonb #>> ARRAY['spec', 'steps', a.step_index::text, 'type']) = ANY($2::text[]))
+			ORDER BY a.created_at LIMIT 1 FOR UPDATE OF a SKIP LOCKED`, labels, caps).Scan(&attemptID, &runID, &stepID, &idx, &n)
 		if isNoRows(err) {
 			return nil
 		}
@@ -327,9 +361,10 @@ func (s *Server) Ack(ctx context.Context, a agentIdentity, attemptID string, ack
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE step_attempts SET state = 'rejected', error = $2, finished_at = now() WHERE id = $1`,
-			attemptID, "agent rejected the dispatch: "+ack.Reason); err != nil {
+			attemptID, "agent rejected the dispatch: "+truncate(cleanText(ack.Reason), maxStoredError)); err != nil {
 			return err
 		}
+		ack.Reason = truncate(cleanText(ack.Reason), maxStoredError)
 		if err := tx.Audit(ctx, "agent", a.AgentID, "attempt.rejected", "step_attempt", attemptID, map[string]string{"reason": ack.Reason}); err != nil {
 			return err
 		}
@@ -406,6 +441,11 @@ func (s *Server) Result(ctx context.Context, a agentIdentity, attemptID string, 
 		default:
 			return httpError{400, "invalid result status"}
 		}
+		// Step output is arbitrary bytes; Postgres text and jsonb reject NUL
+		// and invalid UTF-8. Unstorable, the result failed on every retry and
+		// the step ended up "lost" with its real outcome discarded.
+		r.Error = truncate(cleanText(r.Error), maxStoredError)
+		r.Outputs, _ = cleanJSONValue(r.Outputs).(map[string]any)
 		// The control plane's own cancellations are already terminal above,
 		// so a "cancelled" report means the agent stopped the step itself
 		// (typically shutting down mid-step). The step may or may not have
@@ -435,3 +475,32 @@ func (s *Server) Result(ctx context.Context, a agentIdentity, attemptID string, 
 }
 
 var _ = errors.New
+
+// maxStoredError bounds error text stored from agents.
+const maxStoredError = 16 << 10
+
+// cleanJSONValue makes agent-supplied JSON storable: every string (keys
+// included) becomes valid UTF-8 with no NUL bytes.
+func cleanJSONValue(v any) any {
+	switch x := v.(type) {
+	case string:
+		return cleanText(x)
+	case map[string]any:
+		if x == nil {
+			return x
+		}
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[cleanText(k)] = cleanJSONValue(e)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = cleanJSONValue(e)
+		}
+		return out
+	default:
+		return v
+	}
+}

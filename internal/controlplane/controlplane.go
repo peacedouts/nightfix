@@ -49,7 +49,18 @@ type Config struct {
 	LeaseDuration time.Duration
 	EnvelopeTTL   time.Duration
 	PollWait      time.Duration
-	HTTPClient    *http.Client // for notifications and SNS
+	HTTPClient    *http.Client // for SNS, STS and Slack interaction replies (fixed hosts)
+	// AllowPrivateTargets lifts the host allowlist on tenant-supplied
+	// notification URLs (Slack webhooks, approval channels, PagerDuty
+	// events_url) and lets the notification client connect to loopback and
+	// private addresses. Local development, demos and tests only.
+	AllowPrivateTargets bool
+	// NotifyHTTPClient sends notifications to tenant-supplied URLs. Defaults
+	// to newNotifyClient: no redirects, no proxy, a 5s timeout, and (unless
+	// AllowPrivateTargets) no loopback, private or link-local addresses.
+	NotifyHTTPClient *http.Client
+	// NotifyWorkers is how many notifications one instance delivers at once.
+	NotifyWorkers int
 }
 
 func (c *Config) defaults() {
@@ -71,6 +82,12 @@ func (c *Config) defaults() {
 	if c.HTTPClient == nil {
 		c.HTTPClient = &http.Client{Timeout: 10 * time.Second}
 	}
+	if c.NotifyHTTPClient == nil {
+		c.NotifyHTTPClient = newNotifyClient(c.AllowPrivateTargets)
+	}
+	if c.NotifyWorkers <= 0 {
+		c.NotifyWorkers = 8
+	}
 }
 
 // Server is the control plane.
@@ -86,6 +103,8 @@ type Server struct {
 
 	snsCertMu sync.Mutex
 	snsCerts  map[string][]byte
+
+	workers sync.WaitGroup // RunWorkers' notification workers
 }
 
 // New builds a Server.
@@ -234,3 +253,17 @@ func hashSecret(s string) []byte {
 var errNotFound = errors.New("not found")
 
 func isNoRows(err error) bool { return errors.Is(err, sql.ErrNoRows) }
+
+// readyz reports whether this instance can serve: unlike /healthz (liveness,
+// which must not fail during a database outage, or the orchestrator restarts
+// every instance at once), it checks the database.
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.DB.PingContext(ctx); err != nil {
+		s.Log.Warn("readiness check failed", "err", err)
+		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Write([]byte("ok"))
+}

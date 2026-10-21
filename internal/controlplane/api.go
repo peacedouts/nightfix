@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/peacedouts/nightfix/internal/db"
 	"github.com/peacedouts/nightfix/internal/expr"
@@ -57,6 +58,7 @@ func (s *Server) APIHandler() http.Handler {
 		})
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /readyz", s.readyz)
 	// The agent gateway's CA certificate (public). Fetched over the API's
 	// publicly trusted TLS, so installing an agent needs no file copying.
 	mux.HandleFunc("GET /v1/agent-ca.pem", func(w http.ResponseWriter, _ *http.Request) {
@@ -75,10 +77,15 @@ func (s *Server) APIHandler() http.Handler {
 	route("GET /v1/services", "viewer", s.apiListServices)
 	route("POST /v1/services/{name}/escalation-targets", "admin", s.apiCreateTarget)
 	route("POST /v1/integrations", "admin", s.apiCreateIntegration)
+	route("GET /v1/integrations", "admin", s.apiListIntegrations)
+	route("GET /v1/alert-events/failed", "admin", s.apiFailedAlertEvents)
 	route("PUT /v1/integrations/{id}/topic", "admin", s.apiSetIntegrationTopic)
 	route("PUT /v1/routing-rules", "admin", s.apiPutRoutingRules)
 	route("POST /v1/enrollment-rules", "admin", s.apiCreateEnrollmentRule)
+	route("GET /v1/enrollment-rules", "admin", s.apiListEnrollmentRules)
+	route("POST /v1/enrollment-rules/{id}/revoke", "admin", s.apiRevokeEnrollmentRule)
 	route("GET /v1/agents", "viewer", s.apiListAgents)
+	route("POST /v1/agents/{id}/revoke", "admin", s.apiRevokeAgent)
 	route("GET /v1/signing-keys", "viewer", s.apiSigningKeys)
 	route("POST /v1/runbooks/validate", "responder*", s.apiValidateRunbook)
 	route("PUT /v1/runbooks/{name}", "responder*", s.apiPublishRunbook)
@@ -87,6 +94,7 @@ func (s *Server) APIHandler() http.Handler {
 	s.approvalRoutes(route)
 	s.slackRoutes(route, mux)
 	route("GET /v1/runs/{id}", "viewer", s.apiGetRun)
+	route("GET /v1/runs/{id}/steps/{step}/attempts/{n}/output", "viewer", s.apiAttemptOutput)
 	route("GET /v1/incidents", "viewer", s.apiListIncidents)
 	route("GET /v1/incidents/{number}", "viewer", s.apiGetIncident)
 	route("GET /v1/incidents/{number}/timeline", "viewer", s.apiTimeline)
@@ -225,8 +233,8 @@ func (s *Server) apiCreateTarget(r *http.Request, p principal) (any, error) {
 	cfg := map[string]string{}
 	switch req.Type {
 	case "slack":
-		if !strings.HasPrefix(req.URL, "https://") && !strings.HasPrefix(req.URL, "http://127.0.0.1") && !strings.HasPrefix(req.URL, "http://localhost") {
-			return nil, httpError{400, "url must be an https Slack incoming-webhook URL"}
+		if validateNotifyURL("slack", req.URL, s.Cfg.AllowPrivateTargets) != nil {
+			return nil, httpError{400, "url must be a Slack incoming-webhook URL (https://hooks.slack.com/...)"}
 		}
 		secret = req.URL
 	case "pagerduty":
@@ -235,6 +243,9 @@ func (s *Server) apiCreateTarget(r *http.Request, p principal) (any, error) {
 		}
 		secret = req.RoutingKey
 		if req.EventsURL != "" {
+			if validateNotifyURL("pagerduty", req.EventsURL, s.Cfg.AllowPrivateTargets) != nil {
+				return nil, httpError{400, "events_url must be https://events.pagerduty.com/... or https://events.eu.pagerduty.com/... (or omitted)"}
+			}
 			cfg["events_url"] = req.EventsURL
 		}
 	default:
@@ -370,6 +381,75 @@ func (s *Server) apiCreateIntegration(r *http.Request, p principal) (any, error)
 	return out, nil
 }
 
+// apiListIntegrations shows each integration's ingest URL and, for
+// CloudWatch, its pinned topic and the last topic it refused: a CloudWatch
+// integration with no pinned topic (one created before pinning was
+// required) accepts nothing, and SNS doesn't tell anyone.
+func (s *Server) apiListIntegrations(r *http.Request, p principal) (any, error) {
+	out := []map[string]any{}
+	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		rows, err := tx.Query(`SELECT i.id, i.type, i.name, s.name, i.config, i.created_at FROM integrations i
+			JOIN services s ON s.id = i.default_service_id WHERE i.archived_at IS NULL ORDER BY i.created_at`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, typ, name, svc string
+			var cfg db.JSON[map[string]string]
+			var created time.Time
+			if err := rows.Scan(&id, &typ, &name, &svc, &cfg, &created); err != nil {
+				return err
+			}
+			it := map[string]any{"id": ids.Encode("int", id), "type": typ, "name": name, "default_service": svc,
+				"ingest_url": strings.TrimSuffix(s.Cfg.PublicIngestURL, "/") + "/v1/i/" + ids.Encode("int", id),
+				"created_at": created}
+			if typ == "cloudwatch" {
+				it["topic_arn"] = cfg.V["topic_arn"]
+				if cfg.V["topic_arn"] == "" {
+					it["problem"] = "no SNS topic is pinned, so every delivery is refused; set it with PUT /v1/integrations/{id}/topic"
+				}
+				if t := cfg.V["last_rejected_topic"]; t != "" && t != cfg.V["topic_arn"] {
+					it["last_rejected_topic"] = t
+					it["last_rejected_at"] = cfg.V["last_rejected_at"]
+				}
+			}
+			out = append(out, it)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// apiFailedAlertEvents lists the last week's events that were received but
+// could not be processed (malformed, or an error that retrying wouldn't fix).
+// They are stored with their error rather than retried, since a stuck event
+// would hold up the org's later alerts; this is where they show.
+func (s *Server) apiFailedAlertEvents(r *http.Request, p principal) (any, error) {
+	out := []map[string]any{}
+	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		rows, err := tx.Query(`SELECT e.id, e.received_at, e.integration_id, COALESCE(i.name, ''), e.error FROM alert_events e
+			LEFT JOIN integrations i ON i.id = e.integration_id
+			WHERE e.received_at > now() - interval '7 days' AND e.error IS NOT NULL
+			ORDER BY e.received_at DESC LIMIT 200`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, integ, name, msg string
+			var at time.Time
+			if err := rows.Scan(&id, &at, &integ, &name, &msg); err != nil {
+				return err
+			}
+			out = append(out, map[string]any{"id": ids.Encode("evt", id), "received_at": at,
+				"integration": ids.Encode("int", integ), "integration_name": name, "error": msg})
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
 func (s *Server) apiPutRoutingRules(r *http.Request, p principal) (any, error) {
 	var req []struct {
 		Match   string `json:"match"`
@@ -410,6 +490,9 @@ func (s *Server) apiPutRoutingRules(r *http.Request, p principal) (any, error) {
 	})
 	return map[string]int{"rules": len(req)}, err
 }
+
+// maxEnrollTokenLife caps how long an enrollment token stays usable.
+const maxEnrollTokenLife = 7 * 24 * time.Hour
 
 func (s *Server) apiCreateEnrollmentRule(r *http.Request, p principal) (any, error) {
 	var req struct {
@@ -470,6 +553,11 @@ func (s *Server) apiCreateEnrollmentRule(r *http.Request, p principal) (any, err
 			if err != nil {
 				return err
 			}
+			// A token is a bearer secret that works from anywhere; keep its
+			// window short. IAM enrollment is the long-lived option.
+			if exp > maxEnrollTokenLife {
+				return httpError{400, "expires_in for token rules can be at most " + maxEnrollTokenLife.String()}
+			}
 			token, _, hash := newSecret("nfxenroll")
 			if _, err := tx.Exec(`INSERT INTO enrollment_rules (id, org_id, method, token_hash, labels, max_agents, expires_at)
 				VALUES ($1,$2,'token',$3,$4,$5, now() + $6::interval)`,
@@ -485,6 +573,106 @@ func (s *Server) apiCreateEnrollmentRule(r *http.Request, p principal) (any, err
 		}
 	})
 	return out, err
+}
+
+func (s *Server) apiListEnrollmentRules(r *http.Request, p principal) (any, error) {
+	out := []map[string]any{}
+	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		rows, err := tx.Query(`SELECT e.id, e.method, COALESCE(e.aws_account_id, ''), COALESCE(e.role_name, ''), e.labels,
+				e.max_agents, e.expires_at, e.created_at,
+				(SELECT count(*) FROM agents a WHERE a.enrollment_rule_id = e.id AND a.revoked_at IS NULL)
+			FROM enrollment_rules e WHERE e.revoked_at IS NULL ORDER BY e.created_at`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, method, account, role string
+			var labels db.JSON[map[string]string]
+			var maxAgents, agents int
+			var expires sql.NullTime
+			var created time.Time
+			if err := rows.Scan(&id, &method, &account, &role, &labels, &maxAgents, &expires, &created, &agents); err != nil {
+				return err
+			}
+			e := map[string]any{"id": ids.Encode("enr", id), "method": method, "labels": labels.V, "max_agents": maxAgents,
+				"agents": agents, "created_at": created}
+			if method == "iam" {
+				e["aws_account_id"], e["role_name"] = account, role
+			}
+			if expires.Valid {
+				e["expires_at"] = expires.Time
+			}
+			out = append(out, e)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// apiRevokeEnrollmentRule stops a rule enrolling agents and renewing their
+// certificates, so its agents lapse when their current certificate expires.
+// With {"revoke_agents": true} they are cut off at once (a leaked token: the
+// agents it enrolled can't be told apart from a rogue one).
+func (s *Server) apiRevokeEnrollmentRule(r *http.Request, p principal) (any, error) {
+	id, err := ids.Decode("enr", r.PathValue("id"))
+	if err != nil {
+		return nil, httpError{404, "not found"}
+	}
+	var req struct {
+		RevokeAgents bool `json:"revoke_agents"`
+	}
+	if r.ContentLength != 0 {
+		if err := readJSON(r, &req); err != nil {
+			return nil, err
+		}
+	}
+	var n int64
+	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		res, err := tx.Exec(`UPDATE enrollment_rules SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`, id)
+		if err != nil {
+			return err
+		}
+		if k, _ := res.RowsAffected(); k == 0 {
+			return httpError{404, "no active enrollment rule with that id"}
+		}
+		if req.RevokeAgents {
+			res, err := tx.Exec(`UPDATE agents SET revoked_at = now(), status = 'revoked' WHERE enrollment_rule_id = $1 AND revoked_at IS NULL`, id)
+			if err != nil {
+				return err
+			}
+			n, _ = res.RowsAffected()
+		}
+		return tx.Audit(r.Context(), p.actorType(), p.actor(), "enrollment_rule.revoke", "enrollment_rule", id,
+			map[string]any{"revoked_agents": n})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"id": ids.Encode("enr", id), "revoked": true, "revoked_agents": n}, nil
+}
+
+// apiRevokeAgent cuts an agent off: its certificate stops authenticating at
+// once, and work leased to it is recovered when the lease expires.
+func (s *Server) apiRevokeAgent(r *http.Request, p principal) (any, error) {
+	id, err := ids.Decode("agt", r.PathValue("id"))
+	if err != nil {
+		return nil, httpError{404, "not found"}
+	}
+	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		res, err := tx.Exec(`UPDATE agents SET revoked_at = now(), status = 'revoked' WHERE id = $1 AND revoked_at IS NULL`, id)
+		if err != nil {
+			return err
+		}
+		if k, _ := res.RowsAffected(); k == 0 {
+			return httpError{404, "no active agent with that id"}
+		}
+		return tx.Audit(r.Context(), p.actorType(), p.actor(), "agent.revoke", "agent", id, nil)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"id": ids.Encode("agt", id), "revoked": true}, nil
 }
 
 func (s *Server) apiListAgents(r *http.Request, p principal) (any, error) {
@@ -736,8 +924,24 @@ func (s *Server) apiStartRun(r *http.Request, p principal) (any, error) {
 		if err != nil {
 			return err
 		}
-		if err := p.can("responder", runbookResource(rb.Metadata.Team, rb.Metadata.Tags, selector(rb))); err != nil {
-			return err
+		// The runbook's policy.allowedRoles decides who may start it by hand
+		// (default: responders); scope still applies to whichever role is used.
+		res := runbookResource(rb.Metadata.Team, rb.Metadata.Tags, selector(rb))
+		var startErr error
+		mayStart := false
+		for _, role := range rb.StartRoles() {
+			if err := p.can(role, res); err == nil {
+				mayStart = true
+				break
+			} else if startErr == nil {
+				startErr = err
+			}
+		}
+		if !mayStart {
+			if len(rb.Spec.Policy.AllowedRoles) > 0 {
+				return httpError{http.StatusForbidden, "this runbook can only be started by " + roleList(rb.StartRoles()) + ": " + startErr.Error()}
+			}
+			return startErr
 		}
 		allowed := false
 		for _, t := range rb.Spec.Triggers {
@@ -762,7 +966,7 @@ func (s *Server) apiStartRun(r *http.Request, p principal) (any, error) {
 			RequestedByType: p.actorType(), RequestedByID: p.actor()}
 		vars := expr.Vars{}
 		if req.Incident > 0 {
-			inc, err := s.incidentByNumber(tx, req.Incident)
+			inc, err := s.incidentByNumber(tx, req.Incident, false)
 			if err != nil {
 				return err
 			}
@@ -838,8 +1042,23 @@ func (s *Server) apiGetRun(r *http.Request, p principal) (any, error) {
 		}
 		// One statement at a time per transaction: read outputs after the
 		// attempts cursor is closed.
-		for i, aid := range attemptIDs {
-			steps[i]["output"] = s.attemptOutput(tx, aid)
+		// The view shows the tail of each attempt's output, newest attempts
+		// first within a response budget; a run with many retried steps
+		// would otherwise return up to 1 MiB per attempt. The full output of
+		// one attempt is at .../steps/{step}/attempts/{n}/output.
+		budget := maxRunViewOutput
+		for i := len(attemptIDs) - 1; i >= 0; i-- {
+			limit := min(maxAttemptTail, budget)
+			text, total, err := s.attemptOutput(tx, attemptIDs[i], limit)
+			if err != nil {
+				return err
+			}
+			budget -= len(text)
+			steps[i]["output"] = text
+			steps[i]["output_bytes"] = total
+			if len(text) < total {
+				steps[i]["output_truncated"] = true
+			}
 		}
 		approvals, err := s.runApprovals(tx, id)
 		if err != nil {
@@ -853,26 +1072,99 @@ func (s *Server) apiGetRun(r *http.Request, p principal) (any, error) {
 	return out, err
 }
 
-func (s *Server) attemptOutput(tx *db.Tx, attemptID string) string {
-	rows, err := tx.Query(`SELECT data FROM step_output_chunks WHERE attempt_id = $1 ORDER BY seq`, attemptID)
+// Bounds on run output returned by the API.
+const (
+	maxAttemptTail   = 64 << 10 // per attempt in the run view
+	maxRunViewOutput = 1 << 20  // across all attempts in the run view
+)
+
+// attemptOutput returns the last limit bytes (at most) of an attempt's
+// output, cut at a chunk or rune boundary, and the attempt's total output
+// size. A negative limit means all of it.
+func (s *Server) attemptOutput(tx *db.Tx, attemptID string, limit int) (string, int, error) {
+	var total int
+	if err := tx.QueryRow(`SELECT COALESCE(sum(octet_length(data)), 0) FROM step_output_chunks WHERE attempt_id = $1`,
+		attemptID).Scan(&total); err != nil {
+		return "", 0, err
+	}
+	if limit == 0 || total == 0 {
+		return "", total, nil
+	}
+	rows, err := tx.Query(`SELECT data FROM step_output_chunks WHERE attempt_id = $1 ORDER BY seq DESC`, attemptID)
 	if err != nil {
-		return ""
+		return "", 0, err
 	}
 	defer rows.Close()
-	var b strings.Builder
+	var parts []string
+	n := 0
 	for rows.Next() {
 		var d string
-		rows.Scan(&d)
-		b.WriteString(d)
+		if err := rows.Scan(&d); err != nil {
+			return "", 0, err
+		}
+		if limit >= 0 && n+len(d) > limit {
+			// Keep the end of this chunk, starting on a rune boundary.
+			d = d[len(d)-(limit-n):]
+			for len(d) > 0 && !utf8.RuneStart(d[0]) {
+				d = d[1:]
+			}
+			parts = append(parts, d)
+			break
+		}
+		parts = append(parts, d)
+		n += len(d)
 	}
-	return b.String()
+	if err := rows.Err(); err != nil {
+		return "", 0, err
+	}
+	var b strings.Builder
+	for i := len(parts) - 1; i >= 0; i-- {
+		b.WriteString(parts[i])
+	}
+	return b.String(), total, nil
+}
+
+func (s *Server) apiAttemptOutput(r *http.Request, p principal) (any, error) {
+	id, err := ids.Decode("run", r.PathValue("id"))
+	if err != nil {
+		return nil, httpError{404, "not found"}
+	}
+	n, err := strconv.Atoi(r.PathValue("n"))
+	if err != nil {
+		return nil, httpError{404, "not found"}
+	}
+	var out map[string]any
+	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		var aid string
+		err := tx.QueryRow(`SELECT id FROM step_attempts WHERE run_id = $1 AND step_id = $2 AND attempt_number = $3`,
+			id, r.PathValue("step"), n).Scan(&aid)
+		if errors.Is(err, sql.ErrNoRows) {
+			return httpError{404, "not found"}
+		}
+		if err != nil {
+			return err
+		}
+		text, total, err := s.attemptOutput(tx, aid, -1)
+		if err != nil {
+			return err
+		}
+		out = map[string]any{"step": r.PathValue("step"), "attempt": n, "output": text, "output_bytes": total}
+		return nil
+	})
+	return out, err
 }
 
 // ---------------------------------------------------------------------------
 // Incidents
 // ---------------------------------------------------------------------------
 
-func (s *Server) incidentByNumber(tx *db.Tx, n int64) (incidentRow, error) {
+// maxTimelinePage bounds one page of an incident's timeline.
+const maxTimelinePage = 1000
+
+// incidentByNumber loads an incident by its number. Only actions that change
+// it take the row lock: a viewer polling an incident must not queue behind
+// (or hold up) alert processing on it.
+func (s *Server) incidentByNumber(tx *db.Tx, n int64, lock bool) (incidentRow, error) {
 	var id string
 	if err := tx.QueryRow(`SELECT id FROM incidents WHERE number = $1`, n).Scan(&id); err != nil {
 		if isNoRows(err) {
@@ -880,7 +1172,7 @@ func (s *Server) incidentByNumber(tx *db.Tx, n int64) (incidentRow, error) {
 		}
 		return incidentRow{}, err
 	}
-	return s.loadIncident(tx, id, true)
+	return s.loadIncident(tx, id, lock)
 }
 
 func incidentNumber(r *http.Request) (int64, error) {
@@ -946,7 +1238,7 @@ func (s *Server) apiGetIncident(r *http.Request, p principal) (any, error) {
 	}
 	var out map[string]any
 	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
-		inc, err := s.incidentByNumber(tx, n)
+		inc, err := s.incidentByNumber(tx, n, false)
 		if err != nil {
 			return err
 		}
@@ -963,22 +1255,31 @@ func (s *Server) apiTimeline(r *http.Request, p principal) (any, error) {
 	}
 	out := []map[string]any{}
 	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
-		inc, err := s.incidentByNumber(tx, n)
+		inc, err := s.incidentByNumber(tx, n, false)
 		if err != nil {
 			return err
 		}
-		rows, err := tx.Query(`SELECT at, type, actor_type, message FROM incident_timeline WHERE incident_id = $1 ORDER BY id`, inc.ID)
+		// Paged: ?after=<id of the last entry seen>&limit=<n> (default and
+		// maximum 1000). A busy incident's whole timeline was returned at once.
+		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > maxTimelinePage {
+			limit = maxTimelinePage
+		}
+		rows, err := tx.Query(`SELECT id, at, type, actor_type, message FROM incident_timeline WHERE incident_id = $1 AND id > $2
+			ORDER BY id LIMIT $3`, inc.ID, after, limit)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
+			var id int64
 			var at time.Time
 			var typ, actor, msg string
-			if err := rows.Scan(&at, &typ, &actor, &msg); err != nil {
+			if err := rows.Scan(&id, &at, &typ, &actor, &msg); err != nil {
 				return err
 			}
-			out = append(out, map[string]any{"at": at, "type": typ, "actor": actor, "message": msg})
+			out = append(out, map[string]any{"id": id, "at": at, "type": typ, "actor": actor, "message": msg})
 		}
 		return rows.Err()
 	})
@@ -991,7 +1292,7 @@ func (s *Server) apiAck(r *http.Request, p principal) (any, error) {
 		return nil, err
 	}
 	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
-		inc, err := s.incidentByNumber(tx, n)
+		inc, err := s.incidentByNumber(tx, n, true)
 		if err != nil {
 			return err
 		}
@@ -1015,7 +1316,7 @@ func (s *Server) apiResolve(r *http.Request, p principal) (any, error) {
 		return nil, err
 	}
 	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
-		inc, err := s.incidentByNumber(tx, n)
+		inc, err := s.incidentByNumber(tx, n, true)
 		if err != nil {
 			return err
 		}

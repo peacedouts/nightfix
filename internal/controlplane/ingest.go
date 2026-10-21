@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ func (s *Server) IngestHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/i/{id}", s.handleIngest)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /readyz", s.readyz)
 	return mux
 }
 
@@ -44,6 +46,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status, result := http.StatusAccepted, "accepted"
+	var rejectedTopic string
 	err = s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
 		var typ string
 		var cfg db.JSON[map[string]string]
@@ -67,10 +70,14 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 				return httpError{http.StatusBadRequest, err.Error()}
 			}
 			if err := s.verifySNS(ctx, m); err != nil {
+				if errors.As(err, new(errSNSCertUnavailable)) {
+					return httpError{http.StatusServiceUnavailable, "SNS signing certificate unavailable; retry"}
+				}
 				return httpError{http.StatusUnauthorized, "SNS signature: " + err.Error()}
 			}
 			// Fail closed: an integration without a pinned topic accepts nothing.
 			if want := cfg.V["topic_arn"]; want == "" || m.TopicArn != want {
+				rejectedTopic = m.TopicArn
 				return httpError{http.StatusUnauthorized, "unexpected SNS topic"}
 			}
 			switch m.Type {
@@ -101,6 +108,9 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 			ids.NewString(), orgID, integrationID, string(body))
 		return err
 	})
+	if rejectedTopic != "" {
+		s.noteRejectedTopic(ctx, orgID, integrationID, rejectedTopic)
+	}
 	var he httpError
 	switch {
 	case errors.As(err, &he):
@@ -155,3 +165,22 @@ type httpError struct {
 }
 
 func (e httpError) Error() string { return e.msg }
+
+// noteRejectedTopic records a correctly signed SNS delivery from a topic the
+// integration doesn't pin, so GET /v1/integrations can show it: a
+// misconfigured subscription is otherwise invisible, since SNS just retries
+// and gives up. At most one write a minute per integration.
+func (s *Server) noteRejectedTopic(ctx context.Context, orgID, integrationID, topic string) {
+	s.Log.Warn("SNS delivery from a topic the integration doesn't pin was refused",
+		"org", orgID, "integration", ids.Encode("int", integrationID), "topic_arn", topic)
+	err := s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
+		_, err := tx.Exec(`UPDATE integrations SET config = config || jsonb_build_object('last_rejected_topic', $2::text,
+			'last_rejected_at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+			WHERE id = $1 AND (config->>'last_rejected_topic' IS DISTINCT FROM $2
+				OR (config->>'last_rejected_at')::timestamptz < now() - interval '1 minute')`, integrationID, topic)
+		return err
+	})
+	if err != nil {
+		s.Log.Warn("could not record the refused SNS topic", "err", err)
+	}
+}

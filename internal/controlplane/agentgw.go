@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/lib/pq"
+
 	"github.com/peacedouts/nightfix/internal/agentapi"
 	"github.com/peacedouts/nightfix/internal/db"
 )
@@ -147,6 +149,13 @@ func (s *Server) reply(w http.ResponseWriter, v any, err error) {
 		var he httpError
 		if errors.As(err, &he) {
 			writeJSON(w, he.code, map[string]string{"error": he.msg})
+			return
+		}
+		// Data the database can't store (NUL bytes, bad encodings, values
+		// out of range) is the caller's problem, not a server failure.
+		var pe *pq.Error
+		if errors.As(err, &pe) && pe.Code.Class() == "22" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid input: " + pe.Code.Name()})
 			return
 		}
 		if errors.Is(err, errNotFound) || isNoRows(err) {

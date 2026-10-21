@@ -152,6 +152,13 @@ func (s *Server) raiseSeverity(ctx context.Context, tx *db.Tx, incID, sev string
 }
 
 func (s *Server) reopenIncident(ctx context.Context, tx *db.Tx, incID, alertID string, a Alert) error {
+	// A fix whose alert re-fired within the reopen window didn't hold, so it
+	// is no longer verified (the critical-hold track record counts only
+	// verified runs). false, not NULL: the flap guard still counts it.
+	if _, err := tx.Exec(`UPDATE runbook_runs SET verified = false
+		WHERE id = (SELECT remediation_run_id FROM incidents WHERE id = $1) AND verified`, incID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`UPDATE incidents SET status = 'triggered', resolved_at = NULL, resolution = NULL,
 		hold_until = NULL, verify_until = NULL WHERE id = $1`, incID); err != nil {
 		return err
@@ -205,6 +212,15 @@ func (s *Server) checkAlertsCleared(ctx context.Context, tx *db.Tx, incID string
 				fmt.Sprintf("Auto-remediated by %s: the run succeeded and every alert cleared. Nobody was paged.", name))
 		}
 		return nil
+	}
+	// A critical incident pages in parallel with its remediation run, so it
+	// isn't remediating; a succeeded auto run whose alerts then cleared is a
+	// verified fix all the same.
+	if inc.RemediationRunID.Valid {
+		if _, err := tx.Exec(`UPDATE runbook_runs SET verified = true WHERE id = $1 AND status = 'succeeded'
+			AND mode = 'auto' AND verified IS NULL`, inc.RemediationRunID.String); err != nil {
+			return err
+		}
 	}
 	if !svc.AutoResolve {
 		return s.timeline(tx, incID, "alerts.cleared", "system", "", "All alerts cleared; auto-resolve is off for this service", nil)
@@ -329,14 +345,18 @@ func (s *Server) decideRemediation(ctx context.Context, tx *db.Tx, inc incidentR
 		}
 	}
 	for _, m := range parallel {
-		if _, reason, err := s.tryAutoRun(ctx, tx, inc, m, alertCtx, a.Fingerprint, false); err != nil {
+		_, reason, err := s.tryAutoRun(ctx, tx, inc, m, alertCtx, a.Fingerprint, false)
+		if err != nil {
 			return err
-		} else if reason != "" {
+		}
+		if reason != "" {
 			if err := s.timeline(tx, inc.ID, "remediation.skipped", "system", "", "Auto runbook "+m.Name+" did not start: "+reason, nil); err != nil {
 				return err
 			}
-		}
-		if pageReason == "" {
+			if pageReason == "" {
+				pageReason = "Auto runbook " + m.Name + " did not start: " + reason
+			}
+		} else if pageReason == "" {
 			pageReason = "Auto runbook " + m.Name + " runs alongside paging (beforePaging is off)"
 		}
 	}
@@ -405,7 +425,7 @@ func (s *Server) tryAutoRun(ctx context.Context, tx *db.Tx, inc incidentRow, m t
 		}
 	}
 	var fixes int
-	if err := tx.QueryRow(`SELECT count(*) FROM runbook_runs WHERE fingerprint = $1 AND mode = 'auto' AND verified
+	if err := tx.QueryRow(`SELECT count(*) FROM runbook_runs WHERE fingerprint = $1 AND mode = 'auto' AND verified IS NOT NULL
 		AND started_at > now() - interval '24 hours'`, fingerprint).Scan(&fixes); err != nil {
 		return "", "", err
 	}
@@ -422,7 +442,8 @@ func (s *Server) tryAutoRun(ctx context.Context, tx *db.Tx, inc incidentRow, m t
 	return runID, "", err
 }
 
-// FlapGuardThreshold: verified auto-fixes of one alert in 24h before we stop
+// FlapGuardThreshold: auto-fixes of one alert in 24h (runs that succeeded and
+// whose alerts cleared, whether or not the fix then held) before we stop
 // auto-remediating it and page instead.
 const FlapGuardThreshold = 3
 
@@ -525,32 +546,30 @@ func (s *Server) enqueue(tx *db.Tx, inc incidentRow, kind string, types []string
 // ProcessDueIncidents pages remediating incidents whose hold or
 // verification window expired.
 func (s *Server) ProcessDueIncidents(ctx context.Context) (int, error) {
-	n := 0
-	for {
-		claimed, err := s.DB.Claim(ctx, "nfx_claim_due_incident", func(tx *db.Tx, id string) error {
-			inc, err := s.loadIncident(tx, id, false)
-			if err != nil {
-				return err
-			}
-			reason := "The paging hold expired before remediation finished; the run continues and its result will be posted here"
-			if inc.VerifyUntil.Valid && !inc.VerifyUntil.Time.After(time.Now()) {
-				reason = "Remediation ran but the alert is still firing after the verification window"
-			}
-			return s.page(ctx, tx, inc, reason)
-		})
+	return s.drain(ctx, "nfx_claim_due_incident", func(tx *db.Tx, id string) error {
+		inc, err := s.loadIncident(tx, id, false)
 		if err != nil {
-			return n, err
+			return err
 		}
-		if !claimed {
-			return n, nil
+		reason := "The paging hold expired before remediation finished; the run continues and its result will be posted here"
+		if inc.VerifyUntil.Valid && !inc.VerifyUntil.Time.After(time.Now()) {
+			reason = "Remediation ran but the alert is still firing after the verification window"
 		}
-		n++
-	}
+		return s.page(ctx, tx, inc, reason)
+	})
 }
 
 // onRunFinished updates the incident when a run ends.
 func (s *Server) onRunFinished(ctx context.Context, tx *db.Tx, run runRow, rb *runbook.Runbook) error {
 	if !run.IncidentID.Valid {
+		// Nobody is paged for a run outside an incident, but one that failed
+		// or needs a human shouldn't go unnoticed: tell the team's approval
+		// channel, if it has one.
+		switch run.Status {
+		case "failed", "timed_out", "needs_human":
+			return s.notifyApproval(tx, rb, nil, "update", map[string]any{
+				"reason": fmt.Sprintf("Run of %s %s (started by %s)", run.RunbookName, describeRunOutcome(run), s.requesterDisplay(tx, run))})
+		}
 		return nil
 	}
 	inc, err := s.loadIncident(tx, run.IncidentID.String, true)

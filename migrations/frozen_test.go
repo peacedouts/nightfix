@@ -32,6 +32,9 @@ var shipped = map[string]string{
 	"0015_webhook_dedup_key_scope.sql": "58bb9d226f1141b5171b9ea3040e889228d4f99a4986ccf2b2adfd4ec2451709",
 	"0016_idempotency_keys.sql":        "27e187489bd52cfd86bece059e73e1b50f597aae437c116f46d2efb65217600d",
 	"0017_email_verified.sql":          "788293d1bfa9016d6e170aa415f3cebf794e52ef4ab4a4e56056d0139031bc63",
+	"0018_worker_retry.sql":            "680e291e469d93e307a58079db9b082f47a815e7c6ebaeea9514b06bbb4c9449",
+	"0019_function_privileges.sql":     "840c76a50a4e3514dedefd62206d3d9e973b7c6b683beaa5dac2df1d3171ffbc",
+	"0020_outbox.sql":                  "d411f84083a6b22301c6b411155cb1ac1af75b997fed930ac5bcafdb2616bc45",
 }
 
 func TestShippedMigrationsAreUnchanged(t *testing.T) {

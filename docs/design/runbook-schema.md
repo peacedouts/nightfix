@@ -130,7 +130,7 @@ Auto-mode lint rules:
 
 | Field | Type | Notes |
 |---|---|---|
-| `allowedRoles` | string[] | Roles that may start a run. Scoped further by team, tags and env via org RBAC |
+| `allowedRoles` | string[] | Roles that may start a run: `Responder`, `Admin` or `Owner` (default `Responder`). Enforced when a run starts, on top of org RBAC's team, tag and env scopes |
 | `timeout` | duration | Whole-run timeout. Default `30m`, max `4h` |
 | `concurrency` | int | Max simultaneous runs per parameter set. Default `1` |
 
@@ -198,7 +198,7 @@ Context available to expressions:
 | `alert` | `source`, `severity`, `summary`, `labels`, `annotations`, `raw` (when triggered by an alert) |
 | `incident` | `id`, `title`, `severity`, `url` |
 | `run` | `id`, `requestedBy`, `startedAt`, `mode` |
-| `target` | Matched agent's labels, e.g. `target.env` |
+| `target` | Matched agent's labels, e.g. `target.env`. Not available in `when:`, which the control plane evaluates before an agent is chosen; the linter rejects it there |
 | `steps` | `steps.<id>.outputs.*`, `steps.<id>.status` |
 
 ---
@@ -351,7 +351,6 @@ spec:
     - id: approve
       name: Admin approval for prod failover
       type: approval
-      when: target.env == "prod"
       count: 1
       fromRoles: [Admin]
       excludeRequester: true
@@ -417,7 +416,9 @@ spec:
 | Execution output (stdout/stderr, redacted) | 90 days | Yes, per org | No |
 | Audit metadata: requester, runbook `name@version` + digest, parameters, approvals, agent, timings, status, outputs | ≥ 1 year | Upward only | Never (append-only) |
 
-Secrets never appear in either. Output is capped at 1 MiB per step attempt.
+Secrets never appear in either. Output is capped at 1 MiB per step attempt, and a step whose `outputs` exceed 1 MiB fails. `GET /v1/runs/{id}` shows a 64 KiB tail of each attempt; the full output of an attempt has its own endpoint.
+
+**Limits (built Oct 21, 2026).** A runbook has at most 100 steps and 500 expressions, and `retries` is at most 10; the linter checks these before compiling anything. YAML anchors, aliases and merge keys are rejected, as is nesting deeper than 64. Each CEL evaluation is bounded by a cost limit that charges for the size of the values it builds (so string and list doubling can't exhaust memory) and by a 250 ms deadline.
 
 **Rollback.** There is no `rollback:` step list in v1. Failures use `onFailure`, which normally escalates to a human.
 
@@ -425,9 +426,9 @@ Secrets never appear in either. Output is capped at 1 MiB per step attempt.
 
 How `approval` steps behave, as implemented in `internal/controlplane/approvals.go`:
 
-- **Who can approve.** A person whose bindings give them one of `fromRoles`, or a higher role, *within scope of the runbook* (team, tags) *and the run's target env*. Checked when they decide, against their roles at that moment. API keys and triggers can never approve. `fromRoles` defaults to `Responder`; `Viewer` is rejected at publish.
+- **Who can approve.** A person whose bindings give them one of `fromRoles`, or a higher role, *within scope of the runbook* (team, tags) *and the run's target env*. Checked when they decide, against their roles at that moment, and every earlier approval is checked again when a later one would complete the gate: an approver who has since left the org or lost the role no longer counts. API keys and triggers can never approve. `fromRoles` defaults to `Responder`; `Viewer` is rejected at publish.
 - **Counting.** `count` distinct people (default 1, max 10), one decision each. `excludeRequester` blocks whoever started the run; it is checked in the API and again by a database trigger. Runbooks with `excludeRequester` can't be started with an API key, since a key doesn't identify a person.
-- **Outcomes.** Enough approvals: the run continues and later steps can read `steps.<id>.outputs.approved_by`. Any one rejection: the run is `cancelled` with the rejecter and reason. No decision by `expiresAfter` (default 15m, capped at the run timeout): the run is `timed_out`. Run timeouts and org freezes also close the gate. While the org is frozen, nothing can be approved.
+- **Outcomes.** Enough approvals: the run continues and later steps can read `steps.<id>.outputs.approved_by`. Any one rejection: the run is `cancelled` with the rejecter and reason. No decision by `expiresAfter` (default 15m, capped at the run timeout): the run is `timed_out`. Run timeouts and org freezes also close the gate. Expiry and cancellation are posted where the request was, so nobody approves a closed gate; a run outside an incident that fails, times out or needs a human is posted there too. While the org is frozen, nothing can be approved.
 - **Paging.** An auto run holding the page (`beforePaging`) pages as soon as it reaches an approval step. Waiting on a human never delays telling humans. Critical incidents have already paged in parallel.
 - **Slack.** Approval requests go to the service's Slack targets with Approve/Reject buttons when the org has registered a Slack app (`POST /v1/slack-apps`), otherwise with API instructions. Button clicks are authenticated by Slack's v0 signature with a 5-minute timestamp window, and the workspace is pinned when `team_id` is set. Replies go only to Slack's `response_url` host. A Slack user is linked to a Nightfix user only by a one-time code (60 bits, 10 minutes) that Nightfix issues to the signed-in user and that they type into Slack (`/nightfix link <code>`), never by profile email. The code only travels Nightfix → Slack: the reverse (a code shown in Slack, redeemed in Nightfix) is phishable like an OAuth device code, because an attacker could ask an admin to "enter this code". Slack decisions use the member's last-synced teams, so they require a sign-in to this org within 7 days.
 - **Concurrency.** Locks are always taken org → run → gate (freeze, decisions, run timeouts and gate expiry), so these can't deadlock each other.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/peacedouts/nightfix/internal/db"
@@ -227,9 +228,20 @@ func (s *Server) finishRun(ctx context.Context, tx *db.Tx, run runRow, rb *runbo
 		WHERE run_id = $1 AND state IN ('queued','dispatched','running')`, run.ID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE approval_gates SET status = 'cancelled', decided_at = now()
-		WHERE run_id = $1 AND status = 'pending'`, run.ID); err != nil {
+	cancelled, err := tx.Exec(`UPDATE approval_gates SET status = 'cancelled', decided_at = now()
+		WHERE run_id = $1 AND status = 'pending'`, run.ID)
+	if err != nil {
 		return err
+	}
+	if n, _ := cancelled.RowsAffected(); n > 0 {
+		// A pending approval request was posted somewhere; say it's closed.
+		note := fmt.Sprintf("Approval request closed: the run of %s ended (%s)", run.RunbookName, strings.ReplaceAll(status, "_", " "))
+		if errMsg != "" {
+			note += ": " + errMsg
+		}
+		if err := s.approvalClosed(tx, rb, run, note); err != nil {
+			return err
+		}
 	}
 	if err := tx.Audit(ctx, "system", "control-plane", "run.finish", "run", run.ID,
 		map[string]any{"status": status, "error": errMsg}); err != nil {
@@ -332,58 +344,38 @@ func (s *Server) onAttemptFinished(ctx context.Context, tx *db.Tx, attemptID str
 // ProcessExpiredLeases re-queues attempts no agent acknowledged and marks
 // acknowledged-then-silent attempts lost.
 func (s *Server) ProcessExpiredLeases(ctx context.Context) (int, error) {
-	n := 0
-	for {
-		claimed, err := s.DB.Claim(ctx, "nfx_claim_expired_lease", func(tx *db.Tx, id string) error {
-			var state string
-			if err := tx.QueryRow(`SELECT state FROM step_attempts WHERE id = $1`, id).Scan(&state); err != nil {
-				return err
-			}
-			if state == "dispatched" {
-				// Never started: safe to hand to any matching agent.
-				_, err := tx.Exec(`UPDATE step_attempts SET state = 'queued', agent_id = NULL, lease_expires_at = NULL,
+	return s.drain(ctx, "nfx_claim_expired_lease", func(tx *db.Tx, id string) error {
+		var state string
+		if err := tx.QueryRow(`SELECT state FROM step_attempts WHERE id = $1`, id).Scan(&state); err != nil {
+			return err
+		}
+		if state == "dispatched" {
+			// Never started: safe to hand to any matching agent.
+			_, err := tx.Exec(`UPDATE step_attempts SET state = 'queued', agent_id = NULL, lease_expires_at = NULL,
 					dispatched_at = NULL WHERE id = $1`, id)
-				return err
-			}
-			if _, err := tx.Exec(`UPDATE step_attempts SET state = 'lost', finished_at = now(),
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE step_attempts SET state = 'lost', finished_at = now(),
 				error = 'agent stopped renewing its lease mid-step' WHERE id = $1`, id); err != nil {
-				return err
-			}
-			return s.onAttemptFinished(ctx, tx, id, "lost", attemptOutcome{Error: "agent lost"})
-		})
-		if err != nil {
-			return n, err
+			return err
 		}
-		if !claimed {
-			return n, nil
-		}
-		n++
-	}
+		return s.onAttemptFinished(ctx, tx, id, "lost", attemptOutcome{Error: "agent lost"})
+	})
 }
 
 // ProcessOverdueRuns times out runs past their policy timeout.
 func (s *Server) ProcessOverdueRuns(ctx context.Context) (int, error) {
-	n := 0
-	for {
-		claimed, err := s.DB.Claim(ctx, "nfx_claim_overdue_run", func(tx *db.Tx, id string) error {
-			run, err := s.loadRun(tx, id, false)
-			if err != nil {
-				return err
-			}
-			rb, err := s.loadVersionByID(tx, run.VersionID)
-			if err != nil {
-				return err
-			}
-			return s.finishRun(ctx, tx, run, rb, "timed_out", "run exceeded its policy timeout of "+rb.RunTimeout().String())
-		})
+	return s.drain(ctx, "nfx_claim_overdue_run", func(tx *db.Tx, id string) error {
+		run, err := s.loadRun(tx, id, false)
 		if err != nil {
-			return n, err
+			return err
 		}
-		if !claimed {
-			return n, nil
+		rb, err := s.loadVersionByID(tx, run.VersionID)
+		if err != nil {
+			return err
 		}
-		n++
-	}
+		return s.finishRun(ctx, tx, run, rb, "timed_out", "run exceeded its policy timeout of "+rb.RunTimeout().String())
+	})
 }
 
 // concurrencyBlocked takes a transaction-scoped lock on the runbook, then

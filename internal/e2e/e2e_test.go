@@ -81,6 +81,7 @@ func setup(t *testing.T, runbookYAML string) *env {
 	t.Cleanup(ingestSrv.Close)
 	srv = controlplane.New(pool, sealer, ca, controlplane.Config{
 		PublicIngestURL:          ingestSrv.URL,
+		AllowPrivateTargets:      true, // targets point at the stub on 127.0.0.1
 		SNSCertURLPrefixes:       []string{stubSrv.URL + "/sns/"},
 		PollWait:                 2 * time.Second,
 		STSEndpoint:              stubSrv.URL + "/sts/",

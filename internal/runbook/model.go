@@ -246,3 +246,16 @@ func (r *Runbook) StepIndex(id string) int {
 	}
 	return -1
 }
+
+// StartRoles are the roles that may start a run by hand, lowercased: the
+// policy's allowedRoles, or responder. Holding a higher role also qualifies.
+func (rb *Runbook) StartRoles() []string {
+	if len(rb.Spec.Policy.AllowedRoles) == 0 {
+		return []string{"responder"}
+	}
+	out := make([]string, 0, len(rb.Spec.Policy.AllowedRoles))
+	for _, r := range rb.Spec.Policy.AllowedRoles {
+		out = append(out, strings.ToLower(r))
+	}
+	return out
+}

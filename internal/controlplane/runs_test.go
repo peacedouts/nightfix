@@ -58,7 +58,7 @@ func setupRunHarness(t *testing.T) *runHarness {
 	mk := make([]byte, 32)
 	sealer, _ := signing.NewSealer(mk)
 	ca, _ := LoadOrCreateCA(t.TempDir())
-	s := New(pool, sealer, ca, Config{PollWait: 50 * time.Millisecond}, nil)
+	s := New(pool, sealer, ca, Config{PollWait: 50 * time.Millisecond, AllowPrivateTargets: true}, nil)
 	ctx := context.Background()
 	org, err := s.CreateOrg(ctx, "A", "a")
 	if err != nil {
@@ -273,5 +273,22 @@ func TestAgentCancelledStepDoesNotStrandRun(t *testing.T) {
 	}
 	if next := e2.poll(); next == "" || next == a2 {
 		t.Fatalf("idempotent step wasn't re-dispatched (run %v)", e2.run(id2)["status"])
+	}
+}
+
+// Agent results with NUL bytes or invalid UTF-8 are stored (cleaned), not
+// refused forever.
+func TestResultWithUnstorableTextIsAccepted(t *testing.T) {
+	e := setupRunHarness(t)
+	ctx := context.Background()
+	id := e.startRun("    - id: s1\n      type: shell\n      run: printf 'a'\n      outputs:\n        out: result.stdout\n")
+	a := e.poll()
+	e.ack(a)
+	if err := e.s.Result(ctx, e.a, a, agentapi.Result{Status: "succeeded",
+		Outputs: map[string]any{"out": "a\x00b\xff", "k\x00": []any{"x\x00"}}, Error: "boom\x00"}); err != nil {
+		t.Fatalf("result refused: %v", err)
+	}
+	if st := e.run(id)["status"]; st != "succeeded" {
+		t.Fatalf("run %v", st)
 	}
 }

@@ -37,6 +37,7 @@ export NIGHTFIX_API_ADDR=127.0.0.1:18080 NIGHTFIX_INGEST_ADDR=127.0.0.1:18081 NI
 export NIGHTFIX_PUBLIC_INGEST_URL=http://127.0.0.1:18081
 export NIGHTFIX_SNS_DEV_CERT_PREFIX="$STUB/sns/"   # trust devstub's SNS signing cert (local only)
 export NIGHTFIX_STS_DEV_ENDPOINT="$STUB/sts/"       # devstub plays STS for IAM enrollment (local only)
+export NIGHTFIX_DEV_ALLOW_PRIVATE_TARGETS=1         # Slack/PagerDuty targets point at devstub on 127.0.0.1 (local only)
 
 say "Starting devstub (simulated ECS, SNS, Slack, PagerDuty)"
 bin/devstub --heal-after 4s > "$WORK/devstub.log" 2>&1 & PIDS+=($!)

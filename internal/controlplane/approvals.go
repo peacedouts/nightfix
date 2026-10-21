@@ -165,6 +165,20 @@ func (s *Server) notifyApproval(tx *db.Tx, rb *runbook.Runbook, inc *incidentRow
 	return err
 }
 
+// approvalClosed posts that a run's approval request is over to wherever
+// the request went (the incident's Slack targets or the approval channel).
+func (s *Server) approvalClosed(tx *db.Tx, rb *runbook.Runbook, run runRow, note string) error {
+	var inc *incidentRow
+	if run.IncidentID.Valid {
+		i, err := s.loadIncident(tx, run.IncidentID.String, false)
+		if err != nil {
+			return err
+		}
+		inc = &i
+	}
+	return s.notifyApproval(tx, rb, inc, "update", map[string]any{"reason": note})
+}
+
 // requesterDisplay names whoever started a run, for people deciding on it.
 func (s *Server) requesterDisplay(tx *db.Tx, run runRow) string {
 	typ, id, _ := strings.Cut(run.RequestedBy, ":")
@@ -244,16 +258,7 @@ func (s *Server) decide(ctx context.Context, tx *db.Tx, p principal, gateID, dec
 	// Eligible if any listed role (or a higher one) reaches this runbook and
 	// its target environment through the approver's bindings.
 	res2 := runbookResource(rb.Metadata.Team, rb.Metadata.Tags, run.Selector)
-	var denied error
-	eligible := false
-	for _, role := range g.FromRoles {
-		if err := p.can(role, res2); err == nil {
-			eligible = true
-			break
-		} else if denied == nil {
-			denied = err
-		}
-	}
+	eligible, denied := canApprove(p, g, res2)
 	if !eligible {
 		return res, httpError{http.StatusForbidden, fmt.Sprintf("approving this step needs the %s role: %v", roleList(g.FromRoles), denied)}
 	}
@@ -276,7 +281,9 @@ func (s *Server) decide(ctx context.Context, tx *db.Tx, p principal, gateID, dec
 		return res, err
 	}
 
-	approvers, err := s.gateApprovers(tx, g.ID)
+	// Only approvals from people who are still eligible count: someone who
+	// approved and then lost the role (or left the org) no longer does.
+	approvers, err := s.eligibleApprovers(tx, g, run, res2)
 	if err != nil {
 		return res, err
 	}
@@ -342,6 +349,71 @@ func (s *Server) decide(ctx context.Context, tx *db.Tx, p principal, gateID, dec
 	return res, nil
 }
 
+// canApprove reports whether p may decide gate g on resource res.
+func canApprove(p principal, g gateRow, res resource) (bool, error) {
+	var denied error
+	for _, role := range g.FromRoles {
+		if err := p.can(role, res); err == nil {
+			return true, nil
+		} else if denied == nil {
+			denied = err
+		}
+	}
+	return false, denied
+}
+
+// eligibleApprovers returns the emails of the gate's approvals whose
+// approvers can still approve it now: active members whose current bindings
+// satisfy fromRoles, and not the requester when that's excluded.
+func (s *Server) eligibleApprovers(tx *db.Tx, g gateRow, run runRow, res resource) ([]string, error) {
+	rows, err := tx.Query(`SELECT approver_id, approver_email FROM approvals WHERE gate_id = $1 AND decision = 'approved' ORDER BY decided_at`, g.ID)
+	if err != nil {
+		return nil, err
+	}
+	type vote struct{ id, email string }
+	var votes []vote
+	for rows.Next() {
+		var v vote
+		if err := rows.Scan(&v.id, &v.email); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		votes = append(votes, v)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := []string{}
+	for _, v := range votes {
+		userID, err := ids.Decode("usr", v.id)
+		if err != nil {
+			continue
+		}
+		if g.ExcludeRequester && run.RequestedBy == "user:"+v.id {
+			continue
+		}
+		var status string
+		if err := tx.QueryRow(`SELECT status FROM org_members WHERE org_id = $1 AND user_id = $2`, tx.OrgID, userID).Scan(&status); err != nil {
+			if isNoRows(err) {
+				continue
+			}
+			return nil, err
+		}
+		if status != "active" {
+			continue
+		}
+		p := principal{Kind: "user", OrgID: tx.OrgID, UserID: userID}
+		if err := s.loadUserBindings(tx, &p); err != nil {
+			return nil, err
+		}
+		if ok, _ := canApprove(p, g, res); ok {
+			out = append(out, v.email)
+		}
+	}
+	return out, nil
+}
+
 func (s *Server) gateApprovers(tx *db.Tx, gateID string) ([]string, error) {
 	rows, err := tx.Query(`SELECT approver_email FROM approvals WHERE gate_id = $1 AND decision = 'approved' ORDER BY decided_at`, gateID)
 	if err != nil {
@@ -359,51 +431,46 @@ func (s *Server) gateApprovers(tx *db.Tx, gateID string) ([]string, error) {
 
 // ProcessExpiredGates times out runs whose approval nobody gave in time.
 func (s *Server) ProcessExpiredGates(ctx context.Context) (int, error) {
-	n := 0
-	for {
-		claimed, err := s.DB.Claim(ctx, "nfx_claim_expired_gate", func(tx *db.Tx, id string) error {
-			// The claim locked the run; lock the gate second, like everyone else.
-			g, err := s.loadGate(tx, id, true)
-			if err != nil {
-				return err
-			}
-			if g.Status != "pending" {
-				return nil // decided while we waited
-			}
-			if _, err := tx.Exec(`UPDATE approval_gates SET status = 'expired', decided_at = now() WHERE id = $1`, id); err != nil {
-				return err
-			}
-			run, err := s.loadRun(tx, g.RunID, true)
-			if err != nil {
-				return err
-			}
-			if run.Status != "awaiting_approval" || run.CurrentStep != g.StepIndex {
-				return nil
-			}
-			rb, err := s.loadVersionByID(tx, run.VersionID)
-			if err != nil {
-				return err
-			}
-			approvers, err := s.gateApprovers(tx, g.ID)
-			if err != nil {
-				return err
-			}
-			if err := tx.Audit(ctx, "system", "control-plane", "approval.expired", "run", run.ID,
-				map[string]any{"step": g.StepID, "gate": ids.Encode("apr", g.ID), "approvals": len(approvers)}); err != nil {
-				return err
-			}
-			s.recordStep(run, g.StepID, "expired", map[string]any{"approved_by": approvers})
-			return s.finishRun(ctx, tx, run, rb, "timed_out",
-				fmt.Sprintf("approval for step %s expired with %d of %d approvals", g.StepID, len(approvers), g.Required))
-		})
+	return s.drain(ctx, "nfx_claim_expired_gate", func(tx *db.Tx, id string) error {
+		// The claim locked the run; lock the gate second, like everyone else.
+		g, err := s.loadGate(tx, id, true)
 		if err != nil {
-			return n, err
+			return err
 		}
-		if !claimed {
-			return n, nil
+		if g.Status != "pending" {
+			return nil // decided while we waited
 		}
-		n++
-	}
+		if _, err := tx.Exec(`UPDATE approval_gates SET status = 'expired', decided_at = now() WHERE id = $1`, id); err != nil {
+			return err
+		}
+		run, err := s.loadRun(tx, g.RunID, true)
+		if err != nil {
+			return err
+		}
+		if run.Status != "awaiting_approval" || run.CurrentStep != g.StepIndex {
+			return nil
+		}
+		rb, err := s.loadVersionByID(tx, run.VersionID)
+		if err != nil {
+			return err
+		}
+		approvers, err := s.gateApprovers(tx, g.ID)
+		if err != nil {
+			return err
+		}
+		if err := tx.Audit(ctx, "system", "control-plane", "approval.expired", "run", run.ID,
+			map[string]any{"step": g.StepID, "gate": ids.Encode("apr", g.ID), "approvals": len(approvers)}); err != nil {
+			return err
+		}
+		s.recordStep(run, g.StepID, "expired", map[string]any{"approved_by": approvers})
+		msg := fmt.Sprintf("approval for step %s expired with %d of %d approvals", g.StepID, len(approvers), g.Required)
+		// Close the request where it was posted, so its buttons don't look live.
+		if err := s.approvalClosed(tx, rb, run, fmt.Sprintf("Approval for %s expired with %d of %d approvals; the run of %s timed out",
+			g.StepID, len(approvers), g.Required, run.RunbookName)); err != nil {
+			return err
+		}
+		return s.finishRun(ctx, tx, run, rb, "timed_out", msg)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -432,8 +499,8 @@ func (s *Server) apiPutApprovalChannel(r *http.Request, p principal) (any, error
 	if err := readJSON(r, &req); err != nil {
 		return nil, err
 	}
-	if !strings.HasPrefix(req.URL, "https://") && !strings.HasPrefix(req.URL, "http://127.0.0.1") && !strings.HasPrefix(req.URL, "http://localhost") {
-		return nil, httpError{400, "url must be an https Slack incoming-webhook URL"}
+	if validateNotifyURL("slack", req.URL, s.Cfg.AllowPrivateTargets) != nil {
+		return nil, httpError{400, "url must be a Slack incoming-webhook URL (https://hooks.slack.com/...)"}
 	}
 	id := ids.NewString()
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {

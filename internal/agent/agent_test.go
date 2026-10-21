@@ -224,8 +224,7 @@ func TestAllowlistMatching(t *testing.T) {
 	}{
 		{"pinned", "sha256:aa", 1, true},
 		{"pinned", "sha256:bb", 1, false},
-		{"v3", "sha256:cc", 3, true},
-		{"v3", "sha256:cc", 4, false},
+		{"v3", "sha256:cc", 3, false}, // version pins aren't honoured (versions aren't signed)
 		{"any", "sha256:dd", 9, true},
 		{"other", "sha256:aa", 1, false},
 	}
@@ -391,12 +390,14 @@ func (fakeIAM) SignGetCallerIdentity(context.Context, string, map[string]string)
 // streamAll feeds writes through split the way streamWriter does.
 func streamAll(r *redactor, writes ...string) string {
 	var out, tail string
+	st := &scanState{}
 	for _, w := range writes {
-		e, k := r.split(tail + w)
+		e, k := r.scan(st, tail+w, false)
 		out += e
 		tail = k
 	}
-	return out + r.apply(tail)
+	e, _ := r.scan(st, tail, true)
+	return out + e
 }
 
 // Overlapping secrets, where one's end is another's start: no write split
@@ -486,5 +487,61 @@ func TestResultTextDropsPartialSecretAtLimit(t *testing.T) {
 	}
 	if tail := got[len(got)-200:]; strings.Contains(tail, "SSSSSSSSSS") {
 		t.Fatalf("result ends with part of the secret: ...%q", tail[len(tail)-40:])
+	}
+}
+
+func TestOversizedOutputsFailTheStepClearly(t *testing.T) {
+	a := newTestAgent(t, &sink{})
+	v := shellStep("head -c 2000000 /dev/zero | tr '\\0' x", "10s")
+	v.step.Outputs = map[string]string{"all": "result.stdout"}
+	res := a.execute(context.Background(), v)
+	if res.Status != "failed" || res.Outputs != nil || !strings.Contains(res.Error, "step outputs are") {
+		t.Fatalf("got status %s, %d outputs, error %q", res.Status, len(res.Outputs), res.Error)
+	}
+}
+
+// AWS database secrets are JSON; their password is redacted but the
+// connection fields (engine, host, …) are not, or every "postgres" in
+// output would disappear.
+func TestJSONSecretRedactsSecretFieldsOnly(t *testing.T) {
+	r := newRedactor([]string{`{"engine":"postgres","host":"db.internal.example","port":5432,"username":"app_user","password":"p@ss-word-123"}`})
+	got := r.apply("connecting to postgres at db.internal.example as app_user with p@ss-word-123")
+	if strings.Contains(got, "p@ss-word-123") || strings.Contains(got, "app_user") {
+		t.Fatalf("secret fields leaked: %q", got)
+	}
+	if !strings.Contains(got, "postgres at db.internal.example") {
+		t.Fatalf("connection fields were redacted: %q", got)
+	}
+}
+
+func TestBinaryOutputStillChunked(t *testing.T) {
+	s := &sink{}
+	st := newStreamer(newTestAgent(t, s), "att")
+	w := st.writer("stdout")
+	bin := strings.Repeat("\x80", 64<<10)
+	for i := 0; i < len(bin); i += 4096 {
+		w.Write([]byte(bin[i : i+4096]))
+	}
+	st.close()
+	for _, c := range s.chunks {
+		if len(c.Data) > agentapi.MaxChunkBytes {
+			t.Fatalf("chunk of %d bytes", len(c.Data))
+		}
+	}
+}
+
+func TestAllowlistRefusesVersionPins(t *testing.T) {
+	dir := t.TempDir()
+	for _, body := range []string{"runbooks:\n  - name: a\n    version: \"3\"\n", "runbooks:\n  - name: a\n    digest: sha256:aa\n    version: \"3\"\n", "runbooks:\n  - name: a\n"} {
+		p := dir + "/allowlist.yaml"
+		os.WriteFile(p, []byte(body), 0o600)
+		if _, err := loadAllowlist(p); err == nil {
+			t.Errorf("accepted %q", body)
+		}
+	}
+	p := dir + "/ok.yaml"
+	os.WriteFile(p, []byte("runbooks:\n  - name: a\n    digest: sha256:aa\n  - name: b\n    version: \"*\"\n"), 0o600)
+	if _, err := loadAllowlist(p); err != nil {
+		t.Fatalf("valid allowlist refused: %v", err)
 	}
 }

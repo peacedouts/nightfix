@@ -1,6 +1,7 @@
 package runbook
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -56,10 +57,29 @@ var AWSServices = map[string]bool{
 
 // Lint applies the publish-time rules from runbook-schema.md. A runbook with
 // any issue is not publishable.
+// Size limits that keep linting (which compiles every expression) cheap
+// and bounded no matter what's submitted. Real runbooks are far smaller.
+const (
+	MaxSteps       = 100
+	MaxExpressions = 500
+	MaxRetries     = 10
+)
+
 func Lint(rb *Runbook) Issues {
 	var is Issues
 	add := func(path, format string, args ...any) {
 		is = append(is, Issue{path, fmt.Sprintf(format, args...)})
+	}
+	// Refuse oversized runbooks before compiling anything: each distinct
+	// expression is compiled, and a single validate request could otherwise
+	// make the shared control plane compile tens of thousands of them.
+	if len(rb.Spec.Steps) > MaxSteps {
+		add("spec.steps", "%d steps; the limit is %d", len(rb.Spec.Steps), MaxSteps)
+		return is
+	}
+	if n := countExpressions(rb); n > MaxExpressions {
+		add("spec", "%d expressions; the limit is %d", n, MaxExpressions)
+		return is
 	}
 
 	if rb.APIVersion != APIVersion {
@@ -117,6 +137,13 @@ func Lint(rb *Runbook) Issues {
 	}
 
 	// Policy.
+	for i, r := range rb.Spec.Policy.AllowedRoles {
+		switch strings.ToLower(r) {
+		case "responder", "admin", "owner":
+		default:
+			add(fmt.Sprintf("spec.policy.allowedRoles[%d]", i), "must be Responder, Admin or Owner")
+		}
+	}
 	if rb.Spec.Policy.Timeout != "" {
 		d, err := time.ParseDuration(rb.Spec.Policy.Timeout)
 		if err != nil || d <= 0 || d > 4*time.Hour {
@@ -217,12 +244,19 @@ func lintStep(path string, s Step, rb *Runbook, add func(string, string, ...any)
 	if s.When != "" {
 		if err := expr.Check(s.When); err != nil {
 			add(path+".when", "%v", err)
+		} else if whenTargetRe.MatchString(s.When) {
+			// when: is evaluated on the control plane, before an agent is
+			// picked, so target isn't known yet: it would fail every run.
+			add(path+".when", "can't reference target (when: is decided before an agent is chosen); use params instead")
 		}
 	}
 	if s.Timeout != "" {
 		if d, err := time.ParseDuration(s.Timeout); err != nil || d <= 0 {
 			add(path+".timeout", "must be a positive duration")
 		}
+	}
+	if s.Retries < 0 || s.Retries > MaxRetries {
+		add(path+".retries", "must be between 0 and %d", MaxRetries)
 	}
 	switch s.OnFailure {
 	case "", "stop", "continue", "escalate":
@@ -354,6 +388,8 @@ func lintTemplate(path, v string, allowSecrets bool, add func(string, string, ..
 	}
 }
 
+var whenTargetRe = regexp.MustCompile(`\btarget\b`)
+
 var secretUseRe = regexp.MustCompile(`secrets\.([A-Za-z_][A-Za-z0-9_]*)`)
 
 func checkSecretRefs(path, v string, rb *Runbook, add func(string, string, ...any)) {
@@ -435,4 +471,31 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// countExpressions counts every CEL expression Lint would compile: each
+// ${{ }} anywhere in the runbook, plus when/until/outputs/match/from fields.
+func countExpressions(rb *Runbook) int {
+	b, _ := json.Marshal(rb)
+	n := strings.Count(string(b), "${{")
+	for _, p := range rb.Spec.Parameters {
+		if p.From != "" {
+			n++
+		}
+	}
+	for _, t := range rb.Spec.Triggers {
+		if t.Match != "" {
+			n++
+		}
+	}
+	for _, st := range rb.Spec.Steps {
+		n += len(st.Outputs)
+		if st.When != "" {
+			n++
+		}
+		if st.Until != "" {
+			n++
+		}
+	}
+	return n
 }

@@ -2,12 +2,18 @@ package db_test
 
 import (
 	"context"
+	"database/sql"
+	"net/url"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/peacedouts/nightfix/internal/db"
 	"github.com/peacedouts/nightfix/internal/ids"
 	"github.com/peacedouts/nightfix/internal/testdb"
+
+	_ "github.com/lib/pq"
 )
 
 // Partition maintenance runs as the app role from the worker, possibly in a
@@ -59,13 +65,13 @@ func TestPartitionMaintenance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Expiry drops whole past partitions and leaves current ones.
+	// Retention can't be shortened below the floors, even by nfx_app.
 	var dropped int
-	if err := pool.QueryRowContext(ctx, `SELECT nfx_drop_expired_partitions(0, 0)`).Scan(&dropped); err != nil {
+	if err := pool.QueryRowContext(ctx, `SELECT nfx_drop_expired_partitions(-2, -2)`).Scan(&dropped); err != nil {
 		t.Fatalf("drop expired partitions: %v", err)
 	}
-	if dropped == 0 {
-		t.Fatal("no expired partition dropped")
+	if dropped != 0 {
+		t.Fatalf("dropped %d recent partitions", dropped)
 	}
 	if err := pool.WithOrg(ctx, org, func(tx *db.Tx) error {
 		_, err := tx.Exec(`INSERT INTO alert_events (id, org_id, integration_id, raw) VALUES ($1,$2,$3,'{}')`, ids.NewString(), org, integ)
@@ -81,4 +87,48 @@ func TestAppRoleCannotCreateInPublic(t *testing.T) {
 	if err == nil {
 		t.Fatal("the app role could create objects in schema public")
 	}
+}
+
+// Only nfx_app may call the SECURITY DEFINER functions; a role with no grants
+// used to be able to drop every org's partitions or create orgs.
+func TestOtherRolesCannotCallPrivilegedFunctions(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	admin := adminConn(t, pool)
+	role := "nobody_" + strings.ReplaceAll(ids.NewString()[24:], "-", "")
+	if _, err := admin.ExecContext(ctx, `CREATE ROLE `+role+` LOGIN PASSWORD 'pw'`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.ExecContext(context.Background(), `DROP ROLE IF EXISTS `+role) })
+	nobody := asRole(t, pool, role, "pw")
+	for _, q := range []string{`SELECT nfx_drop_expired_partitions(30, 90)`, `SELECT nfx_create_org(gen_random_uuid(), 'x', 'x')`, `SELECT * FROM nfx_route_api_key('\x00')`} {
+		if _, err := nobody.ExecContext(ctx, q); err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("%s as a role with no grants: %v", q, err)
+		}
+	}
+}
+
+func adminConn(t *testing.T, pool *db.DB) *sql.DB {
+	t.Helper()
+	return asRole(t, pool, "", "")
+}
+
+// asRole connects to the test database as role (or as the admin if empty).
+func asRole(t *testing.T, pool *db.DB, role, password string) *sql.DB {
+	t.Helper()
+	var name string
+	if err := pool.QueryRow(`SELECT current_database()`).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(os.Getenv("NIGHTFIX_TEST_ADMIN_DSN"))
+	u.Path = "/" + name
+	if role != "" {
+		u.User = url.UserPassword(role, password)
+	}
+	c, err := sql.Open("postgres", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
 }

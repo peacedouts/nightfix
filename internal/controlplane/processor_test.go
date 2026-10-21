@@ -78,3 +78,17 @@ func TestSlackMessagesEscapeUntrustedText(t *testing.T) {
 	enc.Encode(msg)
 	check("approval", buf.String())
 }
+
+func TestSNSCertURLShape(t *testing.T) {
+	s := &Server{}
+	good := "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0123456789abcdef0123456789abcdef.pem"
+	if !s.snsCertPath(good) {
+		t.Fatal("real SNS cert URL refused")
+	}
+	for _, bad := range []string{good + "?x=1.pem", good + "#a", "https://u:p@sns.us-east-1.amazonaws.com/SimpleNotificationService-0123456789abcdef.pem",
+		"https://sns.us-east-1.amazonaws.com/other.pem", "https://sns.us-east-1.amazonaws.com/a/SimpleNotificationService-0123456789abcdef.pem"} {
+		if s.snsCertPath(bad) {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+}

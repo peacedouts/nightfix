@@ -1,6 +1,7 @@
 package runbook
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -81,6 +82,8 @@ func TestLintRules(t *testing.T) {
 		{"approval count", "    - id: restart\n", "    - id: approve\n      type: approval\n      count: 11\n    - id: restart\n", "between 1 and 10"},
 		{"reserved env name", "    - id: restart\n", "    - id: sh\n      type: shell\n      env:\n        BASH_ENV: x\n      run: echo hi\n    - id: restart\n", "BASH_ENV is reserved"},
 		{"loader env name", "    - id: restart\n", "    - id: sh\n      type: shell\n      env:\n        LD_PRELOAD: x\n      run: echo hi\n    - id: restart\n", "LD_PRELOAD is reserved"},
+		{"too many retries", "    - id: restart\n", "    - id: sh\n      type: shell\n      retries: 100000\n      run: echo hi\n    - id: restart\n", "must be between 0 and 10"},
+		{"when uses target", "    - id: restart\n", "    - id: sh\n      type: shell\n      when: target.env == \"prod\"\n      run: echo hi\n    - id: restart\n", "can't reference target"},
 		{"non read-only wait", "          action: DescribeServices\n          input:\n            cluster", "          action: UpdateService\n          input:\n            cluster", "wait checks must be read-only"},
 	}
 	for _, c := range cases {
@@ -172,5 +175,43 @@ func TestPatternCannotEscapeItsAnchors(t *testing.T) {
 	re, err := CompilePattern("prod|staging")
 	if err != nil || !re.MatchString("staging") || re.MatchString("staging; rm -rf /") {
 		t.Fatalf("alternation not anchored as a whole: %v", err)
+	}
+}
+
+// Nested YAML aliases expand to gigabytes when decoded; runbooks can't use
+// anchors or aliases at all, and nesting is bounded.
+func TestYAMLReferencesAndDeepNestingAreRefused(t *testing.T) {
+	bomb := "a: &a [x,x,x,x,x,x,x,x,x,x]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]\n"
+	src := strings.Replace(string(load(t)), "        forceNewDeployment: true\n",
+		"        forceNewDeployment: true\n        junk:\n          "+strings.ReplaceAll(strings.TrimSuffix(bomb, "\n"), "\n", "\n          ")+"\n", 1)
+	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "anchors") {
+		t.Fatalf("alias bomb not refused: %v", err)
+	}
+	merge := strings.Replace(string(load(t)), "        forceNewDeployment: true\n", "        forceNewDeployment: true\n        <<: {x: 1}\n", 1)
+	if _, err := Parse([]byte(merge)); err == nil {
+		t.Fatal("merge key accepted")
+	}
+	deep := strings.Repeat("[", 100) + strings.Repeat("]", 100)
+	nested := strings.Replace(string(load(t)), "        forceNewDeployment: true\n", "        forceNewDeployment: true\n        deep: "+deep+"\n", 1)
+	if _, err := Parse([]byte(nested)); err == nil {
+		t.Fatal("deeply nested value accepted")
+	}
+	if _, err := Parse(load(t)); err != nil {
+		t.Fatalf("the example runbook no longer parses: %v", err)
+	}
+}
+
+func TestOversizedRunbooksAreRefusedBeforeCompiling(t *testing.T) {
+	many := "      env:\n"
+	for i := 0; i < MaxExpressions+1; i++ {
+		many += fmt.Sprintf("        V%d: ${{ %d }}\n", i, i)
+	}
+	src := strings.Replace(string(load(t)), "    - id: restart\n", "    - id: sh\n      type: shell\n"+many+"      run: echo hi\n    - id: restart\n", 1)
+	rb, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := Lint(rb).Error(); !strings.Contains(got, "expressions; the limit is") {
+		t.Fatalf("got %q", got)
 	}
 }

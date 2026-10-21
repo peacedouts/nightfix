@@ -47,15 +47,16 @@ Why IAM by default: there's no secret to leak or rotate, it fits AWS-only scope,
 
 For environments without a usable IAM identity:
 
-1. An org Admin creates an **enrollment token**. It's single-use or limited-use, expires (default 1h), and carries the agent's labels.
+1. An org Admin creates an **enrollment token**. It's limited-use (`max_agents` counts every agent it has ever enrolled, not just live ones), expires (default 1h, at most 7 days), and carries the agent's labels.
 2. The customer deploys the agent with the token, typically from Secrets Manager.
 3. The agent calls `Enroll` with the token and a CSR, and receives the same certificate, trust config and labels as above.
-4. Without persistent storage, the agent re-enrolls on restart with a reusable token scoped to that deployment. This is weaker, which is why it's the fallback.
+4. An agent without persistent storage should use IAM enrollment: every token enrollment counts against `max_agents`, so re-enrolling on each restart uses the token up.
 
 ### 3.2 Certificate rotation and revocation
 
 - The agent requests a renewal over the stream once 2/3 of the certificate's lifetime has passed (`RenewCert`).
-- **Revoking** an agent in the UI adds it to a denylist that's checked on every connection, closes its stream immediately, and blocks renewals. The 24h TTL bounds the worst case.
+- **Revoking** an agent (`POST /v1/agents/{id}/revoke`) takes effect on its next request: the certificate lookup on every connection excludes revoked agents, so it can't poll, report or renew. Work leased to it is recovered when the lease expires.
+- **Revoking an enrollment rule** (`POST /v1/enrollment-rules/{id}/revoke`) stops enrollment and certificate renewal under it, so its agents lapse within the 24h certificate TTL; with `{"revoke_agents": true}` they are revoked at once (the response to a leaked token).
 
 ### 3.3 Required signers (multi-signature verification)
 
@@ -169,7 +170,7 @@ Signed with the same org key. It binds the specific piece of work:
 2. `agent_id` matches this agent, and `expires_at` hasn't passed (with a 30s skew allowance).
 3. `attempt_id` hasn't been seen before (local dedupe cache).
 4. The bundle digest is correct, and it carries a valid signature from every key in `required_signers`.
-5. **Local allowlist:** `runbook_digest` (or `name@version`) is approved, if mode is `enforce`.
+5. **Local allowlist:** `runbook_digest` is approved (or the name is allowed with `version: "*"`), if mode is `enforce`. Signatures cover the digest, not the version number, so the agent refuses to load an allowlist that pins a numeric version.
 6. The step type is supported, and the parameters pass the runbook's declared types and patterns again. This is defense in depth against a buggy control plane.
 
 Any failure produces `Ack(rejected, reason)`. The attempt becomes `rejected`, and the control plane escalates per the runbook's `onFailure`.
@@ -276,6 +277,8 @@ runbooks:
     digest: sha256:4f1c...   # pin an exact version
   - name: aurora-failover
     version: "*"             # trust any signed version (weaker)
+# A numeric version ("3") is refused: the version number isn't signed, so a
+# control plane could relabel other signed content as v3. Pin the digest.
 ```
 
 ---

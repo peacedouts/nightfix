@@ -6,12 +6,14 @@
 package expr
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"reflect"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/cel-go/cel"
 	celast "github.com/google/cel-go/common/ast"
@@ -69,7 +71,58 @@ const (
 	MaxComprehensions = 3
 	MaxIterVarRefs    = 4
 	maxResultValues   = 100_000 // backstop when converting a result
+
+	// Every evaluation also has a wall-clock deadline, checked between
+	// comprehension iterations. cel-go's cost tracking makes large
+	// comprehensions quadratic in wall time while charging them linearly
+	// (fixed upstream in cel-go#1430, not yet released), so the cost limit
+	// alone let one expression run for a minute.
+	maxEvalTime         = 250 * time.Millisecond
+	interruptCheckEvery = 1
+	costLimit           = 1_000_000
+	maxCachedPrograms   = 4096
 )
+
+// sizeCost prices every function call by the size of its arguments and
+// result. cel-go prices O(n) operations by resolved overload, but variables
+// here are dyn, so overloads like _+_ never resolve and are billed a flat 1:
+// concatenating two 1 MiB strings cost 5, and a map that concatenated large
+// strings ran the process out of memory well inside the limit. Charging by
+// size makes the cost limit an actual bound on work and allocation. Costs
+// are charged after each call returns, so a single call can still do work
+// proportional to its (bounded) inputs, but nothing can repeat it.
+type sizeCost struct{}
+
+func (sizeCost) CallCost(_, _ string, args []ref.Val, result ref.Val) *uint64 {
+	c := uint64(1) + valSize(result)
+	for _, a := range args {
+		c += valSize(a)
+	}
+	return &c
+}
+
+// valSize is a shallow size: strings and bytes count one unit per 10 bytes
+// (cel-go's traversal factor), lists and maps one per element. Nested
+// structures are bounded separately (macro limits, result conversion).
+func valSize(v ref.Val) uint64 {
+	if v == nil {
+		return 0
+	}
+	switch x := v.Value().(type) {
+	case string:
+		return uint64(len(x)) / 10
+	case []byte:
+		return uint64(len(x)) / 10
+	}
+	if s, ok := v.(traits.Sizer); ok {
+		if n, ok := s.Size().Value().(int64); ok && n > 0 {
+			return uint64(n)
+		}
+	}
+	return 0
+}
+
+const ()
 
 func identRefs(e celast.Expr, name string) int {
 	n := 0
@@ -127,11 +180,17 @@ func program(src string) (cel.Program, error) {
 	if denied != "" {
 		return nil, fmt.Errorf("invalid expression %q: %s", src, denied)
 	}
-	p, err = e.Program(ast, cel.EvalOptions(cel.OptOptimize), cel.CostLimit(1_000_000))
+	p, err = e.Program(ast, cel.EvalOptions(cel.OptOptimize), cel.CostTracking(sizeCost{}), cel.CostLimit(costLimit),
+		cel.InterruptCheckFrequency(interruptCheckEvery))
 	if err != nil {
 		return nil, fmt.Errorf("invalid expression %q: %w", src, err)
 	}
 	cacheMu.Lock()
+	if len(cache) >= maxCachedPrograms {
+		// Expressions come from stored runbooks and rules, so the working
+		// set is small; this only stops unbounded growth.
+		cache = map[string]cel.Program{}
+	}
 	cache[src] = p
 	cacheMu.Unlock()
 	return p, nil
@@ -151,8 +210,13 @@ func Eval(src string, vars Vars) (any, error) {
 	for k, v := range vars {
 		act[k] = Normalize(v)
 	}
-	out, _, err := p.Eval(act)
+	ctx, cancel := context.WithTimeout(context.Background(), maxEvalTime)
+	defer cancel()
+	out, _, err := p.ContextEval(ctx, act)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("evaluate %q: took longer than %v", src, maxEvalTime)
+		}
 		return nil, fmt.Errorf("evaluate %q: %w", src, err)
 	}
 	budget := maxResultValues

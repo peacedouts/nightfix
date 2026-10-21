@@ -8,6 +8,8 @@ import (
 	"fmt"
 
 	"github.com/goccy/go-yaml"
+	"github.com/goccy/go-yaml/ast"
+	"github.com/goccy/go-yaml/parser"
 
 	"github.com/peacedouts/nightfix/internal/canonical"
 )
@@ -15,6 +17,9 @@ import (
 // Parse decodes a YAML runbook. Unknown fields are rejected so typos don't
 // silently disable a guardrail.
 func Parse(src []byte) (*Runbook, error) {
+	if err := checkYAMLShape(src); err != nil {
+		return nil, fmt.Errorf("parse runbook: %w", err)
+	}
 	var rb Runbook
 	if err := yaml.UnmarshalWithOptions(src, &rb, yaml.Strict()); err != nil {
 		return nil, fmt.Errorf("parse runbook: %s", yaml.FormatError(err, false, true))
@@ -57,4 +62,48 @@ func FromCanonical(c []byte) (*Runbook, error) {
 		return nil, fmt.Errorf("decode canonical runbook: %w", err)
 	}
 	return &rb, nil
+}
+
+// maxYAMLDepth bounds nesting; real runbooks stay well under 20.
+const maxYAMLDepth = 64
+
+// checkYAMLShape refuses anchors, aliases and merge keys, and very deep
+// nesting, before anything is decoded. The decoder expands aliases in full,
+// so a few hundred bytes of nested aliases ("billion laughs") decoded into
+// aws.input allocated gigabytes on the shared control plane. Runbooks don't
+// need YAML references: they're short, reviewed and signed as written.
+func checkYAMLShape(src []byte) error {
+	f, err := parser.ParseBytes(src, 0)
+	if err != nil {
+		return fmt.Errorf("%s", yaml.FormatError(err, false, true))
+	}
+	var found error
+	for _, doc := range f.Docs {
+		if doc == nil || doc.Body == nil {
+			continue
+		}
+		ast.Walk(&shapeVisitor{err: &found}, doc.Body)
+	}
+	return found
+}
+
+type shapeVisitor struct {
+	depth int
+	err   *error
+}
+
+func (v *shapeVisitor) Visit(n ast.Node) ast.Visitor {
+	if *v.err != nil {
+		return nil
+	}
+	switch n.Type() {
+	case ast.AnchorType, ast.AliasType, ast.MergeKeyType:
+		*v.err = fmt.Errorf("line %d: YAML anchors, aliases and merge keys (&, *, <<) aren't allowed in runbooks", n.GetToken().Position.Line)
+		return nil
+	}
+	if v.depth >= maxYAMLDepth {
+		*v.err = fmt.Errorf("line %d: nested more than %d levels deep", n.GetToken().Position.Line, maxYAMLDepth)
+		return nil
+	}
+	return &shapeVisitor{depth: v.depth + 1, err: v.err}
 }

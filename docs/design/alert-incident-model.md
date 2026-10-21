@@ -286,7 +286,7 @@ All tables carry `org_id` with row-level security.
 | `routing_rules` | `id`, `priority`, `match` (CEL), `service_id` or `action`, `version` |
 | `incidents` | `id`, `number` (per-org sequence), `service_id`, `group_key`, `status`, `severity`, `opened_at`, `ack_at`, `resolved_at`, `resolution` (`human` \| `auto_remediated` \| `alerts_resolved`), `hold_until` |
 | `incident_timeline` | `id`, `incident_id`, `at`, `type`, `actor`, `data` (append-only) |
-| `runbook_runs` | existing; gains `incident_id`, `trigger_type`, `before_paging`, `held_critical`, `verified` (succeeded, alerts cleared and stayed clear) |
+| `runbook_runs` | existing; gains `incident_id`, `trigger_type`, `before_paging`, `held_critical`, `verified` (succeeded, alerts cleared and stayed clear: set true when the alerts clear after a successful auto run of any severity, and false if the incident then reopens; the flap guard counts both, a critical-hold track record only true) |
 | `maintenance_windows` | `id`, `service_id`, `starts_at`, `ends_at`, `recurrence` |
 
 Unique index on open alerts: `(org_id, fingerprint) WHERE status <> 'resolved'`. Unique index on open incidents: `(org_id, service_id, group_key) WHERE status <> 'resolved'`. These two indexes make dedupe and grouping safe under concurrent ingest.

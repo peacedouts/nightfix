@@ -80,7 +80,7 @@ func (m snsMessage) stringToSign() (string, error) {
 
 // verifySNS checks the message signature against the SNS signing certificate.
 func (s *Server) verifySNS(ctx context.Context, m snsMessage) error {
-	if !s.allowedSNSURL(m.SigningCertURL) || !strings.HasSuffix(m.SigningCertURL, ".pem") {
+	if !s.allowedSNSURL(m.SigningCertURL) || !s.snsCertPath(m.SigningCertURL) {
 		return fmt.Errorf("signing certificate URL %q is not an SNS URL", m.SigningCertURL)
 	}
 	cert, err := s.snsCert(ctx, m.SigningCertURL)
@@ -119,12 +119,12 @@ func (s *Server) snsCert(ctx context.Context, u string) (*x509.Certificate, erro
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		resp, err := s.Cfg.HTTPClient.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("fetch SNS certificate: %w", err)
+			return nil, errSNSCertUnavailable{fmt.Errorf("fetch SNS certificate: %w", err)}
 		}
 		defer resp.Body.Close()
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		if err != nil || resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("fetch SNS certificate: status %d", resp.StatusCode)
+			return nil, errSNSCertUnavailable{fmt.Errorf("fetch SNS certificate: status %d", resp.StatusCode)}
 		}
 		b, _ := pem.Decode(body)
 		if b == nil {
@@ -132,6 +132,9 @@ func (s *Server) snsCert(ctx context.Context, u string) (*x509.Certificate, erro
 		}
 		der = b.Bytes
 		s.snsCertMu.Lock()
+		if len(s.snsCerts) >= maxCachedSNSCerts {
+			s.snsCerts = map[string][]byte{} // AWS uses a handful; just stop growth
+		}
 		s.snsCerts[u] = der
 		s.snsCertMu.Unlock()
 	}
@@ -165,4 +168,32 @@ func parseSNS(body []byte) (snsMessage, error) {
 		return m, errors.New("not an SNS message: missing Type or Signature")
 	}
 	return m, nil
+}
+
+// errSNSCertUnavailable means the signing certificate couldn't be fetched,
+// which says nothing about the message. Ingest answers 503 so SNS retries;
+// SNS treats any other 4xx as permanent and drops the alarm.
+type errSNSCertUnavailable struct{ error }
+
+func (e errSNSCertUnavailable) Unwrap() error { return e.error }
+
+const maxCachedSNSCerts = 64
+
+// snsCertPathRe is the shape of every SNS signing-certificate URL path.
+var snsCertPathRe = regexp.MustCompile(`^/SimpleNotificationService-[0-9a-f]{16,64}\.pem$`)
+
+// snsCertPath checks the certificate URL has nothing beyond SNS's fixed
+// shape: no query, fragment or credentials (which would otherwise make each
+// variant a separate cache entry and fetch).
+func (s *Server) snsCertPath(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil {
+		return false
+	}
+	for _, p := range s.Cfg.SNSCertURLPrefixes {
+		if p != "" && strings.HasPrefix(raw, p) {
+			return strings.HasSuffix(u.Path, ".pem") // local development stand-ins
+		}
+	}
+	return snsCertPathRe.MatchString(u.Path)
 }

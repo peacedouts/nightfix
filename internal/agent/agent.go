@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -559,6 +558,17 @@ func loadAllowlist(path string) (*allowlist, error) {
 	if err := yaml.UnmarshalWithOptions(b, &al, yaml.Strict()); err != nil {
 		return nil, fmt.Errorf("allowlist: %w", err)
 	}
+	for i, r := range al.Runbooks {
+		// Signatures cover a bundle's digest, not its version number, so a
+		// version pin would trust a field a compromised control plane can
+		// relabel. Pin the digest, or allow every version with "*".
+		if r.Digest == "" && r.Version != "*" {
+			return nil, fmt.Errorf("allowlist entry %d (%s): pin a digest (sha256:…), or set version: \"*\" to allow every version; version numbers aren't signed", i+1, r.Name)
+		}
+		if r.Digest != "" && r.Version != "" && r.Version != "*" {
+			return nil, fmt.Errorf("allowlist entry %d (%s): version numbers aren't signed; pin by digest only", i+1, r.Name)
+		}
+	}
 	return &al, nil
 }
 
@@ -572,7 +582,7 @@ func (al *allowlist) allows(name, digest string, version int) bool {
 			if r.Digest == digest {
 				return true
 			}
-		case r.Version == "*", r.Version == strconv.Itoa(version):
+		case r.Version == "*":
 			return true
 		}
 	}

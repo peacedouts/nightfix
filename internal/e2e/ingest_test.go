@@ -79,7 +79,7 @@ func setupIngest(t *testing.T, svc map[string]any) *ingestHarness {
 	x.stub.BaseURL = stubSrv.URL
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	x.srv = controlplane.New(pool, sealer, ca, controlplane.Config{PublicIngestURL: "http://ingest",
-		SNSCertURLPrefixes: []string{stubSrv.URL + "/sns/"}}, log)
+		SNSCertURLPrefixes: []string{stubSrv.URL + "/sns/"}, AllowPrivateTargets: true}, log)
 	apiSrv := httptest.NewServer(x.srv.APIHandler())
 	t.Cleanup(apiSrv.Close)
 	ingSrv := httptest.NewServer(x.srv.IngestHandler())
@@ -311,5 +311,77 @@ func TestIngestTopicCanBePinnedOnExistingIntegration(t *testing.T) {
 	}
 	if code := x.call("PUT", "/v1/integrations/"+integ["id"]+"/topic", map[string]string{"topic_arn": "not-an-arn"}, nil); code != 400 {
 		t.Fatalf("invalid topic: got %d, want 400", code)
+	}
+}
+
+// GET /v1/integrations shows an unpinned CloudWatch integration as a
+// problem, and the last correctly signed delivery it refused for its topic.
+func TestIntegrationsListShowsTopicProblems(t *testing.T) {
+	x := setupIngest(t, nil)
+	var integ map[string]string
+	x.call("POST", "/v1/integrations", map[string]any{"type": "cloudwatch", "name": "cw", "default_service": "checkout-api",
+		"topic_arn": "arn:aws:sns:us-east-1:123456789012:alarms"}, &integ)
+	find := func() map[string]any {
+		t.Helper()
+		var list []map[string]any
+		if code := x.call("GET", "/v1/integrations", nil, &list); code != 200 {
+			t.Fatalf("list: %d", code)
+		}
+		for _, it := range list {
+			if it["id"] == integ["id"] {
+				return it
+			}
+		}
+		t.Fatalf("integration %s not listed: %v", integ["id"], list)
+		return nil
+	}
+	if it := find(); it["topic_arn"] != "arn:aws:sns:us-east-1:123456789012:alarms" || it["problem"] != nil {
+		t.Fatalf("pinned integration: %v", it)
+	}
+
+	// A delivery from another topic is refused and recorded.
+	url := strings.Replace(integ["ingest_url"], "http://ingest", x.ingBase, 1)
+	other := "arn:aws:sns:us-east-1:123456789012:someone-elses"
+	resp, err := http.Post(url, "text/plain", bytes.NewReader(x.stub.SNSEnvelope(other, devstub.CloudWatchAlarm("a", "ALARM", "prod", "checkout-api"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("delivery from another topic: %d", resp.StatusCode)
+	}
+	if it := find(); it["last_rejected_topic"] != other || it["last_rejected_at"] == "" {
+		t.Fatalf("refused topic not recorded: %v", it)
+	}
+
+	// Legacy: no topic pinned.
+	x.srv.DB.WithOrg(context.Background(), x.orgID, func(tx *db.Tx) error {
+		_, err := tx.Exec(`UPDATE integrations SET config = '{}' WHERE type = 'cloudwatch'`)
+		return err
+	})
+	if it := find(); it["problem"] == nil {
+		t.Fatalf("unpinned integration not flagged: %v", it)
+	}
+	// Pinning clears the problem.
+	x.call("PUT", "/v1/integrations/"+integ["id"]+"/topic", map[string]string{"topic_arn": other}, nil)
+	if it := find(); it["problem"] != nil || it["topic_arn"] != other {
+		t.Fatalf("after pinning: %v", it)
+	}
+}
+
+// An event that can't be processed is stored with its error, not retried,
+// and admins can see it.
+func TestFailedAlertEventsAreListed(t *testing.T) {
+	x := setupIngest(t, nil)
+	if code := x.send(map[string]any{"status": "exploding"}); code != 202 {
+		t.Fatalf("ingest: %d", code)
+	}
+	x.tick()
+	var failed []map[string]any
+	if code := x.call("GET", "/v1/alert-events/failed", nil, &failed); code != 200 {
+		t.Fatalf("list: %d", code)
+	}
+	if len(failed) != 1 || failed[0]["error"] == "" || !strings.HasPrefix(fmt.Sprint(failed[0]["integration"]), "int_") {
+		t.Fatalf("failed events: %v", failed)
 	}
 }

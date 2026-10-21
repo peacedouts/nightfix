@@ -202,6 +202,9 @@ func newServer(ctx context.Context) (*controlplane.Server, error) {
 		PublicIngestURL:    env("NIGHTFIX_PUBLIC_INGEST_URL", "http://127.0.0.1:8081"),
 		SNSCertURLPrefixes: []string{os.Getenv("NIGHTFIX_SNS_DEV_CERT_PREFIX")},
 		STSEndpoint:        os.Getenv("NIGHTFIX_STS_DEV_ENDPOINT"),
+		// Local development and demos only: lets targets point at
+		// loopback/private addresses and non-Slack/PagerDuty hosts.
+		AllowPrivateTargets: os.Getenv("NIGHTFIX_DEV_ALLOW_PRIVATE_TARGETS") == "1",
 	}
 	if v := os.Getenv("NIGHTFIX_SNS_MAX_MESSAGE_AGE"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -217,6 +220,9 @@ func newServer(ctx context.Context) (*controlplane.Server, error) {
 			GroupsClaim:        os.Getenv("NIGHTFIX_AUTH0_GROUPS_CLAIM"),
 			EmailVerifiedClaim: os.Getenv("NIGHTFIX_AUTH0_EMAIL_VERIFIED_CLAIM"),
 		}
+	}
+	if cfg.AllowPrivateTargets {
+		log.Warn("NIGHTFIX_DEV_ALLOW_PRIVATE_TARGETS is set: notification targets may point at any host, including internal addresses. Local development only.")
 	}
 	if cfg.STSEndpoint != "" {
 		log.Warn("NIGHTFIX_STS_DEV_ENDPOINT is set: IAM enrollment trusts a non-AWS STS. Local development only.")
@@ -283,10 +289,19 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Bound every phase of a connection, so slow or idle clients can't hold
+	// connections (and goroutines) open indefinitely. The agent gateway's
+	// write timeout must outlast a long poll.
+	server := func(addr string, h http.Handler, write time.Duration) *http.Server {
+		return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+			WriteTimeout: write, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
+	}
+	agentSrv := server(env("NIGHTFIX_AGENT_ADDR", ":8443"), srv.AgentHandler(), srv.Cfg.PollWait+30*time.Second)
+	agentSrv.TLSConfig = tlsCfg
 	servers := []*http.Server{
-		{Addr: env("NIGHTFIX_API_ADDR", ":8080"), Handler: srv.APIHandler(), ReadHeaderTimeout: 10 * time.Second},
-		{Addr: env("NIGHTFIX_INGEST_ADDR", ":8081"), Handler: srv.IngestHandler(), ReadHeaderTimeout: 10 * time.Second},
-		{Addr: env("NIGHTFIX_AGENT_ADDR", ":8443"), Handler: srv.AgentHandler(), TLSConfig: tlsCfg, ReadHeaderTimeout: 10 * time.Second},
+		server(env("NIGHTFIX_API_ADDR", ":8080"), srv.APIHandler(), 60*time.Second),
+		server(env("NIGHTFIX_INGEST_ADDR", ":8081"), srv.IngestHandler(), 30*time.Second),
+		agentSrv,
 	}
 	errc := make(chan error, len(servers))
 	for i, hs := range servers {
@@ -314,5 +329,10 @@ func serve(ctx context.Context) error {
 	for _, hs := range servers {
 		hs.Shutdown(shut)
 	}
+	// Let notifications already claimed finish and be recorded.
+	srv.WaitWorkers(notifyShutdownWait)
 	return nil
 }
+
+// notifyShutdownWait covers one notification request and recording it.
+const notifyShutdownWait = 20 * time.Second
