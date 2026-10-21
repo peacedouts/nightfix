@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -16,7 +17,6 @@ import (
 
 	"github.com/peacedouts/nightfix/internal/db"
 	"github.com/peacedouts/nightfix/internal/ids"
-	"github.com/peacedouts/nightfix/internal/testdb"
 )
 
 // gatedRunbook is the ECS restart runbook with an approval step in front of
@@ -83,11 +83,14 @@ func (e *env) startRun(tok, runbook string) string {
 	return r["id"]
 }
 
-// ageLogin pretends the user last signed in age ago.
-func (e *env) ageLogin(sub string, age time.Duration) {
+// ageLogin pretends the member last signed in to this org age ago.
+func (e *env) ageLogin(email string, age time.Duration) {
 	e.t.Helper()
-	if _, err := testdb.Admin(e.t, e.db).ExecContext(e.ctx, `UPDATE users SET last_login_at = now() - $2::interval WHERE auth0_sub = $1`,
-		sub, fmt.Sprintf("%d seconds", int(age.Seconds()))); err != nil {
+	if err := e.db.WithOrg(e.ctx, e.rawOrg, func(tx *db.Tx) error {
+		_, err := tx.Exec(`UPDATE org_members SET last_login_at = now() - $2::interval
+			WHERE user_id = (SELECT id FROM nfx_org_users() WHERE email = $1)`, email, fmt.Sprintf("%d seconds", int(age.Seconds())))
+		return err
+	}); err != nil {
 		e.t.Fatal(err)
 	}
 }
@@ -110,6 +113,8 @@ func TestApprovalGatesARun(t *testing.T) {
 	e.callRaw("PUT", "/v1/runbooks/ecs-restart-gated", []byte(gatedRunbook(t, "ecs-restart-gated",
 		"      fromRoles: [Admin]\n      excludeRequester: true\n      expiresAfter: 10m\n", false)), nil)
 
+	e.expect("api key start", e.key, "POST", "/v1/runs", map[string]any{"runbook": "ecs-restart-gated",
+		"params": map[string]string{"cluster": "prod-east", "service": "checkout-api"}}, 403, "a person has to start it")
 	runID := e.startRun(who.alice, "ecs-restart-gated")
 	e.waitRun(runID, "awaiting_approval")
 	calls, _, _ := e.stub.Snapshot()
@@ -229,6 +234,35 @@ func (e *env) slackClick(app, secret, team, user, username, action, gate string,
 	return resp.StatusCode
 }
 
+func (e *env) slackSigned(path, secret, body string) (int, string) {
+	e.t.Helper()
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(secret))
+	fmt.Fprintf(mac, "v0:%s:%s", ts, body)
+	req, _ := http.NewRequest("POST", e.api+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Slack-Request-Timestamp", ts)
+	req.Header.Set("X-Slack-Signature", "v0="+hex.EncodeToString(mac.Sum(nil)))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+// slackCommand types "/nightfix <text>" in Slack as the given user.
+func (e *env) slackCommand(path, team, user, username, text string) string {
+	e.t.Helper()
+	code, out := e.slackSigned(path, slackSecret, url.Values{"team_id": {team}, "user_id": {user}, "user_name": {username},
+		"command": {"/nightfix"}, "text": {text}}.Encode())
+	if code != 200 {
+		e.t.Fatalf("slash command: %d %s", code, out)
+	}
+	return out
+}
+
 func (e *env) waitReply(n int) string {
 	e.t.Helper()
 	var replies []string
@@ -248,7 +282,7 @@ func TestAutoRemediationWaitsForSlackApproval(t *testing.T) {
 	who := e.people()
 	var app map[string]string
 	e.call("POST", "/v1/slack-apps", map[string]string{"signing_secret": slackSecret, "team_id": "T0ACME"}, &app)
-	appPath := app["interactivity_url"]
+	appPath, cmdPath := app["interactivity_url"], app["commands_url"]
 
 	e.alarm("ALARM", "checkout-api")
 	e.waitFor("page for the approval", 15*time.Second, func() bool {
@@ -288,24 +322,41 @@ func TestAutoRemediationWaitsForSlackApproval(t *testing.T) {
 		t.Fatalf("other workspace: got %d", c)
 	}
 
-	// First click from an unlinked Slack user records nothing and offers a code.
+	// First click from an unlinked Slack user records nothing and says how to link.
 	if c := e.slackClick(appPath, slackSecret, "T0ACME", "U_DAVE", "dave", "nfx_approve", gate, now); c != 200 {
 		t.Fatalf("click: got %d", c)
 	}
-	reply := e.waitReply(1)
-	code := linkCodeRe.FindString(reply)
-	if !strings.Contains(reply, "isn't linked") || code == "" {
-		t.Fatalf("expected a link code, got %q", reply)
+	if reply := e.waitReply(1); !strings.Contains(reply, "isn't linked") || !strings.Contains(reply, "/nightfix link") {
+		t.Fatalf("expected linking instructions, got %q", reply)
 	}
 	if run := e.run(fmt.Sprint(inc["remediation_run"])); run["status"] != "awaiting_approval" {
 		t.Fatalf("an unlinked click must not approve: %v", run["status"])
 	}
-	e.expect("api key link", e.key, "POST", "/v1/me/slack-link", map[string]string{"code": code}, 403, "")
-	e.expect("dave links", who.dave, "POST", "/v1/me/slack-link", map[string]string{"code": code}, 200, `"slack_username": "dave"`)
-	e.expect("code reuse", who.bob, "POST", "/v1/me/slack-link", map[string]string{"code": code}, 400, "unknown or expired")
+
+	// Linking goes the safe way round: the code comes from Nightfix, signed in
+	// as dave, and dave types it into Slack.
+	e.expect("api key code", e.key, "POST", "/v1/me/slack-link-code", nil, 403, "")
+	var issued map[string]string
+	json.Unmarshal([]byte(e.expect("dave gets a code", who.dave, "POST", "/v1/me/slack-link-code", nil, 200, "never share")), &issued)
+	code := issued["code"]
+	if !linkCodeRe.MatchString(code) {
+		t.Fatalf("bad code %q", code)
+	}
+	if c, _ := e.slackSigned(cmdPath, "not-the-secret-xxxxxxxx", "team_id=T0ACME&user_id=U_DAVE&text=link+"+code); c != 401 {
+		t.Fatalf("forged slash command: got %d", c)
+	}
+	if out := e.slackCommand(cmdPath, "T0ACME", "U_DAVE", "dave", "link "+strings.ToLower(code)); !strings.Contains(out, "approves as dave@acme.dev") {
+		t.Fatalf("link: %s", out)
+	}
+	if out := e.slackCommand(cmdPath, "T0ACME", "U_MALLORY", "mallory", "link "+code); !strings.Contains(out, "unknown or expired") {
+		t.Fatalf("a used code must not link again: %s", out)
+	}
+	if out := e.slackCommand(cmdPath, "T0ACME", "U_DAVE", "dave", "help"); !strings.Contains(out, "Usage") {
+		t.Fatalf("usage: %s", out)
+	}
 
 	// Group membership is refreshed at sign-in, so a stale sign-in can't approve.
-	e.ageLogin("auth0|dave", 8*24*time.Hour)
+	e.ageLogin("dave@acme.dev", 8*24*time.Hour)
 	e.slackClick(appPath, slackSecret, "T0ACME", "U_DAVE", "dave", "nfx_approve", gate, time.Now())
 	if reply := e.waitReply(2); !strings.Contains(reply, "haven't signed in") {
 		t.Fatalf("unexpected reply %q", reply)

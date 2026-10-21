@@ -155,8 +155,21 @@ func (s *Server) decide(ctx context.Context, tx *db.Tx, p principal, gateID, dec
 	if len(comment) > 1000 {
 		return res, httpError{http.StatusBadRequest, "comment is limited to 1000 characters"}
 	}
-	g, err := s.loadGate(tx, gateID, true)
+	// Lock order everywhere: org, then run, then gate. Freeze takes the org
+	// row first; run timeouts and gate expiry take the run first.
+	var frozen sql.NullTime
+	if err := tx.QueryRow(`SELECT frozen_at FROM orgs FOR SHARE`).Scan(&frozen); err != nil {
+		return res, err
+	}
+	g, err := s.loadGate(tx, gateID, false)
 	if err != nil {
+		return res, err
+	}
+	run, err := s.loadRun(tx, g.RunID, true)
+	if err != nil {
+		return res, err
+	}
+	if g, err = s.loadGate(tx, gateID, true); err != nil {
 		return res, err
 	}
 	res = approvalResult{Gate: ids.Encode("apr", g.ID), Run: ids.Encode("run", g.RunID), Step: g.StepID, Status: g.Status, Required: g.Required}
@@ -166,16 +179,8 @@ func (s *Server) decide(ctx context.Context, tx *db.Tx, p principal, gateID, dec
 	if !g.ExpiresAt.After(time.Now()) {
 		return res, httpError{http.StatusConflict, "this approval expired"}
 	}
-	var frozen sql.NullTime
-	if err := tx.QueryRow(`SELECT frozen_at FROM orgs`).Scan(&frozen); err != nil {
-		return res, err
-	}
 	if frozen.Valid {
 		return res, httpError{http.StatusConflict, "the org is frozen; nothing can be approved until it's unfrozen"}
-	}
-	run, err := s.loadRun(tx, g.RunID, true)
-	if err != nil {
-		return res, err
 	}
 	if run.Status != "awaiting_approval" || run.CurrentStep != g.StepIndex {
 		return res, httpError{http.StatusConflict, "the run is no longer waiting for this approval"}
@@ -305,9 +310,13 @@ func (s *Server) ProcessExpiredGates(ctx context.Context) (int, error) {
 	n := 0
 	for {
 		claimed, err := s.DB.Claim(ctx, "nfx_claim_expired_gate", func(tx *db.Tx, id string) error {
-			g, err := s.loadGate(tx, id, false)
+			// The claim locked the run; lock the gate second, like everyone else.
+			g, err := s.loadGate(tx, id, true)
 			if err != nil {
 				return err
+			}
+			if g.Status != "pending" {
+				return nil // decided while we waited
 			}
 			if _, err := tx.Exec(`UPDATE approval_gates SET status = 'expired', decided_at = now() WHERE id = $1`, id); err != nil {
 				return err

@@ -248,8 +248,8 @@ func (s *Server) authUser(ctx context.Context, tok string) (principal, error) {
 			return err
 		}
 		var status string
-		err := tx.QueryRow(`INSERT INTO org_members (org_id, user_id) VALUES ($1,$2)
-			ON CONFLICT (org_id, user_id) DO UPDATE SET user_id = EXCLUDED.user_id RETURNING status`, p.OrgID, p.UserID).Scan(&status)
+		err := tx.QueryRow(`INSERT INTO org_members (org_id, user_id, last_login_at) VALUES ($1,$2,now())
+			ON CONFLICT (org_id, user_id) DO UPDATE SET last_login_at = now() RETURNING status`, p.OrgID, p.UserID).Scan(&status)
 		if err != nil {
 			return err
 		}
@@ -306,7 +306,8 @@ func (s *Server) memberPrincipal(tx *db.Tx, userID string) (principal, error) {
 	p := principal{Kind: "user", OrgID: tx.OrgID, UserID: userID}
 	var status string
 	var lastLogin sql.NullTime
-	err := tx.QueryRow(`SELECT email, status, last_login_at FROM nfx_org_users() WHERE id = $1`, userID).Scan(&p.Email, &status, &lastLogin)
+	err := tx.QueryRow(`SELECT u.email, m.status, m.last_login_at FROM nfx_org_users() u JOIN org_members m ON m.user_id = u.id
+		WHERE u.id = $1`, userID).Scan(&p.Email, &status, &lastLogin)
 	if isNoRows(err) || (err == nil && status != "active") {
 		return p, httpError{http.StatusForbidden, "your Nightfix account is no longer a member of this org"}
 	}

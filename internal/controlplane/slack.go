@@ -24,15 +24,17 @@ import (
 // Slack approvals. Approval messages go out through the org's incoming
 // webhooks with Approve and Reject buttons. Clicking one makes Slack POST a
 // request signed with the Slack app's signing secret to
-// /v1/slack/interactions/{app}. We verify the signature and timestamp, map
-// the Slack user to a Nightfix user, and record the decision as that user,
-// with exactly the same checks as the API.
+// /v1/slack/interactions/{app}. We verify the signature and timestamp before
+// doing anything else, map the Slack user to a Nightfix user, and record the
+// decision as that user, with exactly the same checks as the API.
 //
-// Mapping is never trusted from Slack profile data such as email. The first
-// time an unlinked Slack user clicks, they get a one-time code (shown only
-// to them); redeeming it while signed in to Nightfix links the two accounts.
-// That proves both identities: Slack's signed request vouches for the Slack
-// user, and the Auth0 login vouches for the Nightfix user.
+// Mapping is never taken from Slack profile data such as email. A signed-in
+// Nightfix user gets a one-time code (POST /v1/me/slack-link-code) and types
+// `/nightfix link CODE` in Slack; Slack's signed slash-command request then
+// names the Slack user. To get their Slack account linked to someone else's
+// Nightfix identity, an attacker would need that person to hand over their
+// own code, rather than merely entering one (the device-code phishing
+// pattern a code-shown-in-Slack flow would allow).
 
 const (
 	slackSigVersion   = "v0"
@@ -46,9 +48,10 @@ const (
 
 func (s *Server) slackRoutes(route routeFn, mux *http.ServeMux) {
 	route("POST /v1/slack-apps", "admin", s.apiCreateSlackApp)
-	route("POST /v1/me/slack-link", "viewer", s.apiLinkSlack)
+	route("POST /v1/me/slack-link-code", "viewer", s.apiSlackLinkCode)
 	// Authenticated by Slack's request signature, not a bearer token.
 	mux.HandleFunc("POST /v1/slack/interactions/{id}", s.handleSlackInteraction)
+	mux.HandleFunc("POST /v1/slack/commands/{id}", s.handleSlackCommand)
 }
 
 func (s *Server) apiCreateSlackApp(r *http.Request, p principal) (any, error) {
@@ -80,46 +83,34 @@ func (s *Server) apiCreateSlackApp(r *http.Request, p principal) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	path := "/v1/slack/interactions/" + ids.Encode("slk", id)
-	return map[string]string{"id": ids.Encode("slk", id), "interactivity_url": strings.TrimSuffix(s.Cfg.PublicAPIURL, "/") + path}, nil
+	base := strings.TrimSuffix(s.Cfg.PublicAPIURL, "/")
+	return map[string]string{
+		"id":                ids.Encode("slk", id),
+		"interactivity_url": base + "/v1/slack/interactions/" + ids.Encode("slk", id),
+		"commands_url":      base + "/v1/slack/commands/" + ids.Encode("slk", id),
+	}, nil
 }
 
-// apiLinkSlack redeems a link code for the signed-in user.
-func (s *Server) apiLinkSlack(r *http.Request, p principal) (any, error) {
+// apiSlackLinkCode issues a one-time code for the signed-in user to type into
+// Slack. Only the person it was issued to should ever see it.
+func (s *Server) apiSlackLinkCode(r *http.Request, p principal) (any, error) {
 	if p.Kind != "user" {
 		return nil, httpError{403, "sign in as yourself (not with an API key) to link your Slack account"}
 	}
-	var req struct {
-		Code string `json:"code"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		return nil, err
-	}
-	var out map[string]string
+	display, norm := newLinkCode()
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
-		var team, user, username string
-		err := tx.QueryRow(`DELETE FROM slack_link_codes WHERE code_hash = $1 AND expires_at > now()
-			RETURNING slack_team_id, slack_user_id, slack_username`, hashSecret(normalizeCode(req.Code))).Scan(&team, &user, &username)
-		if isNoRows(err) {
-			return httpError{400, "unknown or expired code; click the button in Slack again for a new one"}
-		}
-		if err != nil {
+		if _, err := tx.Exec(`DELETE FROM slack_link_codes WHERE expires_at < now() OR user_id = $1`, p.UserID); err != nil {
 			return err
 		}
-		// One Slack account per person per workspace, and the latest proof wins.
-		if _, err := tx.Exec(`DELETE FROM slack_user_links WHERE slack_team_id = $1 AND (user_id = $2 OR slack_user_id = $3)`,
-			team, p.UserID, user); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`INSERT INTO slack_user_links (org_id, slack_team_id, slack_user_id, user_id) VALUES ($1,$2,$3,$4)`,
-			p.OrgID, team, user, p.UserID); err != nil {
-			return err
-		}
-		out = map[string]string{"linked": "true", "slack_team": team, "slack_user": user, "slack_username": username, "nightfix_user": p.Email}
-		return tx.Audit(r.Context(), p.actorType(), p.actor(), "slack.linked", "user", p.UserID,
-			map[string]string{"slack_team": team, "slack_user": user, "slack_username": username})
+		_, err := tx.Exec(`INSERT INTO slack_link_codes (code_hash, org_id, user_id, expires_at) VALUES ($1,$2,$3,$4)`,
+			hashSecret(norm), p.OrgID, p.UserID, time.Now().Add(slackLinkCodeTTL))
+		return err
 	})
-	return out, err
+	return map[string]string{
+		"code":       display,
+		"expires_in": roundDur(slackLinkCodeTTL),
+		"next":       "In Slack, type: /nightfix link " + display + "  (never share this code; it makes a Slack account act as you)",
+	}, err
 }
 
 func normalizeCode(c string) string {
@@ -157,6 +148,44 @@ func verifySlackSignature(secret string, body []byte, ts, sig string, now time.T
 	return nil
 }
 
+// slackRequest authenticates a request from Slack: routes the app, verifies
+// the signature over the raw body before any transaction, and parses the
+// form. It writes the HTTP error itself and returns ok=false on failure.
+func (s *Server) slackRequest(w http.ResponseWriter, r *http.Request) (orgID string, team *string, form url.Values, ok bool) {
+	appID, err := ids.Decode("slk", r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "unknown app", http.StatusNotFound)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, slackMaxBody+1))
+	if err != nil || len(body) > slackMaxBody {
+		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	var sealed []byte
+	if err := s.DB.QueryRowContext(r.Context(), `SELECT org_id, signing_secret, team_id FROM nfx_route_slack_app($1)`, appID).
+		Scan(&orgID, &sealed, &team); err != nil {
+		http.Error(w, "unknown app", http.StatusNotFound)
+		return
+	}
+	secret, err := s.Sealer.Open(sealed, orgID)
+	if err != nil {
+		s.Log.Error("slack: unseal signing secret", "app", appID, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if err := verifySlackSignature(string(secret), body, r.Header.Get("X-Slack-Request-Timestamp"),
+		r.Header.Get("X-Slack-Signature"), time.Now()); err != nil {
+		http.Error(w, "Slack signature: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+	if form, err = url.ParseQuery(string(body)); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	return orgID, team, form, true
+}
+
 type slackInteraction struct {
 	Type string `json:"type"`
 	Team struct {
@@ -174,74 +203,38 @@ type slackInteraction struct {
 }
 
 func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	appID, err := ids.Decode("slk", r.PathValue("id"))
-	if err != nil {
-		http.Error(w, "unknown app", http.StatusNotFound)
+	orgID, team, form, ok := s.slackRequest(w, r)
+	if !ok {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, slackMaxBody+1))
-	if err != nil || len(body) > slackMaxBody {
-		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-	var orgID string
-	if err := s.DB.QueryRowContext(ctx, `SELECT org_id FROM nfx_route_slack_app($1)`, appID).Scan(&orgID); err != nil {
-		http.Error(w, "unknown app", http.StatusNotFound)
-		return
-	}
-
 	var in slackInteraction
-	var reply string
-	verified := false // after this, errors go back to the clicker, not to Slack
-	err = s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
-		var sealed []byte
-		var team *string
-		if err := tx.QueryRow(`SELECT signing_secret, team_id FROM slack_apps WHERE id = $1`, appID).Scan(&sealed, &team); err != nil {
-			return err
-		}
-		secret, err := s.Sealer.Open(sealed, orgID)
-		if err != nil {
-			return err
-		}
-		if err := verifySlackSignature(string(secret), body, r.Header.Get("X-Slack-Request-Timestamp"),
-			r.Header.Get("X-Slack-Signature"), time.Now()); err != nil {
-			return httpError{http.StatusUnauthorized, "Slack signature: " + err.Error()}
-		}
-		form, err := url.ParseQuery(string(body))
-		if err != nil || json.Unmarshal([]byte(form.Get("payload")), &in) != nil {
-			return httpError{http.StatusBadRequest, "bad payload"}
-		}
-		if team != nil && *team != in.Team.ID {
-			return httpError{http.StatusForbidden, "this Slack app is set up for a different workspace"}
-		}
-		verified = true
-		if in.Type != "block_actions" || len(in.Actions) == 0 || in.User.ID == "" {
-			return nil // other interaction types aren't used
-		}
-		act := in.Actions[0]
-		decision := map[string]string{slackApproveID: "approved", slackRejectID: "rejected"}[act.ActionID]
-		gateID, gerr := ids.Decode("apr", act.Value)
-		if decision == "" || gerr != nil {
-			return nil
-		}
+	if json.Unmarshal([]byte(form.Get("payload")), &in) != nil {
+		http.Error(w, "bad payload", http.StatusBadRequest)
+		return
+	}
+	if team != nil && *team != in.Team.ID {
+		http.Error(w, "this Slack app is set up for a different workspace", http.StatusForbidden)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	if in.Type != "block_actions" || len(in.Actions) == 0 || in.User.ID == "" {
+		return // other interaction types aren't used
+	}
+	act := in.Actions[0]
+	decision := map[string]string{slackApproveID: "approved", slackRejectID: "rejected"}[act.ActionID]
+	gateID, gerr := ids.Decode("apr", act.Value)
+	if decision == "" || gerr != nil {
+		return
+	}
 
+	var reply string
+	err := s.DB.WithOrg(r.Context(), orgID, func(tx *db.Tx) error {
 		var userID string
-		err = tx.QueryRow(`SELECT user_id FROM slack_user_links WHERE slack_team_id = $1 AND slack_user_id = $2`,
+		err := tx.QueryRow(`SELECT user_id FROM slack_user_links WHERE slack_team_id = $1 AND slack_user_id = $2`,
 			in.Team.ID, in.User.ID).Scan(&userID)
 		if isNoRows(err) {
-			display, norm := newLinkCode()
-			if _, err := tx.Exec(`DELETE FROM slack_link_codes WHERE expires_at < now()`); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(`INSERT INTO slack_link_codes (code_hash, org_id, slack_team_id, slack_user_id, slack_username, expires_at)
-				VALUES ($1,$2,$3,$4,$5,$6)`, hashSecret(norm), orgID, in.Team.ID, in.User.ID, in.User.Username,
-				time.Now().Add(slackLinkCodeTTL)); err != nil {
-				return err
-			}
-			reply = fmt.Sprintf(":link: Your Slack account isn't linked to Nightfix yet, so nothing was recorded.\n"+
-				"Link it once: while signed in to Nightfix, submit the code `%s` (`POST /v1/me/slack-link`). "+
-				"It's for you only and expires in %s. Then click the button again.", display, roundDur(slackLinkCodeTTL))
+			reply = ":link: Your Slack account isn't linked to Nightfix yet, so nothing was recorded. Link it once: " +
+				"signed in to Nightfix, get a code (`POST /v1/me/slack-link-code`), then type `/nightfix link <code>` here. Then click again."
 			return nil
 		}
 		if err != nil {
@@ -251,7 +244,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			return err
 		}
-		res, err := s.decide(ctx, tx, p, gateID, decision, "", "slack")
+		res, err := s.decide(r.Context(), tx, p, gateID, decision, "", "slack")
 		if err != nil {
 			return err
 		}
@@ -265,28 +258,77 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 		}
 		return nil
 	})
-
 	var he httpError
 	switch {
-	case err != nil && !verified:
-		code, msg := http.StatusInternalServerError, "internal error"
-		if errors.As(err, &he) {
-			code, msg = he.code, he.msg
-		} else {
-			s.Log.Error("slack interaction", "app", appID, "err", err)
-		}
-		http.Error(w, msg, code)
-		return
 	case errors.As(err, &he):
-		// The click was genuine but the decision isn't allowed: tell the clicker.
-		reply = ":warning: " + he.msg
+		reply = ":warning: " + he.msg // genuine click, decision not allowed: tell the clicker
 	case err != nil:
-		s.Log.Error("slack interaction", "app", appID, "err", err)
+		s.Log.Error("slack interaction", "org", orgID, "err", err)
 		reply = ":warning: Nightfix couldn't record that. Try again, or use the API."
 	}
-	w.WriteHeader(http.StatusOK)
 	if reply != "" && in.ResponseURL != "" {
 		go s.slackRespond(in.ResponseURL, reply)
+	}
+}
+
+// handleSlackCommand serves the /nightfix slash command. Its reply is the
+// HTTP response, shown only to the person who typed it.
+func (s *Server) handleSlackCommand(w http.ResponseWriter, r *http.Request) {
+	orgID, team, form, ok := s.slackRequest(w, r)
+	if !ok {
+		return
+	}
+	teamID, slackUser, slackName := form.Get("team_id"), form.Get("user_id"), form.Get("user_name")
+	if team != nil && *team != teamID {
+		http.Error(w, "this Slack app is set up for a different workspace", http.StatusForbidden)
+		return
+	}
+	reply := func(text string) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"response_type": "ephemeral", "text": text})
+	}
+	verb, arg, _ := strings.Cut(strings.TrimSpace(form.Get("text")), " ")
+	if verb != "link" || arg == "" || slackUser == "" || teamID == "" {
+		reply("Usage: `/nightfix link <code>`. Get a code while signed in to Nightfix: `POST /v1/me/slack-link-code`.")
+		return
+	}
+	var email string
+	err := s.DB.WithOrg(r.Context(), orgID, func(tx *db.Tx) error {
+		var userID string
+		err := tx.QueryRow(`DELETE FROM slack_link_codes WHERE code_hash = $1 AND expires_at > now() RETURNING user_id`,
+			hashSecret(normalizeCode(arg))).Scan(&userID)
+		if isNoRows(err) {
+			return httpError{400, "That code is unknown or expired. Get a new one while signed in to Nightfix."}
+		}
+		if err != nil {
+			return err
+		}
+		p, err := s.memberPrincipal(tx, userID)
+		if err != nil {
+			return err
+		}
+		email = p.Email
+		// One Slack account per person per workspace; the latest link wins.
+		if _, err := tx.Exec(`DELETE FROM slack_user_links WHERE slack_team_id = $1 AND (user_id = $2 OR slack_user_id = $3)`,
+			teamID, userID, slackUser); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO slack_user_links (org_id, slack_team_id, slack_user_id, user_id) VALUES ($1,$2,$3,$4)`,
+			orgID, teamID, slackUser, userID); err != nil {
+			return err
+		}
+		return tx.Audit(r.Context(), "user", p.actor(), "slack.linked", "user", userID,
+			map[string]string{"slack_team": teamID, "slack_user": slackUser, "slack_username": slackName})
+	})
+	var he httpError
+	switch {
+	case errors.As(err, &he):
+		reply(":warning: " + he.msg)
+	case err != nil:
+		s.Log.Error("slack command", "org", orgID, "err", err)
+		reply(":warning: Nightfix couldn't link your account. Try again.")
+	default:
+		reply(fmt.Sprintf(":link: Linked. Your Slack account now approves as %s in Nightfix.", email))
 	}
 }
 

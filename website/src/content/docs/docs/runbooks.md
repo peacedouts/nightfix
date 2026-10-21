@@ -107,7 +107,7 @@ Add an `approval` step in front of anything you want a person to sign off on, su
 
 When a run reaches the step, it waits:
 
-- **Approving.** Each approval is checked against the approver's role *and* scope at the moment they approve, so a responder scoped to staging can't approve a production run. Approvals always come from a person; API keys can't approve.
+- **Approving.** Each approval is checked against the approver's role *and* scope at the moment they approve, so a responder scoped to staging can't approve a production run. Approvals always come from a person; API keys can't approve. A runbook with `excludeRequester` can't be started with an API key either, because a key doesn't identify who is behind it.
 - **Rejecting.** One rejection from anyone allowed to approve cancels the run, with their reason in the run record.
 - **Expiring.** If not enough people approve in time, the run times out and the steps after the approval never run.
 - **Paging.** If the run was fixing an alert before paging anyone, Nightfix pages on-call right away, because waiting for a human is no reason to keep humans in the dark.
@@ -123,14 +123,14 @@ Later steps can read who approved as `steps.approve.outputs.approved_by`. Every 
 
 ### Set up Slack buttons
 
-1. In your Slack app's settings, turn on **Interactivity** and copy the **Signing Secret** from **Basic Information**.
+1. In your Slack app's settings, turn on **Interactivity**, add a `/nightfix` **slash command**, and copy the **Signing Secret** from **Basic Information**.
 2. Register the app with Nightfix (Admin only):
    ```bash
    curl -X POST https://api.nightfix.dev/v1/slack-apps -H "Authorization: Bearer $NIGHTFIX_API_KEY" \
      -d '{"signing_secret": "…", "team_id": "T0123ABC"}'
    ```
-3. Paste the `interactivity_url` it returns into Slack's **Interactivity → Request URL**.
+3. Paste the `interactivity_url` it returns into Slack's **Interactivity → Request URL**, and the `commands_url` into the `/nightfix` command's **Request URL**.
 
-The first time someone clicks a button, Nightfix replies privately with a one-time code. They link their Slack account by submitting the code while signed in to Nightfix (`POST /v1/me/slack-link`). Nightfix never matches people by Slack profile email. Slack approvals also need a Nightfix sign-in within the last 7 days, so team changes from your identity provider are never more than a week out of date.
+Each person links their Slack account once. Signed in to Nightfix, they get a one-time code (`POST /v1/me/slack-link-code`), then type `/nightfix link <code>` in Slack. The code always comes from Nightfix and goes into Slack, never the other way round, so nobody can trick a colleague into linking the trickster's Slack account to the colleague's identity. Nightfix never matches people by Slack profile email. Slack approvals also need a Nightfix sign-in within the last 7 days, so team changes from your identity provider are never more than a week out of date.
 
 Expressions such as `match`, `until` and `${{ }}` use [CEL](https://cel.dev), a small, safe expression language.

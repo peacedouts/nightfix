@@ -81,8 +81,10 @@ CREATE TABLE slack_apps (
   PRIMARY KEY (org_id, id)
 );
 
--- Slack user → Nightfix user, created only by a signed-in user redeeming a
--- code that Slack's signed request issued to that Slack user.
+-- Slack user → Nightfix user. A signed-in user gets a one-time code from
+-- Nightfix and types it into Slack (/nightfix link CODE); Slack's signed
+-- request then names the Slack user. Hijacking someone's identity would
+-- need them to hand over their own code.
 CREATE TABLE slack_user_links (
   org_id         uuid NOT NULL,
   slack_team_id  text NOT NULL,
@@ -95,14 +97,17 @@ CREATE TABLE slack_user_links (
 );
 
 CREATE TABLE slack_link_codes (
-  code_hash      bytea NOT NULL,
-  org_id         uuid NOT NULL REFERENCES orgs(id),
-  slack_team_id  text NOT NULL,
-  slack_user_id  text NOT NULL,
-  slack_username text NOT NULL DEFAULT '',  -- shown to the redeemer, so they can see whose Slack account they're linking
-  expires_at     timestamptz NOT NULL,
-  PRIMARY KEY (org_id, code_hash)
+  code_hash   bytea NOT NULL,
+  org_id      uuid NOT NULL,
+  user_id     uuid NOT NULL,
+  expires_at  timestamptz NOT NULL,
+  PRIMARY KEY (org_id, code_hash),
+  FOREIGN KEY (org_id, user_id) REFERENCES org_members(org_id, user_id)
 );
+
+-- Sign-in time per org: team membership from IdP groups is synced when a
+-- member signs in to this org, so Slack decisions are bounded by it.
+ALTER TABLE org_members ADD COLUMN last_login_at timestamptz;
 
 DO $$
 DECLARE t text;
@@ -122,21 +127,24 @@ GRANT SELECT, INSERT, DELETE ON slack_user_links, slack_link_codes TO nfx_app;
 -- Functions
 -- ---------------------------------------------------------------------------
 
--- Map a Slack app (from the interactivity URL) to its org.
+-- Map a Slack app (from its request URL) to its org, with what's needed to
+-- verify the request signature before doing any other work. The secret is
+-- returned sealed.
 CREATE FUNCTION nfx_route_slack_app(p_id uuid)
-RETURNS TABLE (org_id uuid)
+RETURNS TABLE (org_id uuid, signing_secret bytea, team_id text)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
-  SELECT a.org_id FROM slack_apps a WHERE a.id = p_id AND a.archived_at IS NULL
+  SELECT a.org_id, a.signing_secret, a.team_id FROM slack_apps a WHERE a.id = p_id AND a.archived_at IS NULL
 $$;
 
--- Claim one pending approval gate past its expiry.
+-- Claim one pending approval gate past its expiry. Locks the run, not the
+-- gate: everything locks run before gate, so workers can't deadlock.
 CREATE FUNCTION nfx_claim_expired_gate()
 RETURNS TABLE (org_id uuid, id uuid)
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
-  SELECT g.org_id, g.id FROM approval_gates g
+  SELECT g.org_id, g.id FROM approval_gates g JOIN runbook_runs r ON r.org_id = g.org_id AND r.id = g.run_id
   WHERE g.status = 'pending' AND g.expires_at <= now()
   LIMIT 1
-  FOR UPDATE SKIP LOCKED
+  FOR UPDATE OF r SKIP LOCKED
 $$;
 
 -- Runs waiting for approval still have a deadline.

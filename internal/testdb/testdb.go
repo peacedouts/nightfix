@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/peacedouts/nightfix/internal/db"
@@ -52,27 +51,7 @@ func New(t testing.TB) *db.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { pool.Close() })
-	adminDSNs.Store(pool, adminForDB)
 	return pool
-}
-
-var adminDSNs sync.Map // *db.DB -> superuser DSN for the same database
-
-// Admin returns a superuser connection to pool's database, for tests that
-// need to set up state the app role can't reach (such as the global users
-// table). Never use it to exercise application behavior.
-func Admin(t testing.TB, pool *db.DB) *sql.DB {
-	t.Helper()
-	dsn, ok := adminDSNs.Load(pool)
-	if !ok {
-		t.Fatal("testdb.Admin: pool was not created by testdb.New")
-	}
-	c, err := sql.Open("postgres", dsn.(string))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { c.Close() })
-	return c
 }
 
 // withDatabase rewrites a DSN URL to point at database name, optionally

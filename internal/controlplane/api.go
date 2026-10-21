@@ -657,6 +657,16 @@ func (s *Server) apiStartRun(r *http.Request, p principal) (any, error) {
 		if !allowed {
 			return httpError{403, "runbook has no manual or api trigger"}
 		}
+		// An API key doesn't say which person is behind it, so it can't
+		// satisfy "approved by someone other than whoever started it".
+		if p.Kind == "api_key" {
+			for _, st := range rb.Spec.Steps {
+				if st.Type == "approval" && st.ExcludeRequester {
+					return httpError{403, "this runbook needs approval from someone other than whoever starts it, " +
+						"so a person has to start it (an API key doesn't identify who is behind it)"}
+				}
+			}
+		}
 		opts := startRunOpts{VersionID: vid, Digest: digest, Runbook: rb, TriggerType: "api", Mode: "manual",
 			RequestedByType: p.actorType(), RequestedByID: p.actor()}
 		vars := expr.Vars{}
@@ -947,6 +957,9 @@ func (s *Server) setFrozen(ctx context.Context, p principal, frozen bool) (any, 
 				run, err := s.loadRun(tx, id, true)
 				if err != nil {
 					return err
+				}
+				if run.Status != "running" && run.Status != "awaiting_approval" {
+					continue // finished between the list and the lock
 				}
 				rb, err := s.loadVersionByID(tx, run.VersionID)
 				if err != nil {
