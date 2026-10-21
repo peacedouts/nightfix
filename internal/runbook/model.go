@@ -185,6 +185,37 @@ func (s Step) StepTimeout() time.Duration {
 	return durationOr(s.Timeout, 5*time.Minute)
 }
 
+// ApprovalCount is how many approvals an approval step needs (default 1).
+func (s Step) ApprovalCount() int {
+	if s.Count <= 0 {
+		return 1
+	}
+	return s.Count
+}
+
+// ApprovalRoles are the roles that may approve, lowercased (default
+// responder). Holding a higher role also qualifies.
+func (s Step) ApprovalRoles() []string {
+	if len(s.FromRoles) == 0 {
+		return []string{"responder"}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range s.FromRoles {
+		r = strings.ToLower(r)
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// ApprovalExpiry is how long an approval step waits (default 15m).
+func (s Step) ApprovalExpiry() time.Duration {
+	return durationOr(s.ExpiresAfter, 15*time.Minute)
+}
+
 // RunTimeout returns the whole-run timeout (default 30m, max 4h).
 func (r *Runbook) RunTimeout() time.Duration {
 	return durationOr(r.Spec.Policy.Timeout, 30*time.Minute)

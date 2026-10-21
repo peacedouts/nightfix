@@ -46,7 +46,7 @@ var knownStepTypes = map[string]bool{
 
 // SupportedStepTypes are the types this build can execute end to end.
 // The others are valid schema but rejected at publish until implemented.
-var SupportedStepTypes = map[string]bool{"note": true, "shell": true, "aws": true, "wait": true}
+var SupportedStepTypes = map[string]bool{"note": true, "approval": true, "shell": true, "aws": true, "wait": true}
 
 // AWSServices this build can call (JSON-protocol services; see agent/awscall).
 var AWSServices = map[string]bool{
@@ -243,6 +243,31 @@ func lintStep(path string, s Step, rb *Runbook, add func(string, string, ...any)
 	}
 
 	switch s.Type {
+	case "approval":
+		if s.Count < 0 || s.Count > 10 {
+			add(path+".count", "must be between 1 and 10")
+		}
+		for i, r := range s.FromRoles {
+			switch strings.ToLower(r) {
+			case "responder", "admin", "owner":
+			case "viewer":
+				add(fmt.Sprintf("%s.fromRoles[%d]", path, i), "viewers can't approve steps")
+			default:
+				add(fmt.Sprintf("%s.fromRoles[%d]", path, i), "must be Responder, Admin or Owner")
+			}
+		}
+		if s.ExpiresAfter != "" {
+			d, err := time.ParseDuration(s.ExpiresAfter)
+			switch {
+			case err != nil || d < time.Minute:
+				add(path+".expiresAfter", "must be a duration of at least 1m")
+			case d > rb.RunTimeout():
+				add(path+".expiresAfter", "can't be longer than the run timeout (%s)", rb.RunTimeout())
+			}
+		}
+		if s.Retries != 0 || s.Timeout != "" {
+			add(path, "approval steps take expiresAfter, not timeout or retries")
+		}
 	case "shell", "python":
 		if strings.TrimSpace(s.Run) == "" {
 			add(path+".run", "is required")

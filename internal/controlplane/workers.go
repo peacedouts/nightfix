@@ -24,6 +24,7 @@ func (s *Server) RunWorkers(ctx context.Context, tick time.Duration) {
 		{"deadlines", s.ProcessDueIncidents},
 		{"leases", s.ProcessExpiredLeases},
 		{"run-timeouts", s.ProcessOverdueRuns},
+		{"approval-expiry", s.ProcessExpiredGates},
 	}
 	for _, l := range loops {
 		go func(name string, fn func(context.Context) (int, error)) {
@@ -68,6 +69,7 @@ func (s *Server) RunWorkers(ctx context.Context, tick time.Duration) {
 func (s *Server) Tick(ctx context.Context) error {
 	for _, fn := range []func(context.Context) (int, error){
 		s.ProcessAlertEvents, s.DeliverNotifications, s.ProcessDueIncidents, s.ProcessExpiredLeases, s.ProcessOverdueRuns,
+		s.ProcessExpiredGates,
 	} {
 		if _, err := fn(ctx); err != nil {
 			return err

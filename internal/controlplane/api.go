@@ -62,6 +62,8 @@ func (s *Server) APIHandler() http.Handler {
 	route("PUT /v1/runbooks/{name}", "responder*", s.apiPublishRunbook)
 	route("GET /v1/runbooks/{name}", "viewer", s.apiGetRunbook)
 	route("POST /v1/runs", "responder*", s.apiStartRun)
+	s.approvalRoutes(route)
+	s.slackRoutes(route, mux)
 	route("GET /v1/runs/{id}", "viewer", s.apiGetRun)
 	route("GET /v1/incidents", "viewer", s.apiListIncidents)
 	route("GET /v1/incidents/{number}", "viewer", s.apiGetIncident)
@@ -655,6 +657,16 @@ func (s *Server) apiStartRun(r *http.Request, p principal) (any, error) {
 		if !allowed {
 			return httpError{403, "runbook has no manual or api trigger"}
 		}
+		// An API key doesn't say which person is behind it, so it can't
+		// satisfy "approved by someone other than whoever started it".
+		if p.Kind == "api_key" {
+			for _, st := range rb.Spec.Steps {
+				if st.Type == "approval" && st.ExcludeRequester {
+					return httpError{403, "this runbook needs approval from someone other than whoever starts it, " +
+						"so a person has to start it (an API key doesn't identify who is behind it)"}
+				}
+			}
+		}
 		opts := startRunOpts{VersionID: vid, Digest: digest, Runbook: rb, TriggerType: "api", Mode: "manual",
 			RequestedByType: p.actorType(), RequestedByID: p.actor()}
 		vars := expr.Vars{}
@@ -729,9 +741,13 @@ func (s *Server) apiGetRun(r *http.Request, p principal) (any, error) {
 		for i, aid := range attemptIDs {
 			steps[i]["output"] = s.attemptOutput(tx, aid)
 		}
+		approvals, err := s.runApprovals(tx, id)
+		if err != nil {
+			return err
+		}
 		out = map[string]any{"id": ids.Encode("run", id), "runbook": run.RunbookName, "digest": run.Digest,
 			"status": run.Status, "params": run.Params, "error": run.Error.String, "verified": verified.Bool,
-			"started_at": started, "finished_at": finished.Time, "attempts": steps}
+			"started_at": started, "finished_at": finished.Time, "attempts": steps, "approvals": approvals}
 		return nil
 	})
 	return out, err
@@ -926,7 +942,7 @@ func (s *Server) setFrozen(ctx context.Context, p principal, frozen bool) (any, 
 				return err
 			}
 			// Stop everything in flight. Agents also see Frozen on their next poll.
-			rows, err := tx.Query(`SELECT id FROM runbook_runs WHERE status = 'running'`)
+			rows, err := tx.Query(`SELECT id FROM runbook_runs WHERE status IN ('running','awaiting_approval')`)
 			if err != nil {
 				return err
 			}
@@ -941,6 +957,9 @@ func (s *Server) setFrozen(ctx context.Context, p principal, frozen bool) (any, 
 				run, err := s.loadRun(tx, id, true)
 				if err != nil {
 					return err
+				}
+				if run.Status != "running" && run.Status != "awaiting_approval" {
+					continue // finished between the list and the lock
 				}
 				rb, err := s.loadVersionByID(tx, run.VersionID)
 				if err != nil {

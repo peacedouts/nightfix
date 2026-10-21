@@ -73,7 +73,12 @@ func TestLintRules(t *testing.T) {
 		{"auto without cooldown", "      cooldown: 15m\n", "", "cooldown: required"},
 		{"secret in aws input", "        forceNewDeployment: true\n", "        forceNewDeployment: true\n        token: ${{ secrets.x }}\n", "secrets may only be referenced"},
 		{"unknown field", "  policy:\n", "  polcy:\n    x: 1\n  policy:\n", "unknown field"},
-		{"unsupported type", "      type: note\n", "      type: approval\n", "not supported in this build"},
+		{"unsupported type", "      type: note\n", "      type: python\n", "not supported in this build"},
+		{"viewer approver", "    - id: restart\n", "    - id: approve\n      type: approval\n      fromRoles: [Viewer]\n    - id: restart\n", "viewers can't approve"},
+		{"unknown approver role", "    - id: restart\n", "    - id: approve\n      type: approval\n      fromRoles: [Boss]\n    - id: restart\n", "must be Responder, Admin or Owner"},
+		{"approval outlives run", "    - id: restart\n", "    - id: approve\n      type: approval\n      expiresAfter: 1h\n    - id: restart\n", "longer than the run timeout"},
+		{"approval with timeout", "    - id: restart\n", "    - id: approve\n      type: approval\n      timeout: 5m\n    - id: restart\n", "take expiresAfter, not timeout"},
+		{"approval count", "    - id: restart\n", "    - id: approve\n      type: approval\n      count: 11\n    - id: restart\n", "between 1 and 10"},
 		{"non read-only wait", "          action: DescribeServices\n          input:\n            cluster", "          action: UpdateService\n          input:\n            cluster", "wait checks must be read-only"},
 	}
 	for _, c := range cases {
@@ -88,6 +93,25 @@ func TestLintRules(t *testing.T) {
 				t.Fatalf("want %q in %q", c.want, got)
 			}
 		})
+	}
+}
+
+// An approval step is allowed even on an auto runbook: it pauses the run and
+// pages the approvers (runbook-schema.md §3.5).
+func TestApprovalStepPublishes(t *testing.T) {
+	src := strings.Replace(string(load(t)), "    - id: restart\n",
+		"    - id: approve\n      name: Approve the restart\n      type: approval\n      count: 1\n      fromRoles: [Admin]\n"+
+			"      excludeRequester: true\n      expiresAfter: 10m\n    - id: restart\n", 1)
+	rb, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if is := Lint(rb); len(is) > 0 {
+		t.Fatalf("unexpected issues: %v", is)
+	}
+	st := rb.Spec.Steps[2]
+	if !st.RunsOnControlPlane() || st.ApprovalCount() != 1 || st.ApprovalRoles()[0] != "admin" || st.ApprovalExpiry().Minutes() != 10 {
+		t.Fatalf("approval step parsed wrong: %+v", st)
 	}
 }
 

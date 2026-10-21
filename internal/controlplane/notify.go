@@ -32,8 +32,10 @@ func (s *Server) DeliverNotifications(ctx context.Context) (int, error) {
 			var cfg db.JSON[map[string]string]
 			var cred []byte
 			var attempts int
-			if err := tx.QueryRow(`SELECT n.kind, n.payload, n.attempts, t.type, t.config, t.credential
-				FROM notifications n JOIN escalation_targets t ON t.id = n.target_id WHERE n.id = $1`, id).
+			if err := tx.QueryRow(`SELECT n.kind, n.payload, n.attempts, coalesce(t.type, c.type), coalesce(t.config, '{}'),
+					coalesce(t.credential, c.credential)
+				FROM notifications n LEFT JOIN escalation_targets t ON t.id = n.target_id
+				LEFT JOIN approval_channels c ON c.id = n.channel_id WHERE n.id = $1`, id).
 				Scan(&kind, &payload, &attempts, &typ, &cfg, &cred); err != nil {
 				return err
 			}
@@ -74,6 +76,9 @@ func (s *Server) DeliverNotifications(ctx context.Context) (int, error) {
 func (s *Server) send(ctx context.Context, typ, kind, secret string, cfg map[string]string, p map[string]any) error {
 	switch typ {
 	case "slack":
+		if kind == "approval" {
+			return s.postJSON(ctx, secret, slackApprovalMessage(p))
+		}
 		return s.postJSON(ctx, secret, map[string]any{"text": slackText(kind, p)})
 	case "pagerduty":
 		url := cfg["events_url"]
@@ -121,6 +126,9 @@ func pagerDutySeverity(s string) string {
 
 func slackText(kind string, p map[string]any) string {
 	num, title, svc, reason := p["incident_number"], p["title"], p["service"], p["reason"]
+	if num == nil {
+		return fmt.Sprintf(":gear: %v", reason) // approval updates for runs outside an incident
+	}
 	switch kind {
 	case "page":
 		return fmt.Sprintf(":rotating_light: <!here> *Incident #%v* on `%v` (%v): %v\n%v", num, svc, p["severity"], title, reason)

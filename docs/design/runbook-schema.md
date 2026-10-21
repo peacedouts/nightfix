@@ -421,7 +421,21 @@ Secrets never appear in either. Output is capped at 1 MiB per step attempt.
 
 **Rollback.** There is no `rollback:` step list in v1. Failures use `onFailure`, which normally escalates to a human.
 
-## 9. Open questions
+## 9. Approval semantics (built Oct 20, 2026)
+
+How `approval` steps behave, as implemented in `internal/controlplane/approvals.go`:
+
+- **Who can approve.** A person whose bindings give them one of `fromRoles`, or a higher role, *within scope of the runbook* (team, tags) *and the run's target env*. Checked when they decide, against their roles at that moment. API keys and triggers can never approve. `fromRoles` defaults to `Responder`; `Viewer` is rejected at publish.
+- **Counting.** `count` distinct people (default 1, max 10), one decision each. `excludeRequester` blocks whoever started the run; it is checked in the API and again by a database trigger. Runbooks with `excludeRequester` can't be started with an API key, since a key doesn't identify a person.
+- **Outcomes.** Enough approvals: the run continues and later steps can read `steps.<id>.outputs.approved_by`. Any one rejection: the run is `cancelled` with the rejecter and reason. No decision by `expiresAfter` (default 15m, capped at the run timeout): the run is `timed_out`. Run timeouts and org freezes also close the gate. While the org is frozen, nothing can be approved.
+- **Paging.** An auto run holding the page (`beforePaging`) pages as soon as it reaches an approval step. Waiting on a human never delays telling humans. Critical incidents have already paged in parallel.
+- **Slack.** Approval requests go to the service's Slack targets with Approve/Reject buttons when the org has registered a Slack app (`POST /v1/slack-apps`), otherwise with API instructions. Button clicks are authenticated by Slack's v0 signature with a 5-minute timestamp window, and the workspace is pinned when `team_id` is set. Replies go only to Slack's `response_url` host. A Slack user is linked to a Nightfix user only by a one-time code (60 bits, 10 minutes) that Nightfix issues to the signed-in user and that they type into Slack (`/nightfix link <code>`), never by profile email. The code only travels Nightfix → Slack: the reverse (a code shown in Slack, redeemed in Nightfix) is phishable like an OAuth device code, because an attacker could ask an admin to "enter this code". Slack decisions use the member's last-synced teams, so they require a sign-in to this org within 7 days.
+- **Concurrency.** Locks are always taken org → run → gate (freeze, decisions, run timeouts and gate expiry), so these can't deadlock each other.
+- **Trust boundary.** Approvals are enforced by the control plane. The agent doesn't yet verify signed approval evidence before running later steps; that's a candidate follow-up that pairs with customer co-signing.
+- **Routing.** A run in an incident asks in its service's Slack targets. A run outside an incident, or one whose service has no Slack target, asks in the runbook team's approval channel, else the org default (`PUT /v1/approval-channels`); decisions are posted to the same place. With nothing configured, `GET /v1/approvals` still lists it.
+- **Not yet built.** Approver groups other than roles, and `manual` checklist steps, come later.
+
+## 10. Open questions
 
 1. **Reusable steps.** Shared step libraries such as `uses: nightfix/ecs-restart@v1`. Deferred; needs its own signing and versioning story.
 2. **Large output.** Spill output beyond 1 MiB to S3? Deferred until a customer needs it.
