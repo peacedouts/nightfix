@@ -1,6 +1,6 @@
 # Nightfix teaser
 
-The public page for nightfix.dev until launch: the name, one line, and an early-access sign-up. It says nothing about what Nightfix does or how it works. The full marketing site and docs live in `../website` and stay private until launch.
+The public page for nightfix.dev until launch: the name, one line, and an early-access sign-up. It says nothing about what Nightfix does or how it works. The full marketing site and docs are kept on the `archive/full-site` branch until launch.
 
 Plain static files, no build step.
 
@@ -33,4 +33,4 @@ The form's `data-endpoint` attribute in `public/index.html` is empty. While it's
 
 ## At launch
 
-Point `nightfix.dev` at the `nightfix` Worker (built from `../website`) instead, and delete this one.
+Restore the full site with `git checkout origin/archive/full-site -- website`, put the build back in the root `wrangler.jsonc` (the lines are in its comments), and let the `nightfix` Worker redeploy.

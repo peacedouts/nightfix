@@ -1,5 +1,5 @@
 // The pre-launch teaser: a static page with nothing about how Nightfix works.
-// Deployed as its own Worker so the full site in ../website stays private until launch.
+// Deployed as its own Worker if you prefer it separate from the root `nightfix` Worker.
 // No build step: Workers Builds (or `npx wrangler deploy` from this folder) uploads ./public as-is.
 {
   "name": "nightfix-teaser",
