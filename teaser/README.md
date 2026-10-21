@@ -6,7 +6,6 @@ Plain static files, no build step.
 
 ```
 teaser/
-├── wrangler.jsonc        optional standalone Worker config (not used in production)
 └── public/
     ├── index.html        the page
     ├── og.png            1200×630 link preview image
