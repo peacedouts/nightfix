@@ -2,7 +2,5 @@
 /.state/
 *.test
 coverage.out
-website/node_modules/
-website/dist/
-website/.astro/
-website/.wrangler/
+teaser/.wrangler/
+.wrangler/

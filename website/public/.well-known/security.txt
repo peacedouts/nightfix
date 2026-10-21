@@ -1,5 +1,0 @@
-Contact: mailto:security@nightfix.dev
-Expires: 2027-10-20T00:00:00.000Z
-Preferred-Languages: en
-Canonical: https://nightfix.dev/.well-known/security.txt
-Policy: https://nightfix.dev/docs/security/
