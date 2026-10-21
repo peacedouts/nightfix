@@ -377,6 +377,12 @@ func (s *Server) tryAutoRun(ctx context.Context, tx *db.Tx, inc incidentRow, m t
 	if healthy == 0 {
 		return "", "no healthy agent matches the runbook's target", nil
 	}
+	// Serializes the counts below with any concurrent start of this runbook
+	// (several control-plane instances process events in parallel), so
+	// cooldown, maxRunsPerHour and concurrency can't be exceeded by a race.
+	if reason, err := s.concurrencyBlocked(tx, rb, params); err != nil || reason != "" {
+		return "", reason, err
+	}
 	if m.Cooldown > 0 {
 		var recent int
 		if err := tx.QueryRow(`SELECT count(*) FROM runbook_runs WHERE runbook_name = $1 AND mode = 'auto'
@@ -604,7 +610,8 @@ func (s *Server) onRunFinished(ctx context.Context, tx *db.Tx, run runRow, rb *r
 			}
 		}
 	}
-	if held || action == "escalate" || run.Status == "needs_human" {
+	stepEscalated, _ := run.Context["escalate"].(bool) // a step with onFailure: escalate failed
+	if held || action == "escalate" || stepEscalated || run.Status == "needs_human" {
 		return s.page(ctx, tx, inc, reason)
 	}
 	if action == "notify" {

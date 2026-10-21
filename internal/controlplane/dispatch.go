@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/peacedouts/nightfix/internal/agentapi"
@@ -18,6 +19,7 @@ import (
 type agentIdentity struct {
 	OrgID   string
 	AgentID string
+	Serial  string // serial of the certificate this request authenticated with
 }
 
 // Enroll exchanges proof of identity and a CSR for a certificate. Labels
@@ -124,7 +126,14 @@ func (s *Server) Renew(ctx context.Context, a agentIdentity, req agentapi.RenewR
 		if err != nil {
 			return httpError{400, err.Error()}
 		}
-		if _, err := tx.Exec(`UPDATE agents SET cert_serial = $2, cert_expires_at = $3 WHERE id = $1`, a.AgentID, serial, exp); err != nil {
+		// Keep the serial the agent renewed with valid until it's seen using
+		// the new one; if this response is lost the agent can still retry.
+		// A retry that authenticates with that previous serial keeps it.
+		if _, err := tx.Exec(`UPDATE agents SET
+				prev_cert_serial     = CASE WHEN cert_serial = $4 THEN cert_serial ELSE prev_cert_serial END,
+				prev_cert_expires_at = CASE WHEN cert_serial = $4 THEN cert_expires_at ELSE prev_cert_expires_at END,
+				cert_serial = $2, cert_expires_at = $3
+			WHERE id = $1`, a.AgentID, serial, exp, a.Serial); err != nil {
 			return err
 		}
 		out.CertPEM = string(certPEM)
@@ -352,20 +361,29 @@ func (s *Server) Output(ctx context.Context, a agentIdentity, attemptID string, 
 			if stored >= agentapi.MaxOutputBytes {
 				break
 			}
-			data := c.Data
-			if len(data) > agentapi.MaxChunkBytes {
-				data = data[:agentapi.MaxChunkBytes]
-			}
+			// Output is arbitrary bytes from customer scripts; Postgres text
+			// rejects NUL and invalid UTF-8, and a rejected chunk would fail
+			// every retry of this batch and lose the rest of the output.
+			data := strings.ReplaceAll(strings.ToValidUTF8(c.Data, "\uFFFD"), "\x00", "\uFFFD")
+			data = truncate(data, agentapi.MaxChunkBytes)
 			if stored+len(data) > agentapi.MaxOutputBytes {
-				data = data[:agentapi.MaxOutputBytes-stored] + "\n[output truncated at 1 MiB]\n"
+				data = truncate(data, agentapi.MaxOutputBytes-stored) + "\n[output truncated at 1 MiB]\n"
 			}
 			stream := c.Stream
 			if stream != "stdout" && stream != "stderr" {
 				stream = "log"
 			}
-			if _, err := tx.Exec(`INSERT INTO step_output_chunks (org_id, attempt_id, seq, stream, data) VALUES ($1,$2,$3,$4,$5)
-				ON CONFLICT DO NOTHING`, tx.OrgID, attemptID, c.Seq, stream, data); err != nil {
+			// Dedupe resends by seq. The primary key includes received_at (the
+			// partition key), so ON CONFLICT never fires for a resend; the
+			// attempt row lock taken above serializes writers instead.
+			res, err := tx.Exec(`INSERT INTO step_output_chunks (org_id, attempt_id, seq, stream, data)
+				SELECT $1,$2,$3,$4,$5 WHERE NOT EXISTS (SELECT 1 FROM step_output_chunks WHERE attempt_id = $2 AND seq = $3)`,
+				tx.OrgID, attemptID, c.Seq, stream, data)
+			if err != nil {
 				return err
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				continue
 			}
 			stored += len(data)
 		}

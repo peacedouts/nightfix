@@ -654,6 +654,15 @@ func (s *Server) apiStartRun(r *http.Request, p principal) (any, error) {
 	}
 	var runID string
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		// The kill switch blocks manual runs too; otherwise a run requested
+		// while frozen would queue and execute the moment someone unfreezes.
+		var frozen sql.NullTime
+		if err := tx.QueryRow(`SELECT frozen_at FROM orgs FOR SHARE`).Scan(&frozen); err != nil {
+			return err
+		}
+		if frozen.Valid {
+			return httpError{409, "the org is frozen (kill switch); unfreeze it before starting runs"}
+		}
 		var rbID string
 		var latest int
 		if err := tx.QueryRow(`SELECT id, latest_version FROM runbooks WHERE name = $1 AND archived_at IS NULL`, req.Runbook).Scan(&rbID, &latest); err != nil {
@@ -700,6 +709,10 @@ func (s *Server) apiStartRun(r *http.Request, p principal) (any, error) {
 			if err != nil {
 				return err
 			}
+			// Linking a run writes to the incident's timeline and pages from it.
+			if err := p.can("responder", s.incidentResource(tx, inc)); err != nil {
+				return err
+			}
 			opts.IncidentID = inc.ID
 			opts.Incident = map[string]any{"id": ids.Encode("inc", inc.ID), "number": inc.Number, "title": inc.Title, "severity": inc.Severity}
 			vars["incident"] = opts.Incident
@@ -709,6 +722,11 @@ func (s *Server) apiStartRun(r *http.Request, p principal) (any, error) {
 			return httpError{400, err.Error()}
 		}
 		opts.Params = params
+		if reason, err := s.concurrencyBlocked(tx, rb, params); err != nil {
+			return err
+		} else if reason != "" {
+			return httpError{409, reason}
+		}
 		runID, err = s.startRun(r.Context(), tx, opts)
 		return err
 	})

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/peacedouts/nightfix/internal/agentapi"
+	"github.com/peacedouts/nightfix/internal/db"
 )
 
 // AgentHandler serves the agent gateway. It must be served with the TLS
@@ -97,14 +98,25 @@ func (s *Server) authenticateAgent(r *http.Request) (agentIdentity, error) {
 		return agentIdentity{}, errors.New("client certificate required")
 	}
 	cert := r.TLS.VerifiedChains[0][0]
-	var a agentIdentity
-	if err := s.DB.QueryRowContext(r.Context(), `SELECT org_id, agent_id FROM nfx_route_agent($1)`, SerialHex(cert.SerialNumber)).
-		Scan(&a.OrgID, &a.AgentID); err != nil {
+	a := agentIdentity{Serial: SerialHex(cert.SerialNumber)}
+	var isCurrent, hasPrev bool
+	if err := s.DB.QueryRowContext(r.Context(), `SELECT org_id, agent_id, is_current, has_prev FROM nfx_route_agent($1)`, a.Serial).
+		Scan(&a.OrgID, &a.AgentID, &isCurrent, &hasPrev); err != nil {
 		return a, errors.New("unknown or revoked agent certificate")
 	}
 	want := AgentURI(a.OrgID, a.AgentID)
 	for _, u := range cert.URIs {
 		if u.String() == want {
+			if isCurrent && hasPrev {
+				// The agent has its renewed certificate: retire the old one.
+				if err := s.DB.WithOrg(r.Context(), a.OrgID, func(tx *db.Tx) error {
+					_, err := tx.Exec(`UPDATE agents SET prev_cert_serial = NULL, prev_cert_expires_at = NULL WHERE id = $1 AND cert_serial = $2`,
+						a.AgentID, a.Serial)
+					return err
+				}); err != nil {
+					return a, err
+				}
+			}
 			return a, nil
 		}
 	}
