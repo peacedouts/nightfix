@@ -47,15 +47,29 @@ variable "ecs_cluster_name" {
   default     = "prod-east"
 }
 
+variable "nightfix_api_url" {
+  description = "Nightfix API (for a sandbox control plane, its api_url output)"
+  type        = string
+  default     = "https://api.nightfix.dev"
+}
+
+variable "agent_endpoint" {
+  description = "Nightfix agent gateway (for a sandbox control plane, its agent_endpoint output)"
+  type        = string
+  default     = "https://agent.nightfix.dev"
+}
+
 data "aws_caller_identity" "current" {}
 
 module "nightfix_agent" {
   source = "../../modules/nightfix-agent"
 
-  org_id     = var.org_id
-  image      = var.agent_image
-  vpc_id     = var.vpc_id
-  subnet_ids = var.subnet_ids
+  org_id           = var.org_id
+  image            = var.agent_image
+  vpc_id           = var.vpc_id
+  subnet_ids       = var.subnet_ids
+  nightfix_api_url = var.nightfix_api_url
+  agent_endpoint   = var.agent_endpoint
 
   # Exactly what examples/runbooks/ecs-service-restart.yaml calls, scoped to
   # one cluster's services. The agent can do nothing else in this account.

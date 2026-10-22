@@ -43,6 +43,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	stdlog "log"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -311,6 +312,19 @@ func linkAuth0Cmd(ctx context.Context, args []string) error {
 	return nil
 }
 
+// quietHandshakeEOF passes net/http's server log to slog, dropping the
+// "TLS handshake error ... EOF" lines that load-balancer health checks cause.
+type quietHandshakeEOF struct{ log *slog.Logger }
+
+func (q quietHandshakeEOF) Write(p []byte) (int, error) {
+	line := strings.TrimSpace(string(p))
+	if strings.Contains(line, "TLS handshake error") && strings.HasSuffix(line, ": EOF") {
+		return len(p), nil
+	}
+	q.log.Warn("agent gateway", "msg", line)
+	return len(p), nil
+}
+
 func serve(ctx context.Context) error {
 	srv, err := newServer(ctx)
 	if err != nil {
@@ -328,6 +342,9 @@ func serve(ctx context.Context) error {
 			WriteTimeout: write, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
 	}
 	agentSrv := server(env("NIGHTFIX_AGENT_ADDR", ":8443"), srv.AgentHandler(), srv.Cfg.PollWait+30*time.Second)
+	// The NLB's TCP health checks open and close a connection without TLS,
+	// which net/http logs as a handshake error every few seconds per zone.
+	agentSrv.ErrorLog = stdlog.New(quietHandshakeEOF{srv.Log}, "", 0)
 	agentSrv.TLSConfig = tlsCfg
 	servers := []*http.Server{
 		server(env("NIGHTFIX_API_ADDR", ":8080"), srv.APIHandler(), 60*time.Second),

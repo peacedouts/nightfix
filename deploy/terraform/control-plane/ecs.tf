@@ -53,6 +53,10 @@ resource "aws_ecs_task_definition" "controlplane" {
     essential              = true
     command                = ["serve"]
     readonlyRootFilesystem = true
+    # On SIGTERM, serve drains its listeners (up to 10s) and lets claimed
+    # notifications finish and be recorded (up to 20s); ECS's default 30s
+    # would kill it mid-way and a page could go out twice.
+    stopTimeout = 45
     portMappings = [
       { containerPort = 8080, protocol = "tcp" },
       { containerPort = 8081, protocol = "tcp" },

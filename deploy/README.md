@@ -113,7 +113,9 @@ curl https://api.nightfix.dev/v1/agent-ca.pem
 deploy/scripts/create-org.sh "Acme Inc" acme
 ```
 
-This runs a one-off admin task. The task writes the org's owner API key straight into Secrets Manager (as `nightfix-prod/org-api-keys/acme`), never printing or logging it. The script then shows the key to you once and offers to delete the secret after you've saved it in your password manager. The admin task has its own role. The service can't create secrets, and the migrate task has no AWS access at all. Only the migrate task's execution role can read the RDS master password. It also prints the org's `agent pin` (see below).
+This runs a one-off admin task. The task writes the org's owner API key straight into Secrets Manager (as `nightfix-prod/org-api-keys/acme`), never printing or logging it. The script then shows the key to you once and offers to delete the secret after you've saved it in your password manager. The admin task has its own role. The service can't create secrets, and the migrate task has no AWS access at all. Only the migrate task's execution role can read the RDS master password. The org id and its `agent pin` are in the task's log (stream prefix `controlplane/admin`). With the key, `GET /v1/me` and `GET /v1/signing-keys` return them too.
+
+To link a customer's Auth0 Organization once they've shown they control it, run `deploy/scripts/link-auth0.sh org_… <auth0 org id>`. This is an operator-only step, run as the same kind of admin task.
 
 ### 6. Make the agent image public
 
@@ -180,7 +182,7 @@ Two pins need registry access this repository's automation sessions don't have. 
 
 ## Not verified on real AWS yet
 
-CI validates the Terraform against the real providers and builds both images, but nothing has been applied to an AWS account yet. Check these on the first run:
+CI validates the Terraform against the real providers and builds both images, but nothing has been applied to an AWS account yet. [`aws-smoke-test.md`](aws-smoke-test.md) walks through a first run in a sandbox account. It covers the control plane, an agent and a demo service (`terraform/examples/demo-target`), plus both demo stories, end to end. Check these on that run:
 - **The agent's `/tmp`:** a shell step can write files. The image declares `/tmp` as a volume so ECS keeps its permissions.
 - **The admin task:** `create-org.sh` stores the key and the script reads it back.
 - **Database log settings:** the parameter group sets `log_parameter_max_length` and `log_parameter_max_length_on_error` to 0, so logs carry no query data. Both are standard Postgres 16 settings, but AWS doesn't document whether RDS lets you change them. If `terraform apply` rejects one, remove that `parameter` block.

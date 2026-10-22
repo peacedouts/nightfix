@@ -105,14 +105,15 @@ var dimensionAliases = map[string]string{
 	"FunctionName":         "function",
 }
 
-// The fingerprint is scoped to the integration: any account that can
-// publish to a pinned topic chooses the AlarmArn in its message, so without
-// the scope one integration's messages could resolve (or, with a future
-// StateChangeTime, silence) another's alarm.
 // maxStateClockSkew is how far in the future a source's state-change time
 // may be (clock skew) before it's clamped.
 const maxStateClockSkew = 5 * time.Minute
 
+// normalizeCloudWatch turns an alarm state change into an Alert. Its
+// fingerprint is scoped to the integration: any account that can publish to
+// a pinned topic chooses the AlarmArn in its message, so without the scope
+// one integration's messages could resolve (or, with a future
+// StateChangeTime, silence) another's alarm.
 func normalizeCloudWatch(integrationID, message string, severityMap map[string]string) (Alert, error) {
 	var a cloudWatchAlarm
 	if err := json.Unmarshal([]byte(message), &a); err != nil {

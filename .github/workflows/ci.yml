@@ -97,7 +97,7 @@ jobs:
       - run: terraform fmt -check -recursive deploy/terraform
       - name: Validate
         run: |
-          for dir in deploy/terraform/control-plane deploy/terraform/examples/agent; do
+          for dir in deploy/terraform/control-plane deploy/terraform/examples/agent deploy/terraform/examples/demo-target; do
             echo "::group::$dir"
             terraform -chdir=$dir init -backend=false -input=false
             terraform -chdir=$dir validate

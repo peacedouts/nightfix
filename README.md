@@ -116,7 +116,7 @@ The database schema runs on managed Postgres without a superuser: CI runs every 
    ```
    (Source groups from wherever your IdP provides them; `app_metadata.groups` is just an example.)
 3. Run the control plane with `NIGHTFIX_AUTH0_DOMAIN=<tenant>.us.auth0.com` and `NIGHTFIX_AUTH0_AUDIENCE=https://api.nightfix.dev`.
-4. Link the Auth0 Organization to the Nightfix org. This is an operator step, done once the customer has shown they control it (an Auth0 org id isn't secret, so the API won't let an org's owner claim one): `nightfix org link-auth0 --org org_… --auth0-org org_…` (on AWS, run it as a one-off admin task, as `create-org.sh` does). Then, with the owner API key, create teams mapped to groups (`POST /v1/teams {"slug":"payments","auth0_group":"payments-eng"}`), and grant roles:
+4. Link the Auth0 Organization to the Nightfix org. This is an operator step, done once the customer has shown they control it (an Auth0 org id isn't secret, so the API won't let an org's owner claim one): `nightfix org link-auth0 --org org_… --auth0-org org_…` (on AWS: `deploy/scripts/link-auth0.sh org_… org_…`, which runs it as a one-off admin task). Then, with the owner API key, create teams mapped to groups (`POST /v1/teams {"slug":"payments","auth0_group":"payments-eng"}`), and grant roles:
    ```json
    POST /v1/role-bindings
    {"subject_type":"team","subject":"payments","role":"responder",

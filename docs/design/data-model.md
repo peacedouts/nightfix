@@ -90,7 +90,7 @@ Columns are the important ones, not exhaustive. Every tenant table also has `org
 | `org_trust_config` | `org_id`, `required_signers` (key_id[]), `version`, `signature` | Signed by the current control-plane key; agents may pin their own list locally |
 | `enrollment_rules` | `id`, `method` (`iam` \| `token`), `aws_account_id`, `role_arn`, `token_hash`, `labels`, `max_agents`, `expires_at` | Labels always come from the rule |
 | `enrollment_challenges` | `nonce_hash`, `org_id`, `expires_at` | Single-use nonces for IAM enrollment; bound into the signed STS request so it can't be replayed (built) |
-| `agents` | `id`, `enrollment_rule_id`, `labels`, `status` (`online` \| `offline` \| `revoked`), `version`, `capabilities`, `slots`, `allowlist_mode`, `cert_serial`, `cert_expires_at`, `last_seen_at`, `frozen_local` | `frozen_local` is reported by the agent, not set by us |
+| `agents` | `id`, `enrollment_rule_id`, `labels`, `status` (`online` \| `offline` \| `revoked`), `version`, `capabilities`, `slots`, `allowlist_mode`, `cert_serial`, `cert_expires_at`, `last_seen_at`, `frozen_local`, `iam_arn` | `frozen_local` is reported by the agent, not set by us. `iam_arn` is the role session an IAM agent enrolled as; once that agent is revoked, the same session can't enroll again (0025) |
 
 ### 4.3 Runbooks and runs
 
@@ -102,7 +102,7 @@ Columns are the important ones, not exhaustive. Every tenant table also has `org
 | `runbook_triggers` | `runbook_id`, `version`, `type`, `mode`, `match`, `services`, `before_paging`, `cooldown`, `max_runs_per_hour` | **Denormalized** from the latest version so trigger matching is one indexed query |
 | `critical_hold_grants` | `id`, `runbook_id`, `service_id`, `granted_by`, `granted_at`, `track_record_snapshot`, `last_verified_run_at`, `revoked_at`, `revoked_reason` | One active grant per (runbook, service) |
 | `runbook_runs` | `id`, `runbook_version_id`, `digest`, `incident_id`, `trigger_type`, `mode`, `requested_by_type` (`user` \| `api_key` \| `trigger`), `requested_by_id`, `params`, `status`, `before_paging`, `held_critical`, `verified`, `started_at`, `finished_at` | `params` never contains secret values |
-| `step_attempts` | `id`, `run_id`, `step_id`, `attempt_number`, `state`, `agent_id`, `lease_expires_at`, `exit_code`, `outputs`, `error`, `started_at`, `finished_at` | The agent work queue (`SKIP LOCKED`) |
+| `step_attempts` | `id`, `run_id`, `step_id`, `attempt_number`, `state`, `agent_id`, `lease_expires_at`, `exit_code`, `outputs`, `error`, `not_before`, `started_at`, `finished_at` | The agent work queue (`SKIP LOCKED`). `not_before` holds a retry back until its backoff has passed (0021) |
 | `approval_gates` | `id`, `run_id`, `step_index`, `step_id`, `required_count` (1–10), `from_roles`, `exclude_requester`, `status` (`pending` \| `approved` \| `rejected` \| `expired` \| `cancelled`), `requested_at`, `expires_at`, `decided_at` | One per approval step per run (built; semantics in `runbook-schema.md` §9) |
 | `approvals` | `id`, `run_id`, `step_id`, `approver_id`, `decision` (`approved` \| `rejected`), `comment`, `decided_at`, `expires_at` | One decision per person per gate. DB trigger: approver ≠ requester when the gate sets `exclude_requester` |
 | `step_output_chunks` | `attempt_id`, `seq`, `stream`, `data`, `received_at` | **Partitioned by day**, 90-day default retention; 1 MiB cap per attempt |
@@ -114,7 +114,8 @@ Columns are the important ones, not exhaustive. Every tenant table also has `org
 | Table | Key columns | Notes |
 |---|---|---|
 | `integrations` | `id`, `type`, `name`, `default_service_id`, `severity_map`, `dedupe_keys`, `credential` (encrypted), `archived_at` | |
-| `alert_events` | `id`, `integration_id`, `received_at`, `raw`, `processed_at`, `error` | **Partitioned by day**, 30-day retention; append-only |
+| `alert_events` | `id`, `integration_id`, `received_at`, `raw`, `processed_at`, `error` | **Partitioned by day**, 30-day retention; append-only. `received_at` is the commit-time clock, and events are processed one at a time per org in that order (0023) |
+| `alert_states` | `fingerprint`, `state_at` | The latest source state time applied per fingerprint, so an older delivery processed late can't undo a newer one, even after the alert row has moved on (0023) |
 | `services` | `id`, `name`, `team_id`, `grouping_labels`, `grouping_window`, `max_hold`, `auto_resolve`, `reopen_window`, `verification_window`, `slack_channel_id`, `archived_at` | Catch-all service created with every org |
 | `routing_rules` | `id`, `priority`, `match`, `service_id`, `action` (`route` \| `suppress`), `version` | Each change creates a new version; old versions kept |
 | `maintenance_windows` | `id`, `service_id`, `starts_at`, `ends_at`, `recurrence`, `created_by` | |
@@ -206,23 +207,28 @@ A user's effective permissions are the **union** of all bindings that reach them
 
 ## 6. Row-level security mechanics
 
+As built (migrations 0001, 0013, 0024):
+
 ```sql
 ALTER TABLE incidents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE incidents FORCE ROW LEVEL SECURITY;
 
-CREATE POLICY tenant_isolation ON incidents
-  USING (org_id = current_setting('app.org_id')::uuid)
-  WITH CHECK (org_id = current_setting('app.org_id')::uuid);
+-- nfx_org() is current_setting('app.org_id')::uuid
+CREATE POLICY tenant_isolation ON incidents TO nfx_app
+  USING (org_id = nfx_org()) WITH CHECK (org_id = nfx_org());
+CREATE POLICY tenant_owner ON incidents TO nfx_owner
+  USING (true) WITH CHECK (true);
 ```
 
-- The app connects as a role that **does not own** the tables, so RLS can't be bypassed by ownership.
-- Every request runs in a transaction that starts with `SET LOCAL app.org_id = '<org>'`, taken from the authenticated principal, never from request input.
-- Background workers (ingest processor, dispatcher, timers) claim a job, then `SET LOCAL app.org_id` to the job's org before doing anything else.
+- The app connects as `nfx_app`, which **does not own** the tables, so RLS can't be bypassed by ownership.
+- Every request runs in a transaction that sets `app.org_id` (`set_config(…, true)`, i.e. `SET LOCAL`) from the authenticated principal, never from request input.
+- Background workers (ingest processor, dispatcher, timers) claim a job through a `SECURITY DEFINER` function, then set `app.org_id` to the job's org before doing anything else.
 - If `app.org_id` isn't set, `current_setting` errors and the query fails closed.
-- A separate `ops_admin` role with `BYPASSRLS` exists for our own support tooling only. Every session with it is audit-logged.
+- Managed Postgres has no `BYPASSRLS`. `nfx_owner` owns the tables and the definer functions. Its own `tenant_owner` policy lets it see every org, as cross-org work such as claiming jobs requires. Only `nfx_app` may execute those functions (0019); each needs an explicit `GRANT EXECUTE`.
+- Policies are **per role, with no `OR`**. A single policy of `org_id = nfx_org() OR current_user = 'nfx_owner'` stopped Postgres from using the `org_id` indexes, so every per-event lookup scanned all orgs' rows (0024 split it). New tenant tables need both policies; `internal/db` tests check every RLS table and partition.
 - Composite foreign keys `(org_id, id)` mean that even an RLS bypass couldn't link one org's incident to another org's service.
 
-The ingest endpoint resolves the org from the integration ID before setting `app.org_id`. That lookup reads a small `integration_routes` table outside RLS that holds only `integration_id → org_id`.
+The ingest endpoint resolves the org from the integration ID before setting `app.org_id`, through `nfx_route_integration(id)`, a definer function that returns only the org.
 
 ---
 

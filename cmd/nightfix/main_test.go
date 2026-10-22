@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -100,5 +101,18 @@ func TestSealerKeySources(t *testing.T) {
 	os.WriteFile(path, []byte(strings.Repeat("!", 10)), 0o600)
 	if _, err := sealer(); err == nil {
 		t.Error("corrupt master.key accepted")
+	}
+}
+
+func TestQuietHandshakeEOF(t *testing.T) {
+	var buf strings.Builder
+	q := quietHandshakeEOF{slog.New(slog.NewTextHandler(&buf, nil))}
+	q.Write([]byte("http: TLS handshake error from 10.0.1.5:41234: EOF\n"))
+	if buf.Len() != 0 {
+		t.Fatalf("health-check noise logged: %s", buf.String())
+	}
+	q.Write([]byte("http: TLS handshake error from 10.0.1.5:41234: tls: bad certificate\n"))
+	if !strings.Contains(buf.String(), "bad certificate") {
+		t.Fatalf("a real handshake failure was dropped: %q", buf.String())
 	}
 }
