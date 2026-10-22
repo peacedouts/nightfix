@@ -40,7 +40,7 @@ Integration ──► Alert ──(routing rules)──► Service ──(groupi
 
 | Integration | Auth / verification | Fingerprint source |
 |---|---|---|
-| **CloudWatch via SNS** | SNS message signature verified against the AWS signing cert; topic ARN must match the integration; handles `SubscriptionConfirmation` automatically | `AlarmArn` |
+| **CloudWatch via SNS** | SNS message signature verified against the AWS signing cert; topic ARN must match the integration; handles `SubscriptionConfirmation` automatically | integration + `AlarmArn` |
 | **Prometheus Alertmanager** | Bearer token or HMAC header | Alertmanager's per-alert `fingerprint` |
 | **Generic webhook** | HMAC-SHA256 signature header with a per-integration secret, plus timestamp (5-minute replay window) | `dedup_key` field if present, else configured label hash |
 | **PagerDuty / incident.io inbound** | Their webhook signature schemes | Their incident or alert ID |
@@ -296,7 +296,7 @@ Unique index on open alerts: `(org_id, fingerprint) WHERE status <> 'resolved'`.
 ## 12. Worked example: ECS service auto-fixed overnight
 
 1. **02:14:03** — CloudWatch alarm `ecs-unhealthy-checkout` enters `ALARM`; SNS delivers to the integration. Persisted, `202` returned.
-2. **02:14:04** — Normalized: fingerprint = AlarmArn, severity `high`, labels `cluster=prod-east, service=checkout-api`. Routed to service `checkout-api`. No open incident with group key `checkout-api/prod-east` → incident #412 opens.
+2. **02:14:04** — Normalized: fingerprint = integration + AlarmArn, severity `high`, labels `cluster=prod-east, service=checkout-api`. Routed to service `checkout-api`. No open incident with group key `checkout-api/prod-east` → incident #412 opens.
 3. **02:14:04** — `ecs-service-restart` trigger matches (`auto`, `beforePaging`). Hold conditions pass. Incident → `remediating`, hold until 02:24:04 (10m max hold). Slack: "Auto-remediation started…"
 4. **02:14:05–02:19:40** — Runbook runs: describe → force new deployment → wait until stable. Succeeds.
 5. **02:21:10** — CloudWatch sends `OK`. Alert resolved, within the 5-min verification window. Incident #412 → `resolved` (`auto_remediated`). Slack summary posted. **Nobody was woken up.**

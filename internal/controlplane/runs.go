@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -25,6 +26,11 @@ type startRunOpts struct {
 	RequestedByID     string
 	BeforePaging      bool
 	Alert, Incident   map[string]any
+	// OnStart, if set, runs after the run is recorded and before its first
+	// step: the first step can finish the run, open an approval gate or fail
+	// at once, and whatever reacts to that (paging, the hold) must see the
+	// incident as it should be for this run.
+	OnStart func(runID string) error
 }
 
 type runRow struct {
@@ -126,6 +132,11 @@ func (s *Server) startRun(ctx context.Context, tx *db.Tx, o startRunOpts) (strin
 			return "", err
 		}
 	}
+	if o.OnStart != nil {
+		if err := o.OnStart(runID); err != nil {
+			return "", err
+		}
+	}
 	return runID, s.advance(ctx, tx, runID)
 }
 
@@ -222,6 +233,11 @@ func retryBackoff(n int) time.Duration {
 	return min(d, retryBackoffMax)
 }
 
+// maxRunContextBytes bounds a run's context (params, alert and every step's
+// outputs), which is sent with each step; the agent reads poll responses of
+// up to 16 MiB.
+const maxRunContextBytes = 4 << 20
+
 // recordStep stores a step's status and outputs where later steps read them
 // (steps.<id>.outputs.<name>).
 func (s *Server) recordStep(run runRow, stepID, status string, outputs map[string]any) {
@@ -313,6 +329,16 @@ func (s *Server) onAttemptFinished(ctx context.Context, tx *db.Tx, attemptID str
 	switch state {
 	case "succeeded":
 		s.recordStep(run, step.ID, "succeeded", out.Outputs)
+		// Every later step's envelope carries the run context (all outputs so
+		// far), and the agent reads a bounded response: a run whose outputs
+		// outgrow that would leave its next step undeliverable, cycling
+		// through lease expiry until the run times out. Fail it clearly.
+		if b, _ := json.Marshal(run.Context); len(b) > maxRunContextBytes {
+			s.recordStep(run, step.ID, "failed", nil)
+			return s.finishRun(ctx, tx, run, rb, "failed", fmt.Sprintf(
+				"step %s: the run's outputs total %d KiB, over the %d KiB later steps can be sent; return less from outputs",
+				step.ID, len(b)>>10, maxRunContextBytes>>10))
+		}
 		if _, err := tx.Exec(`UPDATE runbook_runs SET current_step = $2, context = $3 WHERE id = $1`,
 			run.ID, idx+1, db.JSON[map[string]any]{V: run.Context}); err != nil {
 			return err

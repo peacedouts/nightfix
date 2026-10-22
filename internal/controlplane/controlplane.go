@@ -59,6 +59,10 @@ type Config struct {
 	// to newNotifyClient: no redirects, no proxy, a 5s timeout, and (unless
 	// AllowPrivateTargets) no loopback, private or link-local addresses.
 	NotifyHTTPClient *http.Client
+	// Auth0SelfLink lets an org's owner link an Auth0 Organization through
+	// the API (PUT /v1/org/auth0). Development and tests only: nothing proves
+	// the owner controls it, so in production the operator links it.
+	Auth0SelfLink bool
 	// NotifyWorkers is how many notifications one instance delivers at once.
 	NotifyWorkers int
 }

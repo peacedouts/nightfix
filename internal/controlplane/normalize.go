@@ -105,7 +105,15 @@ var dimensionAliases = map[string]string{
 	"FunctionName":         "function",
 }
 
-func normalizeCloudWatch(message string, severityMap map[string]string) (Alert, error) {
+// The fingerprint is scoped to the integration: any account that can
+// publish to a pinned topic chooses the AlarmArn in its message, so without
+// the scope one integration's messages could resolve (or, with a future
+// StateChangeTime, silence) another's alarm.
+// maxStateClockSkew is how far in the future a source's state-change time
+// may be (clock skew) before it's clamped.
+const maxStateClockSkew = 5 * time.Minute
+
+func normalizeCloudWatch(integrationID, message string, severityMap map[string]string) (Alert, error) {
 	var a cloudWatchAlarm
 	if err := json.Unmarshal([]byte(message), &a); err != nil {
 		return Alert{}, fmt.Errorf("not a CloudWatch alarm message: %w", err)
@@ -144,12 +152,18 @@ func normalizeCloudWatch(message string, severityMap map[string]string) (Alert, 
 	if err != nil {
 		t, stateAt = time.Now(), time.Time{}
 	}
+	// A state change can't have happened in the future: clamp it (allowing a
+	// little clock skew), or one message dated 2099 would make every later
+	// genuine state change look stale and be dropped.
+	if limit := time.Now().Add(maxStateClockSkew); stateAt.After(limit) {
+		t, stateAt = limit, limit
+	}
 	summary := a.AlarmName
 	if a.NewStateReason != "" {
 		summary = a.AlarmName + ": " + a.NewStateReason
 	}
 	return Alert{
-		Fingerprint: "cw:" + a.AlarmArn,
+		Fingerprint: "cw:" + integrationID + ":" + a.AlarmArn,
 		Status:      status,
 		Severity:    sev,
 		Summary:     truncate(summary, 300),

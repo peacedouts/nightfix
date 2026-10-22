@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"net/http"
 	"regexp"
 	"strings"
@@ -33,27 +34,43 @@ func (s *Server) identityRoutes(route routeFn) {
 }
 
 // apiLinkAuth0 connects an Auth0 Organization (org_…) to this org, so its
-// members can log in.
+// members can log in. Off unless Cfg.Auth0SelfLink: nothing in the request
+// proves the caller controls that Auth0 Organization, and its id isn't
+// secret (it's in every member's token), so any org's owner could claim
+// another customer's and have their people sign in to the wrong org. Nightfix
+// links it during onboarding instead (nightfix org link-auth0).
 func (s *Server) apiLinkAuth0(r *http.Request, p principal) (any, error) {
+	if !s.Cfg.Auth0SelfLink {
+		return nil, httpError{403, "Auth0 organizations are linked by Nightfix when your org is set up; contact support to link or change one"}
+	}
 	var req struct {
 		Auth0OrgID string `json:"auth0_org_id"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		return nil, err
 	}
-	if !strings.HasPrefix(req.Auth0OrgID, "org_") {
-		return nil, httpError{400, "auth0_org_id must be an Auth0 Organization id (org_…)"}
+	if err := s.LinkAuth0(r.Context(), p.OrgID, req.Auth0OrgID, p.actorType(), p.actor()); err != nil {
+		return nil, err
 	}
-	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
-		if _, err := tx.Exec(`UPDATE orgs SET auth0_org_id = $2 WHERE id = $1`, p.OrgID, req.Auth0OrgID); err != nil {
+	return map[string]string{"auth0_org_id": req.Auth0OrgID}, nil
+}
+
+// LinkAuth0 connects an Auth0 Organization to an org, replacing any earlier
+// link. The operator runs it (nightfix org link-auth0) once the customer has
+// shown they control the Auth0 Organization.
+func (s *Server) LinkAuth0(ctx context.Context, orgID, auth0OrgID, actorType, actor string) error {
+	if !strings.HasPrefix(auth0OrgID, "org_") {
+		return httpError{400, "auth0_org_id must be an Auth0 Organization id (org_…)"}
+	}
+	return s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
+		if _, err := tx.Exec(`UPDATE orgs SET auth0_org_id = $2 WHERE id = $1`, orgID, auth0OrgID); err != nil {
 			if db.IsUniqueViolation(err) {
 				return httpError{409, "that Auth0 organization is linked to another org"}
 			}
 			return err
 		}
-		return tx.Audit(r.Context(), p.actorType(), p.actor(), "org.link_auth0", "org", p.OrgID, req)
+		return tx.Audit(ctx, actorType, actor, "org.link_auth0", "org", orgID, map[string]string{"auth0_org_id": auth0OrgID})
 	})
-	return map[string]string{"auth0_org_id": req.Auth0OrgID}, err
 }
 
 func (s *Server) apiCreateTeam(r *http.Request, p principal) (any, error) {

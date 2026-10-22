@@ -86,6 +86,7 @@ func setup(t *testing.T, runbookYAML string) *env {
 		PollWait:                 2 * time.Second,
 		STSEndpoint:              stubSrv.URL + "/sts/",
 		SlackResponseURLPrefixes: []string{stubSrv.URL + "/slack/response/"},
+		Auth0SelfLink:            true, // tests link Auth0 orgs through the API
 		Auth0: controlplane.Auth0Config{Verifier: &auth0.Verifier{
 			Issuer: idp.Issuer, Audience: idp.Audience, JWKSURL: idp.Srv.URL}},
 	}, log)

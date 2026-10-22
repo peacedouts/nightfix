@@ -36,7 +36,11 @@ type snsMessage struct {
 
 var snsTopicArnRe = regexp.MustCompile(`^arn:aws(-cn|-us-gov)?:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]{1,256}(\.fifo)?$`)
 
-var snsHostRe = regexp.MustCompile(`^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$`)
+// snsHostRe matches SNS's regional endpoints only. The label after "sns."
+// must be a region: "[a-z0-9-]+" also matched S3 virtual-hosted buckets
+// (sns.s3.amazonaws.com is the bucket named "sns"), whose owner could have
+// served a signing certificate for forged notifications.
+var snsHostRe = regexp.MustCompile(`^sns\.[a-z]{2}(-gov|-iso[a-z]*)?-[a-z]+-\d+\.amazonaws\.com(\.cn)?$`)
 
 // allowedSNSURL reports whether u is an SNS-owned URL (or an explicitly
 // configured development prefix).

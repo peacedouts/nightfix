@@ -78,11 +78,18 @@ func checkYAMLShape(src []byte) error {
 		return fmt.Errorf("%s", yaml.FormatError(err, false, true))
 	}
 	var found error
+	docs := 0
 	for _, doc := range f.Docs {
 		if doc == nil || doc.Body == nil {
 			continue
 		}
+		docs++
 		ast.Walk(&shapeVisitor{err: &found}, doc.Body)
+	}
+	// Only the first document is decoded, canonicalized and signed; any
+	// other would be stored and shown as the runbook's source unsigned.
+	if docs > 1 && found == nil {
+		found = fmt.Errorf("a runbook file holds one YAML document; remove the extra '---' sections")
 	}
 	return found
 }

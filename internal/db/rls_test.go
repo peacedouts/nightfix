@@ -175,13 +175,14 @@ func TestClaimScopesToClaimedOrg(t *testing.T) {
 }
 
 // Managed Postgres has no superuser, so nfx_owner can't have BYPASSRLS.
-// Every table with row-level security must have a policy, and every tenant
-// policy must admit nfx_owner (for the SECURITY DEFINER functions) as well
-// as the current org.
+// Every table with row-level security must have a policy, every tenant table
+// one that admits nfx_owner (for the SECURITY DEFINER functions), and the
+// app's policy must be the plain org condition (migration 0024: an OR in it
+// keeps Postgres from using the org indexes).
 func TestEveryRLSTableHasOwnerAwarePolicies(t *testing.T) {
 	pool := testdb.New(t)
 	rows, err := pool.QueryContext(context.Background(), `
-		SELECT c.relname, coalesce(string_agg(p.qual || ' / ' || coalesce(p.with_check, ''), '; '), '')
+		SELECT c.relname, coalesce(string_agg(array_to_string(p.roles, ',') || ': ' || p.qual || ' / ' || coalesce(p.with_check, ''), '; ' ORDER BY p.policyname), '')
 		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		LEFT JOIN pg_policies p ON p.schemaname = 'public' AND p.tablename = c.relname
 		WHERE n.nspname = 'public' AND c.relkind IN ('r','p') AND c.relrowsecurity
@@ -199,8 +200,12 @@ func TestEveryRLSTableHasOwnerAwarePolicies(t *testing.T) {
 		n++
 		if quals == "" {
 			t.Errorf("%s has row-level security but no policy", table)
-		} else if strings.Count(quals, "nfx_owner") < 2 {
-			t.Errorf("%s: policy must admit nfx_owner in USING and WITH CHECK: %s", table, quals)
+		} else if table == "enrollment_challenges" {
+			continue // owner only: no tenant rows for the app
+		} else if !strings.Contains(quals, "nfx_owner: true / true") {
+			t.Errorf("%s: no policy admits nfx_owner to every row: %s", table, quals)
+		} else if !strings.Contains(quals, "nfx_app: ") || strings.Contains(quals, " OR ") {
+			t.Errorf("%s: the app's policy must be the plain org condition, for nfx_app only: %s", table, quals)
 		}
 	}
 	if n < 20 {
@@ -295,13 +300,13 @@ func TestEnsurePartitionsCreatesNewDays(t *testing.T) {
 			t.Fatal(err)
 		}
 		var schema, quals string
-		err = pool.QueryRowContext(ctx, `SELECT n.nspname, coalesce((SELECT qual FROM pg_policies p
-			WHERE p.tablename = c.relname AND p.policyname = 'tenant_isolation'), '')
+		err = pool.QueryRowContext(ctx, `SELECT n.nspname, coalesce((SELECT string_agg(array_to_string(p.roles, ',') || ': ' || p.qual, '; ' ORDER BY p.policyname)
+			FROM pg_policies p WHERE p.tablename = c.relname), '')
 			FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = $1`, name).Scan(&schema, &quals)
 		if err != nil {
 			t.Fatalf("partition %s wasn't created: %v", name, err)
 		}
-		if schema != "public" || !strings.Contains(quals, "nfx_owner") {
+		if schema != "public" || !strings.Contains(quals, "nfx_app: (org_id = nfx_org())") || !strings.Contains(quals, "nfx_owner: true") {
 			t.Fatalf("partition %s: schema %q, policy %q", name, schema, quals)
 		}
 	}

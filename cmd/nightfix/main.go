@@ -2,6 +2,7 @@
 //
 //	nightfix migrate                       apply schema migrations
 //	nightfix org create --name N --slug S  create an org and print its owner API key
+//	nightfix org link-auth0 --org O --auth0-org A  link an Auth0 Organization (operator only)
 //	nightfix serve                         run the API, ingest, agent gateway and workers
 //
 // Configuration (environment):
@@ -87,7 +88,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: nightfix migrate | org create --name N --slug S | serve")
+	fmt.Fprintln(os.Stderr, "usage: nightfix migrate | org create --name N --slug S | org link-auth0 --org org_… --auth0-org org_… | serve")
 	os.Exit(2)
 }
 
@@ -234,6 +235,9 @@ func newServer(ctx context.Context) (*controlplane.Server, error) {
 }
 
 func orgCmd(ctx context.Context, args []string) error {
+	if len(args) > 0 && args[0] == "link-auth0" {
+		return linkAuth0Cmd(ctx, args[1:])
+	}
 	if len(args) == 0 || args[0] != "create" {
 		usage()
 	}
@@ -280,6 +284,30 @@ func orgCmd(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("org:         %s\nsigning key: %s\nagent pin:   --required-signers %s\napi key:     stored in Secrets Manager as %s\n",
 		ids.Encode("org", o.OrgID), o.SigningID, o.SigningPin, secret)
+	return nil
+}
+
+// linkAuth0Cmd links a customer's Auth0 Organization to their org. It's an
+// operator step, done once the customer has shown they control that Auth0
+// Organization: an Auth0 org id isn't secret, so the API won't let an org's
+// owner claim one.
+func linkAuth0Cmd(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("org link-auth0", flag.ExitOnError)
+	org := fs.String("org", "", "org id (org_…)")
+	auth0Org := fs.String("auth0-org", "", "Auth0 Organization id (org_…)")
+	fs.Parse(args)
+	orgID, err := ids.Decode("org", *org)
+	if err != nil || *auth0Org == "" {
+		return errors.New("--org org_… and --auth0-org org_… are required")
+	}
+	srv, err := newServer(ctx)
+	if err != nil {
+		return err
+	}
+	if err := srv.LinkAuth0(ctx, orgID, *auth0Org, "operator", "nightfix org link-auth0"); err != nil {
+		return err
+	}
+	fmt.Printf("linked %s to Auth0 organization %s\n", *org, *auth0Org)
 	return nil
 }
 

@@ -3,6 +3,8 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -49,5 +51,17 @@ func TestKMSCallRetriesOnlyTransientFailures(t *testing.T) {
 	time.AfterFunc(200*time.Millisecond, cancel)
 	if _, err := kmsCall(ctx2, k, "Decrypt", nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled during backoff: %v", err)
+	}
+}
+
+func TestSafelyTurnsPanicsIntoErrors(t *testing.T) {
+	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	err := s.safely("test", func() error { var m map[string]int; m["x"] = 1; return nil })
+	var p errPanic
+	if !errors.As(err, &p) || isTransient(err) {
+		t.Fatalf("panic became %v (transient=%v)", err, isTransient(err))
+	}
+	if err := s.safely("test", func() error { return nil }); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -62,7 +62,7 @@ func setupLifecycle(t *testing.T) *lifecycleHarness {
 	}))
 	t.Cleanup(notify.Close)
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	x.srv = controlplane.New(pool, sealer, ca, controlplane.Config{PublicIngestURL: "http://ingest", AllowPrivateTargets: true,
+	x.srv = controlplane.New(pool, sealer, ca, controlplane.Config{PublicIngestURL: "http://ingest", AllowPrivateTargets: true, Auth0SelfLink: true,
 		Auth0: controlplane.Auth0Config{Verifier: &auth0.Verifier{Issuer: idp.Issuer, Audience: idp.Audience, JWKSURL: idp.Srv.URL}}}, log)
 	apiSrv := httptest.NewServer(x.srv.APIHandler())
 	t.Cleanup(apiSrv.Close)

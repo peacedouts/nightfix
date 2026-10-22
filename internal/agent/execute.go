@@ -46,7 +46,7 @@ func (a *Agent) execute(ctx context.Context, v *verified) agentapi.Result {
 	if err != nil {
 		return agentapi.Result{Status: "failed", Error: err.Error()}
 	}
-	out.red = newRedactor(values)
+	out.red, out.secretValues = newRedactor(values), values
 
 	var res agentapi.Result
 	var result map[string]any
@@ -285,6 +285,12 @@ func (a *Agent) runWait(ctx context.Context, v *verified, out *streamer) (map[st
 			}
 			out.log(fmt.Sprintf("check %d: %v", i, err))
 		} else {
+			// Secret material in the response (a SecureString, a decrypted
+			// key) must be redacted from this check's log lines too: an until
+			// error can quote values from the result.
+			if m := secretMaterial(v.step, res); len(m) > 0 {
+				out.addSecretMaterial(m)
+			}
 			vars := a.stepVars(v, nil)
 			vars["result"] = res
 			done, err := expr.EvalBool(v.step.Until, vars)
@@ -450,6 +456,9 @@ type streamer struct {
 	a       *Agent
 	attempt string
 	red     *redactor
+	// secretValues are what red redacts: the step's resolved secrets, plus
+	// secret material from AWS responses as it arrives.
+	secretValues []string
 
 	mu        sync.Mutex
 	seq       int
@@ -483,6 +492,14 @@ func newStreamer(a *Agent, attempt string) *streamer {
 		}
 	}()
 	return s
+}
+
+// addSecretMaterial adds values to what is redacted from now on.
+func (s *streamer) addSecretMaterial(m []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secretValues = append(s.secretValues, m...)
+	s.red = newRedactor(s.secretValues)
 }
 
 // add redacts data and queues it in chunks of at most MaxChunkBytes, stopping

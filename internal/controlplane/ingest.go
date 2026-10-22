@@ -47,14 +47,25 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 
 	status, result := http.StatusAccepted, "accepted"
 	var rejectedTopic string
-	err = s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
+	err = func() error {
+		// 1. The integration's settings, in a short read-only transaction.
 		var typ string
 		var cfg db.JSON[map[string]string]
 		var cred []byte
-		if err := tx.QueryRow(`SELECT type, config, credential FROM integrations WHERE id = $1`, integrationID).
-			Scan(&typ, &cfg, &cred); err != nil {
+		if err := s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
+			return tx.QueryRow(`SELECT type, config, credential FROM integrations WHERE id = $1`, integrationID).
+				Scan(&typ, &cfg, &cred)
+		}); err != nil {
 			return err
 		}
+
+		// 2. Authenticate the delivery, with no transaction open: verifying
+		// an SNS signature can fetch its certificate, and confirming a
+		// subscription calls SNS. A transaction held open across those would
+		// hold a pool connection for seconds and, worse, commit its event
+		// long after it was received, so it could be processed after a later
+		// event from the same source (events are processed oldest first).
+		var m snsMessage
 		switch typ {
 		case "webhook":
 			secret, err := s.Sealer.Open(cred, orgID)
@@ -65,8 +76,8 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 				return httpError{http.StatusUnauthorized, err.Error()}
 			}
 		case "cloudwatch":
-			m, err := parseSNS(body)
-			if err != nil {
+			var err error
+			if m, err = parseSNS(body); err != nil {
 				return httpError{http.StatusBadRequest, err.Error()}
 			}
 			if err := s.verifySNS(ctx, m); err != nil {
@@ -86,28 +97,42 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 					return httpError{http.StatusBadGateway, "confirm subscription: " + err.Error()}
 				}
 				status = http.StatusOK
-				return tx.Audit(ctx, "integration", integrationID, "integration.sns_subscribed", "integration", integrationID,
-					map[string]string{"topic_arn": m.TopicArn})
+				return s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
+					return tx.Audit(ctx, "integration", integrationID, "integration.sns_subscribed", "integration", integrationID,
+						map[string]string{"topic_arn": m.TopicArn})
+				})
 			case "UnsubscribeConfirmation":
 				status = http.StatusOK
 				return nil
 			}
-			fresh, err := s.freshSNSNotification(tx, integrationID, m)
-			if err != nil {
+		}
+
+		// 3. Store it, in a short transaction. received_at is the insert's own
+		// time (not the transaction's start), so events order as they arrive.
+		return s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
+			// Shared with other deliveries, exclusive with the claim of this
+			// org's next event (migration 0023): an event isn't processed
+			// while an older one may still be committing.
+			if _, err := tx.Exec(`SELECT pg_advisory_xact_lock_shared(hashtextextended('nfx_ingest:' || $1, 0))`, orgID); err != nil {
 				return err
 			}
-			if !fresh {
-				// A repeat (SNS retry or replay): acknowledge it so SNS stops
-				// retrying, and store nothing.
-				status, result = http.StatusOK, "duplicate"
-				return nil
+			if typ == "cloudwatch" {
+				fresh, err := s.freshSNSNotification(tx, integrationID, m)
+				if err != nil {
+					return err
+				}
+				if !fresh {
+					// A repeat (SNS retry or replay): acknowledge it so SNS stops
+					// retrying, and store nothing.
+					status, result = http.StatusOK, "duplicate"
+					return nil
+				}
 			}
-		}
-		// Persist first; process asynchronously.
-		_, err := tx.Exec(`INSERT INTO alert_events (id, org_id, integration_id, raw) VALUES ($1,$2,$3,$4)`,
-			ids.NewString(), orgID, integrationID, string(body))
-		return err
-	})
+			_, err := tx.Exec(`INSERT INTO alert_events (id, org_id, integration_id, raw, received_at) VALUES ($1,$2,$3,$4, clock_timestamp())`,
+				ids.NewString(), orgID, integrationID, string(body))
+			return err
+		})
+	}()
 	if rejectedTopic != "" {
 		s.noteRejectedTopic(ctx, orgID, integrationID, rejectedTopic)
 	}

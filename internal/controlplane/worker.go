@@ -2,6 +2,8 @@ package controlplane
 
 import (
 	"context"
+	"fmt"
+	"runtime/debug"
 
 	"github.com/peacedouts/nightfix/internal/db"
 )
@@ -31,7 +33,7 @@ func (s *Server) drain(ctx context.Context, claimFn string, handle func(tx *db.T
 			if _, err := tx.Exec(`SAVEPOINT worker_row`); err != nil {
 				return err
 			}
-			herr := handle(tx, id)
+			herr := s.safely("worker "+claimFn, func() error { return handle(tx, id) })
 			if herr == nil {
 				_, err := tx.Exec(`UPDATE `+table+` SET worker_failures = 0, worker_retry_at = NULL, worker_error = NULL
 					WHERE id = $1 AND worker_failures > 0`, id)
@@ -57,4 +59,23 @@ func (s *Server) drain(ctx context.Context, claimFn string, handle func(tx *db.T
 		}
 		n++
 	}
+}
+
+// errPanic is a bug, not bad data: recorded on the row like any other
+// non-transient failure, so the row is retried later instead of the panic
+// crashing the process (and, since the same row is claimed first after a
+// restart, crashing every instance in turn).
+type errPanic struct{ v any }
+
+func (e errPanic) Error() string { return fmt.Sprintf("internal error (panic: %v)", e.v) }
+
+// safely runs fn, turning a panic into an errPanic and logging its stack.
+func (s *Server) safely(what string, fn func() error) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			s.Log.Error("panic in "+what, "panic", v, "stack", string(debug.Stack()))
+			err = errPanic{v}
+		}
+	}()
+	return fn()
 }

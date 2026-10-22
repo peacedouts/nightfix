@@ -130,7 +130,7 @@ Auto-mode lint rules:
 
 | Field | Type | Notes |
 |---|---|---|
-| `allowedRoles` | string[] | Roles that may start a run: `Responder`, `Admin` or `Owner` (default `Responder`). Enforced when a run starts, on top of org RBAC's team, tag and env scopes |
+| `allowedRoles` | string[] | Roles that may start a run: `Responder`, `Admin` or `Owner` (default `Responder`). Enforced when a run starts, on top of org RBAC's team, tag and env scopes. Starting an earlier version (a rollback, which may lack a gate the current one added) needs admin |
 | `timeout` | duration | Whole-run timeout. Default `30m`, max `4h` |
 | `concurrency` | int | Max simultaneous runs per parameter set. Default `1` |
 

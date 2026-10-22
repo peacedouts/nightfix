@@ -61,17 +61,17 @@ func TestCloudWatchFingerprintAndStateTime(t *testing.T) {
 	msg := func(state, at string) string {
 		return `{"AlarmName":"x","NewStateValue":"` + state + `","StateChangeTime":"` + at + `","AlarmArn":"` + arn + `"}`
 	}
-	a, err := normalizeCloudWatch(msg("ALARM", "2026-10-21T02:14:03.120+0000"), nil)
+	a, err := normalizeCloudWatch("int1", msg("ALARM", "2026-10-21T02:14:03.120+0000"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Fingerprint != "cw:"+arn {
+	if a.Fingerprint != "cw:int1:"+arn {
 		t.Fatalf("CloudWatch fingerprint changed: %q", a.Fingerprint)
 	}
 	if want := time.Date(2026, 10, 21, 2, 14, 3, 120e6, time.UTC); !a.StateAt.Equal(want) {
 		t.Fatalf("StateAt %v, want %v", a.StateAt, want)
 	}
-	if bad, _ := normalizeCloudWatch(msg("OK", "yesterday"), nil); !bad.StateAt.IsZero() {
+	if bad, _ := normalizeCloudWatch("int1", msg("OK", "yesterday"), nil); !bad.StateAt.IsZero() {
 		t.Fatal("an unparseable StateChangeTime must not be used for ordering")
 	}
 

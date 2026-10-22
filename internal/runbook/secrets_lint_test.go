@@ -230,3 +230,13 @@ spec:
             cluster: c
       until: result.ok == true
 `
+
+func TestParseRefusesMultipleDocuments(t *testing.T) {
+	src := conditionRunbook + "---\napiVersion: nightfix.dev/v1alpha1\nkind: Runbook\n"
+	if _, err := Parse([]byte(strings.Replace(src, "'WHEN'", "'true'", 1))); err == nil || !strings.Contains(err.Error(), "one YAML document") {
+		t.Fatalf("a file with two documents: %v", err)
+	}
+	if _, err := Parse([]byte(strings.Replace(conditionRunbook, "'WHEN'", "'true'", 1))); err != nil {
+		t.Fatalf("one document: %v", err)
+	}
+}

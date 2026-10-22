@@ -55,7 +55,7 @@ For environments without a usable IAM identity:
 ### 3.2 Certificate rotation and revocation
 
 - The agent requests a renewal over the stream once 2/3 of the certificate's lifetime has passed (`RenewCert`).
-- **Revoking** an agent (`POST /v1/agents/{id}/revoke`) takes effect on its next request: the certificate lookup on every connection excludes revoked agents, so it can't poll, report or renew. Work leased to it is recovered when the lease expires.
+- **Revoking** an agent (`POST /v1/agents/{id}/revoke`) takes effect on its next request, and the AWS identity it enrolled as (the role session: on ECS, the task) can't enroll again; a new task can, under the rule: the certificate lookup on every connection excludes revoked agents, so it can't poll, report or renew. Work leased to it is recovered when the lease expires.
 - **Revoking an enrollment rule** (`POST /v1/enrollment-rules/{id}/revoke`) stops enrollment and certificate renewal under it, so its agents lapse within the 24h certificate TTL; with `{"revoke_agents": true}` they are revoked at once (the response to a leaked token).
 
 ### 3.3 Required signers (multi-signature verification)

@@ -79,7 +79,7 @@ func setupIngest(t *testing.T, svc map[string]any) *ingestHarness {
 	x.stub.BaseURL = stubSrv.URL
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	x.srv = controlplane.New(pool, sealer, ca, controlplane.Config{PublicIngestURL: "http://ingest",
-		SNSCertURLPrefixes: []string{stubSrv.URL + "/sns/"}, AllowPrivateTargets: true}, log)
+		SNSCertURLPrefixes: []string{stubSrv.URL + "/sns/"}, AllowPrivateTargets: true, Auth0SelfLink: true}, log)
 	apiSrv := httptest.NewServer(x.srv.APIHandler())
 	t.Cleanup(apiSrv.Close)
 	ingSrv := httptest.NewServer(x.srv.IngestHandler())

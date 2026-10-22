@@ -31,7 +31,7 @@ func (s *Server) ProcessAlertEvents(ctx context.Context) (int, error) {
 			if _, err := tx.Exec(`SAVEPOINT process_event`); err != nil {
 				return err
 			}
-			perr := s.processEvent(ctx, tx, id)
+			perr := s.safely("alert event", func() error { return s.processEvent(ctx, tx, id) })
 			msg := sql.NullString{}
 			if perr != nil && !errors.Is(perr, errIgnore) {
 				// Only a transient failure (connection, deadlock, shutdown) is
@@ -120,7 +120,7 @@ func (s *Server) processEvent(ctx context.Context, tx *db.Tx, eventID string) er
 	case "cloudwatch":
 		var m snsMessage
 		if m, err = parseSNS([]byte(raw)); err == nil {
-			a, err = normalizeCloudWatch(m.Message, sevMap.V)
+			a, err = normalizeCloudWatch(integID, m.Message, sevMap.V)
 		}
 	case "webhook":
 		a, err = normalizeWebhook(integID, []byte(raw), dedupe)
@@ -141,13 +141,21 @@ func (s *Server) processEvent(ctx context.Context, tx *db.Tx, eventID string) er
 	// fingerprint, since a stale firing past the reopen window would otherwise
 	// open a new alert; checked again under the row locks below.
 	if !a.StateAt.IsZero() {
+		// alert_states also remembers a state with no alert to apply it to
+		// (an OK delivered before its ALARM), so the older ALARM is stale too.
 		var applied sql.NullTime
-		if err := tx.QueryRow(`SELECT max(state_at) FROM alerts WHERE fingerprint = $1`, a.Fingerprint).Scan(&applied); err != nil {
+		if err := tx.QueryRow(`SELECT greatest((SELECT max(state_at) FROM alerts WHERE fingerprint = $1),
+				(SELECT state_at FROM alert_states WHERE fingerprint = $1))`, a.Fingerprint).Scan(&applied); err != nil {
 			return err
 		}
 		if staleState(a, applied) {
 			s.Log.Info("alert event ignored: not newer than the alert's latest state", "event", eventID, "fingerprint", a.Fingerprint)
 			return errIgnore
+		}
+		if _, err := tx.Exec(`INSERT INTO alert_states (org_id, fingerprint, state_at) VALUES ($1, $2, $3)
+			ON CONFLICT (org_id, fingerprint) DO UPDATE SET state_at = greatest(alert_states.state_at, excluded.state_at)`,
+			tx.OrgID, a.Fingerprint, a.StateAt); err != nil {
+			return err
 		}
 	}
 

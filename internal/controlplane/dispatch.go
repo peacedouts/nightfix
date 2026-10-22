@@ -31,7 +31,7 @@ type agentIdentity struct {
 //     the org and a single-use challenge nonce; matched on account + role.
 //   - token: a single- or limited-use token (fallback for non-IAM hosts).
 func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agentapi.EnrollResponse, error) {
-	var orgID, ruleID string
+	var orgID, ruleID, iamArn string
 	audit := map[string]any{"method": req.Method}
 	switch req.Method {
 	case "iam":
@@ -51,8 +51,18 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 			return nil, httpError{401, "iam enrollment: " + err.Error()}
 		}
 		audit["arn"], audit["account"] = id.Arn, id.Account
-		denied := false
+		iamArn = id.Arn
+		denied, revoked := false, false
 		err = s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
+			// An agent revoked for this exact identity (role session) stays out.
+			if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM agents WHERE iam_arn = $1 AND revoked_at IS NOT NULL)`, id.Arn).
+				Scan(&revoked); err != nil {
+				return err
+			}
+			if revoked {
+				return tx.Audit(ctx, "agent", id.Arn, "agent.enroll_denied", "enrollment", id.Arn,
+					map[string]string{"reason": "this identity's agent was revoked", "account": id.Account, "role": id.RoleName})
+			}
 			err := tx.QueryRow(`SELECT id FROM enrollment_rules WHERE method = 'iam' AND aws_account_id = $1 AND role_name = $2
 				AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now()) ORDER BY created_at LIMIT 1`,
 				id.Account, id.RoleName).Scan(&ruleID)
@@ -66,6 +76,9 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 		})
 		if err != nil {
 			return nil, err
+		}
+		if revoked {
+			return nil, httpError{403, "the agent enrolled as this IAM identity was revoked; start a new task to enroll again"}
 		}
 		if denied {
 			return nil, httpError{403, fmt.Sprintf("no IAM enrollment rule matches role %s in account %s", id.RoleName, id.Account)}
@@ -114,8 +127,8 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 		if err != nil {
 			return httpError{400, err.Error()}
 		}
-		if _, err := tx.Exec(`INSERT INTO agents (id, org_id, enrollment_rule_id, labels, version, cert_serial, cert_expires_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7)`, agentID, orgID, ruleID, labels, req.Version, serial, exp); err != nil {
+		if _, err := tx.Exec(`INSERT INTO agents (id, org_id, enrollment_rule_id, labels, version, cert_serial, cert_expires_at, iam_arn)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, agentID, orgID, ruleID, labels, req.Version, serial, exp, sql.NullString{String: iamArn, Valid: iamArn != ""}); err != nil {
 			return err
 		}
 		tc, err := trustConfig(tx)

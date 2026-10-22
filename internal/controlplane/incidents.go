@@ -156,7 +156,7 @@ func (s *Server) reopenIncident(ctx context.Context, tx *db.Tx, incID, alertID s
 	// is no longer verified (the critical-hold track record counts only
 	// verified runs). false, not NULL: the flap guard still counts it.
 	if _, err := tx.Exec(`UPDATE runbook_runs SET verified = false
-		WHERE id = (SELECT remediation_run_id FROM incidents WHERE id = $1) AND verified`, incID); err != nil {
+		WHERE incident_id = $1 AND mode = 'auto' AND verified`, incID); err != nil {
 		return err
 	}
 	// Reopened, it needs someone to own it again: an earlier ack doesn't carry over.
@@ -222,11 +222,12 @@ func (s *Server) checkAlertsCleared(ctx context.Context, tx *db.Tx, incID string
 	// A critical incident pages in parallel with its remediation run, so it
 	// isn't remediating; a succeeded auto run whose alerts then cleared is a
 	// verified fix all the same.
-	if inc.RemediationRunID.Valid {
-		if _, err := tx.Exec(`UPDATE runbook_runs SET verified = true WHERE id = $1 AND status = 'succeeded'
-			AND mode = 'auto' AND verified IS NULL`, inc.RemediationRunID.String); err != nil {
-			return err
-		}
+	// So is one that ran alongside the page (beforePaging off), which never
+	// becomes the incident's remediation run: every succeeded auto run on the
+	// incident counts toward the flap guard.
+	if _, err := tx.Exec(`UPDATE runbook_runs SET verified = true WHERE incident_id = $1 AND status = 'succeeded'
+		AND mode = 'auto' AND verified IS NULL`, inc.ID); err != nil {
+		return err
 	}
 	if !svc.AutoResolve {
 		return s.timeline(tx, incID, "alerts.cleared", "system", "", "All alerts cleared; auto-resolve is off for this service", nil)
@@ -316,19 +317,15 @@ func (s *Server) decideRemediation(ctx context.Context, tx *db.Tx, inc incidentR
 	pageReason := ""
 	if len(held) == 1 {
 		m := held[0]
-		runID, reason, err := s.tryAutoRun(ctx, tx, inc, m, alertCtx, a.Fingerprint, true)
-		if err != nil {
-			return err
-		}
-		switch {
-		case reason != "":
-			pageReason = "Auto-remediation " + m.Name + " did not start: " + reason
-		case inc.Severity == "critical":
-			pageReason = "Auto-remediation " + m.Name + " is running; critical incidents page in parallel"
-			if _, err := tx.Exec(`UPDATE incidents SET remediation_run_id = $2 WHERE id = $1`, inc.ID, runID); err != nil {
+		// The incident becomes this run's (and, unless critical, starts holding
+		// its page) as the run starts, before its first step: a first step that
+		// is an approval must page, and one that fails at once must page and
+		// leave the incident triggered, as for any held run.
+		onStart := func(runID string) error {
+			if inc.Severity == "critical" {
+				_, err := tx.Exec(`UPDATE incidents SET remediation_run_id = $2 WHERE id = $1`, inc.ID, runID)
 				return err
 			}
-		default:
 			rb, _, _, err := s.loadVersion(tx, m.RunbookID, m.Version)
 			if err != nil {
 				return err
@@ -345,13 +342,21 @@ func (s *Server) decideRemediation(ctx context.Context, tx *db.Tx, inc incidentR
 			if err := s.timeline(tx, inc.ID, "remediation.started", "system", "", msg, map[string]any{"run_id": runID, "hold": hold.String()}); err != nil {
 				return err
 			}
-			if err := s.notifyUpdate(tx, inc, svc.Name, msg); err != nil {
-				return err
-			}
+			return s.notifyUpdate(tx, inc, svc.Name, msg)
+		}
+		_, reason, err := s.tryAutoRun(ctx, tx, inc, m, alertCtx, a.Fingerprint, true, onStart)
+		if err != nil {
+			return err
+		}
+		switch {
+		case reason != "":
+			pageReason = "Auto-remediation " + m.Name + " did not start: " + reason
+		case inc.Severity == "critical":
+			pageReason = "Auto-remediation " + m.Name + " is running; critical incidents page in parallel"
 		}
 	}
 	for _, m := range parallel {
-		_, reason, err := s.tryAutoRun(ctx, tx, inc, m, alertCtx, a.Fingerprint, false)
+		_, reason, err := s.tryAutoRun(ctx, tx, inc, m, alertCtx, a.Fingerprint, false, nil)
 		if err != nil {
 			return err
 		}
@@ -377,9 +382,11 @@ func (s *Server) decideRemediation(ctx context.Context, tx *db.Tx, inc incidentR
 
 // tryAutoRun checks the guardrails and starts an auto run. It returns a
 // non-empty reason, and no run, when a guardrail blocks it.
-func (s *Server) tryAutoRun(ctx context.Context, tx *db.Tx, inc incidentRow, m triggerMatch, alertCtx map[string]any, fingerprint string, beforePaging bool) (runID, reason string, err error) {
+func (s *Server) tryAutoRun(ctx context.Context, tx *db.Tx, inc incidentRow, m triggerMatch, alertCtx map[string]any, fingerprint string, beforePaging bool, onStart func(runID string) error) (runID, reason string, err error) {
 	var frozen sql.NullTime
-	if err := tx.QueryRow(`SELECT frozen_at FROM orgs`).Scan(&frozen); err != nil {
+	// FOR SHARE, like a manual start: a freeze committing meanwhile waits for
+	// this transaction, then its sweep sees (and cancels) the run started here.
+	if err := tx.QueryRow(`SELECT frozen_at FROM orgs FOR SHARE`).Scan(&frozen); err != nil {
 		return "", "", err
 	}
 	if frozen.Valid {
@@ -443,7 +450,7 @@ func (s *Server) tryAutoRun(ctx context.Context, tx *db.Tx, inc incidentRow, m t
 		VersionID: versionID, Digest: digest, Runbook: rb, Params: params,
 		IncidentID: inc.ID, Fingerprint: fingerprint, TriggerType: "alert", Mode: "auto",
 		RequestedByType: "trigger", RequestedByID: m.Name + "@" + fmt.Sprint(m.Version),
-		BeforePaging: beforePaging, Alert: alertCtx, Incident: incCtx,
+		BeforePaging: beforePaging, Alert: alertCtx, Incident: incCtx, OnStart: onStart,
 	})
 	return runID, "", err
 }
@@ -456,8 +463,9 @@ const FlapGuardThreshold = 3
 // page moves the incident to triggered and sends pages to every escalation
 // target on the service (falling back to the catch-all service's targets).
 func (s *Server) page(ctx context.Context, tx *db.Tx, inc incidentRow, reason string) error {
-	if _, err := tx.Exec(`UPDATE incidents SET status = CASE WHEN status = 'acknowledged' THEN status ELSE 'triggered' END,
-		paged_at = now(), hold_until = NULL, verify_until = NULL WHERE id = $1`, inc.ID); err != nil {
+	var status string
+	if err := tx.QueryRow(`UPDATE incidents SET status = CASE WHEN status = 'acknowledged' THEN status ELSE 'triggered' END,
+		paged_at = now(), hold_until = NULL, verify_until = NULL WHERE id = $1 RETURNING status`, inc.ID).Scan(&status); err != nil {
 		return err
 	}
 	if err := s.timeline(tx, inc.ID, "incident.paged", "system", "", "Paging on-call: "+reason, nil); err != nil {
@@ -469,6 +477,15 @@ func (s *Server) page(ctx context.Context, tx *db.Tx, inc incidentRow, reason st
 	})
 	if err != nil {
 		return err
+	}
+	if status == "acknowledged" {
+		// Someone already owns it (acknowledged while the page was held): the
+		// upstream page must not escalate to the next person.
+		if _, err := s.enqueue(tx, inc, "acknowledge", []string{"pagerduty"}, map[string]any{
+			"title": inc.Title, "reason": "Already acknowledged in Nightfix", "service": svcName, "severity": inc.Severity,
+		}); err != nil {
+			return err
+		}
 	}
 	if n == 0 {
 		return s.timeline(tx, inc.ID, "incident.page_undeliverable", "system", "",

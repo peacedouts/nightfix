@@ -945,6 +945,18 @@ func (s *Server) apiStartRun(r *http.Request, p principal) (any, error) {
 		if v == 0 {
 			v = latest
 		}
+		if v != latest {
+			// An earlier version may lack approval gates or role limits the
+			// current one added; running it is a rollback, which only admins
+			// (within the current version's scope) may do.
+			cur, _, _, err := s.loadVersion(tx, rbID, latest)
+			if err != nil {
+				return err
+			}
+			if err := p.can("admin", runbookResource(cur.Metadata.Team, cur.Metadata.Tags, selector(cur))); err != nil {
+				return httpError{http.StatusForbidden, fmt.Sprintf("only admins can start an earlier version of %s (latest is %d)", req.Runbook, latest)}
+			}
+		}
 		rb, vid, digest, err := s.loadVersion(tx, rbID, v)
 		if err != nil {
 			return err
