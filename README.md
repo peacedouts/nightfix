@@ -127,7 +127,10 @@ The database schema runs on managed Postgres without a superuser: CI runs every 
 ## Tests
 
 ```bash
-make test   # starts a throwaway Postgres on :54329 unless NIGHTFIX_TEST_ADMIN_DSN is set
+make test        # starts a throwaway Postgres on :54329 unless NIGHTFIX_TEST_ADMIN_DSN is set
+make test-race   # what CI runs: race detector, shuffled order, coverage summary (fails under 75%)
 ```
+
+CI also runs `govulncheck`, and both demos with `DEMO_CHECK=1`, which fails if the demo's story (auto-fixed with nobody paged; or paged, then resolved upstream) didn't happen. Run the tests as CI does, as a non-superuser admin (`CREATEROLE CREATEDB`): a superuser bypasses row-level security, so some failures only show up that way.
 
 The end-to-end tests cover: IAM enrollment (and its rejection of an unmatched role, a replayed nonce, an org/nonce that isn't inside the signature, a different STS action, and a forged signature), token enrollment as a fallback, scoped RBAC through Auth0 tokens (including republish takeover, privilege escalation, unlinked orgs, wrong audience, and group removal), auto-remediation with no page, a failed fix that pages and then auto-resolves upstream, an injection attempt in alert labels (refused by the parameter pattern; no ECS call is made), and forged or wrong-topic SNS messages (rejected before anything is stored). The database tests cover RLS isolation, cross-org write rejection, fail-closed queries without an org, composite foreign keys, and the audit chain.

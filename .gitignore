@@ -10,3 +10,5 @@ website/
 
 # Claude Code session state
 .claude/
+cover.out
+test.log

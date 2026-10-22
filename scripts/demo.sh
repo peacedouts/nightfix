@@ -127,3 +127,19 @@ print("  pagerduty: " + (", ".join("%s %s" % (p["event_action"], p["dedup_key"])
 print("  aws calls: " + ", ".join(d["aws_calls"] or []))'
 echo
 echo "Logs: $WORK"
+
+# CI (DEMO_CHECK=1) fails the run if the story didn't happen as told.
+if [ "${DEMO_CHECK:-}" = 1 ]; then
+  inc="$(api "$API/v1/incidents/1")"
+  curl -fsS "$STUB/state" | SCENARIO="$SCENARIO" INC="$inc" python3 -c '
+import json, os, sys
+d, inc = json.load(sys.stdin), json.loads(os.environ["INC"])
+pd = [p["event_action"] for p in d["pagerduty"] or []]
+if os.environ["SCENARIO"] == "fail":
+    ok = inc["status"] == "resolved" and pd == ["trigger", "resolve"]
+else:
+    ok = inc["status"] == "resolved" and inc["resolution"] == "auto_remediated" and pd == []
+if not ok:
+    sys.exit("demo check failed: incident %s/%s, PagerDuty %s" % (inc["status"], inc["resolution"], pd))
+print("demo check passed")'
+fi

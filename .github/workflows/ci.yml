@@ -33,13 +33,59 @@ jobs:
           psql -h localhost -U postgres -c "CREATE ROLE rds_admin LOGIN PASSWORD 'rds' CREATEROLE CREATEDB NOSUPERUSER"
           psql -h localhost -U postgres -c "GRANT pg_signal_backend TO rds_admin"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Build and test with a supported Go release (each is supported until
+      # two newer ones exist; 1.24 stopped getting security fixes in Feb
+      # 2026). go.mod's "go 1.24" is only the minimum. Keep in step with the
+      # Dockerfile's golang image.
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go.mod
+          go-version: "1.26.x"
+          check-latest: true # the newest patch release, not the runner's cached one
       - run: go mod verify
       - run: go vet ./...
       - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
-      - run: go test -count=1 ./...
+      # Race detector on, test order shuffled (the seed is printed, so a
+      # failure can be replayed with -shuffle=<seed>), and coverage counted
+      # across packages so end-to-end tests credit the code they exercise.
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          status=0
+          go test -race -shuffle=on -count=1 -coverpkg=./... -coverprofile=cover.out ./... 2>&1 | tee test.log || status=$?
+          # Surface failures as annotations on the PR (with the shuffle seed
+          # to replay them), not only in the raw log.
+          grep -E -e '--- FAIL|^FAIL|panic:|_test\.go:[0-9]+:|-test.shuffle' test.log | head -60 | sed 's/^/::error::/' || true
+          exit $status
+      - name: Coverage
+        run: scripts/coverage.sh cover.out 75 | tee -a "$GITHUB_STEP_SUMMARY"
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true # the newest patch release, not the runner's cached one
+      # Known vulnerabilities in dependencies and the Go toolchain that the
+      # code actually reaches.
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  demo:
+    # The demos are what design partners see; make sure both still tell
+    # the story they claim (DEMO_CHECK fails the job if not).
+    runs-on: ubuntu-24.04
+    env:
+      DEMO_CHECK: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true # the newest patch release, not the runner's cached one
+      - run: make demo
+      - run: make demo-fail
 
   terraform:
     runs-on: ubuntu-latest

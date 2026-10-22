@@ -175,7 +175,7 @@ The agents enroll by proving they hold that role, with no tokens to copy or leak
 ## Supply-chain items to finish by hand
 
 Two pins need registry access this repository's automation sessions don't have. Do them once from your machine:
-- **Base images.** In the `Dockerfile`, pin `golang:1.24`, `gcr.io/distroless/static-debian12:nonroot` and `debian:bookworm-slim` by digest (`docker buildx imagetools inspect <image>` shows it), e.g. `FROM golang:1.24@sha256:…`. Dependabot (`.github/dependabot.yml`) then keeps them current.
+- **Base images.** In the `Dockerfile`, pin `golang:1.26`, `gcr.io/distroless/static-debian12:nonroot` and `debian:bookworm-slim` by digest (`docker buildx imagetools inspect <image>` shows it), e.g. `FROM golang:1.26@sha256:…`. Dependabot (`.github/dependabot.yml`) then keeps them current.
 - **The RDS CA bundle.** Add `--checksum=sha256:<sum>` to the `ADD` line, where `<sum>` is `curl -s https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem | sha256sum`. When AWS updates the bundle the build fails until you update the sum, which is the point.
 
 ## Not verified on real AWS yet

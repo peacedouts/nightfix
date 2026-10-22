@@ -4,7 +4,7 @@
 #   docker build --target agent -t nightfix-agent .
 # Go cross-compiles, so the build stage runs natively and only the final
 # stages are per-architecture (amd64 and arm64/Graviton).
-FROM --platform=$BUILDPLATFORM golang:1.24 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./

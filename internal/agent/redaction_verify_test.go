@@ -841,10 +841,11 @@ func TestVerifyStreamPerformance(t *testing.T) {
 				t.Fatalf("value leaked in perf run")
 			}
 		}
-		if total := writes + closing; total > time.Second {
-			t.Errorf("SLOW: streamer spent %v on 1 MiB (limit ~1s)", total)
+		budget := perfBudgetScale * time.Second
+		if total := writes + closing; total > budget {
+			t.Errorf("SLOW: streamer spent %v on 1 MiB (limit %v)", total, budget)
 		}
-		if writes+closing+tResult > time.Second {
+		if writes+closing+tResult > budget {
 			t.Errorf("SLOW: streamer + result redaction for one 1 MiB step = %v", writes+closing+tResult)
 		}
 	})
@@ -873,7 +874,7 @@ func TestVerifyStreamPerformance(t *testing.T) {
 			if held > red.maxNeedle() {
 				t.Errorf("STALL: %d of %d bytes held back (not streamed) until the step ended; hold should be < %d", held, size, red.maxNeedle())
 			}
-			if writes+closing > time.Second {
+			if writes+closing > perfBudgetScale*time.Second {
 				t.Errorf("SLOW: %v for only %d KiB (budget ~1s per MiB)", writes+closing, size>>10)
 			}
 		}
