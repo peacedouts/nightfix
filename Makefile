@@ -13,7 +13,7 @@ test:
 test-race:
 	@set -e; DSN="$${NIGHTFIX_TEST_ADMIN_DSN:-$$(scripts/dev-postgres.sh start)}"; \
 	NIGHTFIX_TEST_ADMIN_DSN="$$DSN" go test -race -shuffle=on -count=1 -coverpkg=./... -coverprofile=cover.out ./...
-	scripts/coverage.sh cover.out 75
+	scripts/coverage.sh cover.out 80
 
 cover: test-race
 

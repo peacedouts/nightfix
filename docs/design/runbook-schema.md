@@ -60,9 +60,9 @@ A map of parameter name to definition.
 | `required` | bool | Default `false` |
 | `default` | any | Must match `type` |
 | `from` | CEL | Resolve from trigger context, e.g. `alert.labels.service` |
-| `pattern` | regex | For `string`. **Required if `from` is set** |
+| `pattern` | regex | For `string` and `duration`; always anchored to the whole value. **Required if `from` is set** |
 | `values` | list | For `enum` |
-| `min` / `max` | number / duration | For `int` / `duration` |
+| `min` / `max` | number / duration | For `int` (a number) / `duration` (a duration string). Ints must be whole and within ±(2^53−1) |
 
 Resolution order: the value supplied by the user or API, then `from`, then `default`. A run fails validation before execution if a required parameter is missing or invalid.
 
@@ -143,9 +143,9 @@ Steps run in order. Every step has these common fields:
 | `id` | string | Unique within the runbook; referenced as `steps.<id>` |
 | `name` | string | Display name |
 | `type` | see below | Required |
-| `when` | CEL | Skip the step if false |
+| `when` | CEL | Skip the step if false. Bare CEL (no `${{ }}`), evaluated on the control plane; it must be a condition, and one that errors fails the run rather than skipping or running the step |
 | `timeout` | duration | Default `5m` |
-| `retries` | int | Default `0`; exponential backoff |
+| `retries` | int | Default `0`, max 10. Failed and timed-out attempts back off from 2s, doubling, to at most 1m; a lost step is retried only if it's idempotent |
 | `onFailure` | `stop` \| `continue` \| `escalate` | Default `stop` (then runbook-level `onFailure`) |
 | `outputs` | map name → CEL | Evaluated against `result`; available to later steps as `steps.<id>.outputs.<name>` |
 
@@ -187,7 +187,7 @@ onFailure:
 
 ## 4. Templating and context
 
-The syntax is `${{ <CEL expression> }}`. It's allowed in parameter `from`, `when`, `outputs`, `until`, `aws.input`, `http` fields, `env` / `files` values, and `onFailure.message`. It's **not** allowed in `run:`.
+The syntax is `${{ <CEL expression> }}`. It's allowed in `aws.input`, `http` fields, `env` / `files` values, and `onFailure.message`. Parameter `from`, `when`, `outputs`, `until` and trigger `match` are bare CEL, without `${{ }}`. Templating is **not** allowed in `run:`. Secrets are referenced only as `secrets.<name>`.
 
 Context available to expressions:
 

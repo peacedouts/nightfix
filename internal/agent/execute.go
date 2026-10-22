@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -123,6 +124,18 @@ func secretMaterial(step runbook.Step, res map[string]any) []string {
 			}
 		}
 	}
+	// A blob is base64 on the wire; an output can decode it
+	// (base64.decode(result.Plaintext)), so the raw bytes are secret too.
+	blob := func(m any, k string) {
+		if mm, ok := m.(map[string]any); ok {
+			if s, ok := mm[k].(string); ok && s != "" {
+				out = append(out, s)
+				if b, err := base64.StdEncoding.DecodeString(s); err == nil && len(b) > 0 {
+					out = append(out, string(b))
+				}
+			}
+		}
+	}
 	param := func(p any) {
 		if mm, ok := p.(map[string]any); ok && mm["Type"] == "SecureString" {
 			str(mm, "Value")
@@ -135,18 +148,26 @@ func secretMaterial(step runbook.Step, res map[string]any) []string {
 			}
 		}
 	}
-	switch service + ":" + action {
-	case "secretsmanager:GetSecretValue":
+	// AWS matches operation names exactly, but compare without case anyway:
+	// a miss here would publish a secret.
+	switch strings.ToLower(service + ":" + action) {
+	case "secretsmanager:getsecretvalue":
 		str(res, "SecretString")
-		str(res, "SecretBinary")
-	case "secretsmanager:BatchGetSecretValue":
-		list("SecretValues", func(e any) { str(e, "SecretString"); str(e, "SecretBinary") })
-	case "ssm:GetParameter":
+		blob(res, "SecretBinary")
+	case "secretsmanager:batchgetsecretvalue":
+		list("SecretValues", func(e any) { str(e, "SecretString"); blob(e, "SecretBinary") })
+	case "secretsmanager:getrandompassword":
+		str(res, "RandomPassword")
+	case "ssm:getparameter":
 		param(res["Parameter"])
-	case "ssm:GetParameters", "ssm:GetParametersByPath":
+	case "ssm:getparameters", "ssm:getparametersbypath", "ssm:getparameterhistory":
 		list("Parameters", param)
-	case "kms:Decrypt", "kms:GenerateDataKey", "kms:GenerateRandom":
-		str(res, "Plaintext")
+	case "kms:decrypt", "kms:generatedatakey", "kms:generaterandom":
+		blob(res, "Plaintext")
+	case "kms:generatedatakeypair":
+		blob(res, "PrivateKeyPlaintext")
+	case "kms:derivesharedsecret":
+		blob(res, "SharedSecret")
 	}
 	return out
 }

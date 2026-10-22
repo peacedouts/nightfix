@@ -140,6 +140,29 @@ func Check(src string) error {
 	return err
 }
 
+// CheckBool is Check for an expression used as a condition (a trigger or
+// routing match, a when or until). Variables are dynamically typed, so most
+// conditions only show their type when evaluated; but one whose type is
+// known and isn't bool (a string, a number, a size()) could never be true,
+// and is refused instead of silently never matching.
+func CheckBool(src string) error {
+	if err := Check(src); err != nil {
+		return err
+	}
+	e, err := getEnv()
+	if err != nil {
+		return err
+	}
+	ast, iss := e.Compile(src)
+	if iss != nil && iss.Err() != nil {
+		return iss.Err()
+	}
+	if t := ast.OutputType(); !t.IsExactType(cel.BoolType) && !t.IsExactType(cel.DynType) {
+		return fmt.Errorf("expression %q is a %s, not a condition (true or false)", src, t)
+	}
+	return nil
+}
+
 func program(src string) (cel.Program, error) {
 	cacheMu.Lock()
 	p, ok := cache[src]

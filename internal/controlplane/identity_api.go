@@ -90,7 +90,7 @@ func (s *Server) apiListTeams(r *http.Request, p principal) (any, error) {
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
 		rows, err := tx.Query(`SELECT t.slug, t.name, COALESCE(t.auth0_group,''), count(m.user_id)
 			FROM teams t LEFT JOIN team_members m ON m.team_id = t.id
-			WHERE t.archived_at IS NULL GROUP BY t.id ORDER BY t.slug`)
+			WHERE t.archived_at IS NULL GROUP BY t.org_id, t.id ORDER BY t.slug`) // the primary key, so slug etc. can be selected
 		if err != nil {
 			return err
 		}
@@ -293,7 +293,12 @@ func (s *Server) apiListBindings(r *http.Request, p principal) (any, error) {
 		for rows.Next() {
 			var id, st, role, subj string
 			var sc db.JSON[Scope]
-			rows.Scan(&id, &st, &role, &sc, &subj)
+			if err := rows.Scan(&id, &st, &role, &sc, &subj); err != nil {
+				return err
+			}
+			if st == "api_key" {
+				subj = ids.Encode("key", subj) // as POST /v1/role-bindings takes it
+			}
 			out = append(out, map[string]any{"id": ids.Encode("rb", id), "subject_type": st, "subject": subj,
 				"role": role, "scope": sc.V})
 		}

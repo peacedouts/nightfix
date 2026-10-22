@@ -485,6 +485,8 @@ func (s *Server) send(ctx context.Context, typ, kind, secret string, cfg map[str
 		switch kind {
 		case "resolve":
 			ev["event_action"] = "resolve"
+		case "acknowledge":
+			ev["event_action"] = "acknowledge"
 		case "page":
 			ev["payload"] = map[string]any{
 				"summary":  truncate(fmt.Sprintf("#%v %v", p["incident_number"], p["title"]), 1024),

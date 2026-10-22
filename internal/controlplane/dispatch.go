@@ -195,12 +195,15 @@ func (s *Server) Hello(ctx context.Context, a agentIdentity, h agentapi.Hello) (
 	return &w, err
 }
 
+// renewLeases extends the leases of acknowledged attempts the agent lists.
+// A dispatched one isn't renewed: it must be acked within its first lease or
+// go back to the queue (agent-protocol.md §5.2).
 func (s *Server) renewLeases(tx *db.Tx, a agentIdentity, inFlight []string) error {
 	if len(inFlight) == 0 {
 		return nil
 	}
 	_, err := tx.Exec(`UPDATE step_attempts SET lease_expires_at = now() + $3::interval
-		WHERE agent_id = $1 AND id = ANY($2::uuid[]) AND state IN ('dispatched','running')`,
+		WHERE agent_id = $1 AND id = ANY($2::uuid[]) AND state = 'running'`,
 		a.AgentID, stringArray(inFlight), pgInterval(s.Cfg.LeaseDuration))
 	return err
 }
@@ -272,7 +275,8 @@ func (s *Server) pollOnce(ctx context.Context, a agentIdentity, req agentapi.Pol
 		err = tx.QueryRow(`SELECT a.id, a.run_id, a.step_id, a.step_index, a.attempt_number
 			FROM step_attempts a JOIN runbook_runs r ON r.id = a.run_id
 			JOIN runbook_versions v ON v.id = r.runbook_version_id
-			WHERE a.state = 'queued' AND r.status = 'running' AND r.target_selector <@ $1::jsonb
+			WHERE a.state = 'queued' AND (a.not_before IS NULL OR a.not_before <= now())
+			  AND r.status = 'running' AND r.target_selector <@ $1::jsonb
 			  AND (cardinality($2::text[]) = 0
 			       OR (v.canonical_json::jsonb #>> ARRAY['spec', 'steps', a.step_index::text, 'type']) = ANY($2::text[]))
 			ORDER BY a.created_at LIMIT 1 FOR UPDATE OF a SKIP LOCKED`, labels, caps).Scan(&attemptID, &runID, &stepID, &idx, &n)

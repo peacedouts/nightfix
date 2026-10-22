@@ -185,7 +185,7 @@ func (s *Server) advance(ctx context.Context, tx *db.Tx, runID string) error {
 			run.ID, idx, db.JSON[map[string]any]{V: run.Context}); err != nil {
 			return err
 		}
-		return s.queueAttempt(tx, run.ID, idx, step.ID, 1)
+		return s.queueAttempt(tx, run.ID, idx, step.ID, 1, 0)
 	}
 	if _, err := tx.Exec(`UPDATE runbook_runs SET current_step = $2, context = $3 WHERE id = $1`,
 		run.ID, len(rb.Spec.Steps), db.JSON[map[string]any]{V: run.Context}); err != nil {
@@ -194,10 +194,32 @@ func (s *Server) advance(ctx context.Context, tx *db.Tx, runID string) error {
 	return s.finishRun(ctx, tx, run, rb, "succeeded", "")
 }
 
-func (s *Server) queueAttempt(tx *db.Tx, runID string, idx int, stepID string, n int) error {
-	_, err := tx.Exec(`INSERT INTO step_attempts (id, org_id, run_id, step_index, step_id, attempt_number, state)
-		VALUES ($1,$2,$3,$4,$5,$6,'queued')`, ids.NewString(), tx.OrgID, runID, idx, stepID, n)
+// queueAttempt queues attempt n of a step; polls don't hand it out until
+// delay has passed.
+func (s *Server) queueAttempt(tx *db.Tx, runID string, idx int, stepID string, n int, delay time.Duration) error {
+	var wait sql.NullString
+	if delay > 0 {
+		wait = sql.NullString{String: pgInterval(delay), Valid: true}
+	}
+	_, err := tx.Exec(`INSERT INTO step_attempts (id, org_id, run_id, step_index, step_id, attempt_number, state, not_before)
+		VALUES ($1,$2,$3,$4,$5,$6,'queued', now() + $7::interval)`, ids.NewString(), tx.OrgID, runID, idx, stepID, n, wait)
 	return err
+}
+
+// Retry backoff for failed and timed-out attempts: 2s before the first
+// retry, doubling, at most a minute.
+const (
+	retryBackoffBase = 2 * time.Second
+	retryBackoffMax  = time.Minute
+)
+
+// retryBackoff is the wait before attempt n (n >= 2) of a step.
+func retryBackoff(n int) time.Duration {
+	d := retryBackoffBase
+	for i := 2; i < n && d < retryBackoffMax; i++ {
+		d *= 2
+	}
+	return min(d, retryBackoffMax)
 }
 
 // recordStep stores a step's status and outputs where later steps read them
@@ -300,8 +322,10 @@ func (s *Server) onAttemptFinished(ctx context.Context, tx *db.Tx, attemptID str
 	case "lost":
 		// The agent vanished mid-step. Only steps known to be safe to repeat
 		// are retried; anything else may or may not have happened.
+		// No backoff: the expired lease already waited, and the retry is for
+		// another agent.
 		if step.IsIdempotent() && n <= step.Retries {
-			return s.queueAttempt(tx, run.ID, idx, step.ID, n+1)
+			return s.queueAttempt(tx, run.ID, idx, step.ID, n+1, 0)
 		}
 		s.recordStep(run, step.ID, "lost", nil)
 		return s.finishRun(ctx, tx, run, rb, "needs_human",
@@ -312,7 +336,7 @@ func (s *Server) onAttemptFinished(ctx context.Context, tx *db.Tx, attemptID str
 
 	default: // failed, timed_out, rejected
 		if state != "rejected" && n <= step.Retries {
-			return s.queueAttempt(tx, run.ID, idx, step.ID, n+1)
+			return s.queueAttempt(tx, run.ID, idx, step.ID, n+1, retryBackoff(n+1))
 		}
 		s.recordStep(run, step.ID, state, out.Outputs)
 		errMsg := fmt.Sprintf("step %s %s", step.ID, state)

@@ -159,8 +159,9 @@ func (s *Server) reopenIncident(ctx context.Context, tx *db.Tx, incID, alertID s
 		WHERE id = (SELECT remediation_run_id FROM incidents WHERE id = $1) AND verified`, incID); err != nil {
 		return err
 	}
+	// Reopened, it needs someone to own it again: an earlier ack doesn't carry over.
 	if _, err := tx.Exec(`UPDATE incidents SET status = 'triggered', resolved_at = NULL, resolution = NULL,
-		hold_until = NULL, verify_until = NULL WHERE id = $1`, incID); err != nil {
+		ack_at = NULL, hold_until = NULL, verify_until = NULL WHERE id = $1`, incID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`INSERT INTO incident_alerts (org_id, incident_id, alert_id) VALUES ($1,$2,$3)
@@ -168,6 +169,11 @@ func (s *Server) reopenIncident(ctx context.Context, tx *db.Tx, incID, alertID s
 		return err
 	}
 	if err := s.timeline(tx, incID, "incident.reopened", "system", "", "Incident reopened: alert re-fired within the reopen window", nil); err != nil {
+		return err
+	}
+	// The re-fired alert may be more severe than the incident was, and the
+	// page below must carry the incident's real severity.
+	if err := s.raiseSeverity(ctx, tx, incID, a.Severity); err != nil {
 		return err
 	}
 	inc, err := s.loadIncident(tx, incID, true)

@@ -121,6 +121,7 @@ func Lint(rb *Runbook) Issues {
 				add(path+".from", "%v", err)
 			}
 		}
+		lintBounds(path, p, add)
 		if p.Default != nil {
 			if _, err := coerceParam(name, p, p.Default); err != nil {
 				add(path+".default", "%v", err)
@@ -194,7 +195,7 @@ func Lint(rb *Runbook) Issues {
 		}
 		if t.Match == "" {
 			add(path+".match", "alert triggers need a match expression")
-		} else if err := expr.Check(t.Match); err != nil {
+		} else if err := expr.CheckBool(t.Match); err != nil {
 			add(path+".match", "%v", err)
 		}
 		switch t.Mode {
@@ -240,9 +241,48 @@ func Lint(rb *Runbook) Issues {
 	return is
 }
 
+// lintBounds checks min/max: numbers for int, duration strings for duration,
+// and min no greater than max. (A bound that can't be read would otherwise
+// fail every run, or, before, silently read as 0.)
+func lintBounds(path string, p Param, add func(string, string, ...any)) {
+	switch p.Type {
+	case "int":
+		lo, lok := toFloat(p.Min)
+		hi, hok := toFloat(p.Max)
+		if p.Min != nil && !lok {
+			add(path+".min", "must be a number")
+		}
+		if p.Max != nil && !hok {
+			add(path+".max", "must be a number")
+		}
+		if p.Min != nil && p.Max != nil && lok && hok && lo > hi {
+			add(path, "min is greater than max")
+		}
+	case "duration":
+		lo, lok := toDuration(p.Min)
+		hi, hok := toDuration(p.Max)
+		if p.Min != nil && !lok {
+			add(path+".min", "must be a duration such as 30s or 5m")
+		}
+		if p.Max != nil && !hok {
+			add(path+".max", "must be a duration such as 30s or 5m")
+		}
+		if p.Min != nil && p.Max != nil && lok && hok && lo > hi {
+			add(path, "min is greater than max")
+		}
+	}
+}
+
 func lintStep(path string, s Step, rb *Runbook, add func(string, string, ...any)) {
+	// when: and until: are decided without secrets (on the control plane, and
+	// on the agent with only the check's result).
+	for _, f := range [][2]string{{"when", s.When}, {"until", s.Until}} {
+		if secretIdentRe.MatchString(f[1]) {
+			add(path+"."+f[0], "secrets may only be referenced in env, files or http headers")
+		}
+	}
 	if s.When != "" {
-		if err := expr.Check(s.When); err != nil {
+		if err := expr.CheckBool(s.When); err != nil {
 			add(path+".when", "%v", err)
 		} else if whenTargetRe.MatchString(s.When) {
 			// when: is evaluated on the control plane, before an agent is
@@ -348,7 +388,7 @@ func lintStep(path string, s Step, rb *Runbook, add func(string, string, ...any)
 		}
 		if s.Until == "" {
 			add(path+".until", "is required")
-		} else if err := expr.Check(s.Until); err != nil {
+		} else if err := expr.CheckBool(s.Until); err != nil {
 			add(path+".until", "%v", err)
 		}
 		if s.Interval != "" {
@@ -392,10 +432,23 @@ var whenTargetRe = regexp.MustCompile(`\btarget\b`)
 
 var secretUseRe = regexp.MustCompile(`secrets\.([A-Za-z_][A-Za-z0-9_]*)`)
 
+// secretIdentRe finds the secrets variable however it's spelled.
+var secretIdentRe = regexp.MustCompile(`\bsecrets\b`)
+
+// checkSecretRefs requires every secret a value uses to be declared. Only
+// the secrets.<name> form is accepted: it's the form SecretsUsed finds, so a
+// secret spelled any other way (secrets["db"], secrets . db, a quoted CEL
+// identifier) would never be resolved, and therefore never redacted.
 func checkSecretRefs(path, v string, rb *Runbook, add func(string, string, ...any)) {
 	for _, m := range secretUseRe.FindAllStringSubmatch(v, -1) {
 		if _, ok := rb.Spec.Secrets[m[1]]; !ok {
 			add(path, "references undeclared secret %q", m[1])
+		}
+	}
+	for _, e := range expr.TemplateExprs(v) {
+		if secretIdentRe.MatchString(secretUseRe.ReplaceAllString(e, "")) {
+			add(path, "reference secrets as secrets.<name>")
+			return
 		}
 	}
 }

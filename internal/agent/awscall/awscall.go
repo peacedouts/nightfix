@@ -73,6 +73,9 @@ func (c *Client) endpoint(service string) string {
 	return fmt.Sprintf("https://%s.%s.amazonaws.com/", service, c.cfg.Region)
 }
 
+// maxErrorBody bounds how much of a non-AWS error body an Error keeps.
+const maxErrorBody = 256
+
 // Error is an AWS API error.
 type Error struct {
 	Service, Action, Code, Message string
@@ -126,13 +129,30 @@ func (c *Client) Call(ctx context.Context, service, action string, input map[str
 			Msg     string `json:"Message"`
 		}
 		json.Unmarshal(raw, &e)
+		// The code is in the body's __type, or only in X-Amzn-ErrorType
+		// ("Code:http://…"); either may carry a "namespace#" prefix.
 		code := e.Type
+		if code == "" {
+			code = resp.Header.Get("X-Amzn-ErrorType")
+		}
+		if i := strings.Index(code, ":"); i >= 0 {
+			code = code[:i]
+		}
 		if i := strings.LastIndex(code, "#"); i >= 0 {
 			code = code[i+1:]
 		}
 		msg := e.Message
 		if msg == "" {
 			msg = e.Msg
+		}
+		if code == "" && msg == "" {
+			// Not an AWS error document (a proxy or load balancer page):
+			// keep the start of the body so the failure says something.
+			msg = string(bytes.TrimSpace(raw))
+			if len(msg) > maxErrorBody {
+				msg = strings.ToValidUTF8(msg[:maxErrorBody], "") + "…"
+			}
+			code = http.StatusText(resp.StatusCode)
 		}
 		return nil, &Error{Service: service, Action: action, Code: code, Message: msg, Status: resp.StatusCode}
 	}

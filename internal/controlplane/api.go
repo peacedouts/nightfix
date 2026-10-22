@@ -190,7 +190,7 @@ func (s *Server) apiCreateService(r *http.Request, p principal) (any, error) {
 }
 
 func (s *Server) apiListServices(r *http.Request, p principal) (any, error) {
-	var out []map[string]any
+	out := []map[string]any{}
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
 		rows, err := tx.Query(`SELECT ` + serviceCols + ` FROM services WHERE archived_at IS NULL ORDER BY name`)
 		if err != nil {
@@ -464,7 +464,7 @@ func (s *Server) apiPutRoutingRules(r *http.Request, p principal) (any, error) {
 			return err
 		}
 		for i, rule := range req {
-			if err := expr.Check(rule.Match); err != nil {
+			if err := expr.CheckBool(rule.Match); err != nil {
 				return httpError{400, fmt.Sprintf("rule %d: %v", i, err)}
 			}
 			action := rule.Action
@@ -472,13 +472,23 @@ func (s *Server) apiPutRoutingRules(r *http.Request, p principal) (any, error) {
 				action = "route"
 			}
 			var svc sql.NullString
-			if action == "route" {
+			switch action {
+			case "route":
 				id, err := s.serviceIDByName(tx, rule.Service)
+				var he httpError
+				if errors.As(err, &he) && he.code == http.StatusNotFound {
+					// A bad request, not a missing resource: the rule set is refused.
+					return httpError{400, fmt.Sprintf("rule %d: no service named %q", i, rule.Service)}
+				}
 				if err != nil {
 					return err
 				}
 				svc = sql.NullString{String: id, Valid: true}
-			} else if action != "suppress" {
+			case "suppress":
+				if rule.Service != "" {
+					return httpError{400, fmt.Sprintf("rule %d: a suppress rule doesn't route, so it can't name a service", i)}
+				}
+			default:
 				return httpError{400, fmt.Sprintf("rule %d: action must be route or suppress", i)}
 			}
 			if _, err := tx.Exec(`INSERT INTO routing_rules (id, org_id, priority, match, action, service_id) VALUES ($1,$2,$3,$4,$5,$6)`,
@@ -866,18 +876,33 @@ func (s *Server) apiPublishRunbook(r *http.Request, p principal) (any, error) {
 	return out, err
 }
 
+// apiGetRunbook returns the runbook's latest version, or the one named by
+// ?version=N, with its digest and source.
 func (s *Server) apiGetRunbook(r *http.Request, p principal) (any, error) {
+	want := 0 // latest
+	if v := r.URL.Query().Get("version"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return nil, httpError{400, "version must be a positive integer"}
+		}
+		want = n
+	}
 	var out map[string]any
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
 		var title string
-		var version int
+		var version, latest int
 		var digest, src string
-		if err := tx.QueryRow(`SELECT r.title, r.latest_version, v.digest, v.source_yaml FROM runbooks r
-			JOIN runbook_versions v ON v.runbook_id = r.id AND v.version = r.latest_version WHERE r.name = $1`,
-			r.PathValue("name")).Scan(&title, &version, &digest, &src); err != nil {
+		if err := tx.QueryRow(`SELECT r.title, v.version, r.latest_version, v.digest, v.source_yaml FROM runbooks r
+			JOIN runbook_versions v ON v.runbook_id = r.id
+			WHERE r.name = $1 AND v.version = COALESCE(NULLIF($2, 0), r.latest_version)`,
+			r.PathValue("name"), want).Scan(&title, &version, &latest, &digest, &src); err != nil {
+			if isNoRows(err) {
+				return httpError{404, "no such runbook or version"}
+			}
 			return err
 		}
-		out = map[string]any{"name": r.PathValue("name"), "title": title, "version": version, "digest": digest, "source_yaml": src}
+		out = map[string]any{"name": r.PathValue("name"), "title": title, "version": version, "latest_version": latest,
+			"digest": digest, "source_yaml": src}
 		return nil
 	})
 	return out, err
@@ -1299,13 +1324,30 @@ func (s *Server) apiAck(r *http.Request, p principal) (any, error) {
 		if err := p.can("responder", s.incidentResource(tx, inc)); err != nil {
 			return err
 		}
-		if inc.Status == "resolved" {
+		switch inc.Status {
+		case "resolved":
 			return httpError{409, "incident is resolved"}
+		case "acknowledged":
+			return nil // already owned: keep the first ack (time and timeline entry)
 		}
 		if _, err := tx.Exec(`UPDATE incidents SET status = 'acknowledged', ack_at = now(), hold_until = NULL, verify_until = NULL WHERE id = $1`, inc.ID); err != nil {
 			return err
 		}
-		return s.timeline(tx, inc.ID, "incident.acknowledged", p.actorType(), p.actor(), "Acknowledged", nil)
+		msg := "Acknowledged by " + p.display()
+		if err := s.timeline(tx, inc.ID, "incident.acknowledged", p.actorType(), p.actor(), msg, nil); err != nil {
+			return err
+		}
+		svcName := s.serviceName(tx, inc.ServiceID)
+		if inc.PagedAt.Valid {
+			// Stop PagerDuty's escalation policy from paging the next person.
+			if _, err := s.enqueue(tx, inc, "acknowledge", []string{"pagerduty"}, map[string]any{
+				"title": inc.Title, "reason": msg, "service": svcName, "severity": inc.Severity,
+			}); err != nil {
+				return err
+			}
+		}
+		// The page went to the channel with @here; say that someone has it.
+		return s.notifyUpdate(tx, inc, svcName, msg)
 	})
 	return map[string]bool{"ok": err == nil}, err
 }

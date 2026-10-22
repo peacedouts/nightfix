@@ -75,6 +75,8 @@ type Agent struct {
 	inflight map[string]context.CancelFunc
 	seen     map[string]time.Time // attempt ids already accepted (replay guard)
 	frozen   bool
+
+	renewEvery time.Duration // renewCheckInterval when created
 }
 
 // New prepares an agent.
@@ -106,7 +108,7 @@ func New(cfg Config) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &Agent{cfg: cfg, c: c, inflight: map[string]context.CancelFunc{}, seen: map[string]time.Time{}}
+	a := &Agent{cfg: cfg, c: c, inflight: map[string]context.CancelFunc{}, seen: map[string]time.Time{}, renewEvery: renewCheckInterval}
 	if cfg.AllowlistMode != "off" {
 		al, err := loadAllowlist(cfg.AllowlistFile)
 		if err != nil {
@@ -117,8 +119,11 @@ func New(cfg Config) (*Agent, error) {
 	return a, nil
 }
 
-// ID returns the agent id once enrolled.
+// ID returns the agent id once enrolled. Safe to call while Run is running
+// (re-enrollment replaces the identity).
 func (a *Agent) ID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.id == nil {
 		return ""
 	}
@@ -147,14 +152,23 @@ func (a *Agent) Run(ctx context.Context) error {
 	// everything in flight so scripts are killed rather than orphaned.
 	defer a.cancelAll()
 
+	// backoff grows across failed hellos, polls and enrollments, and resets
+	// only once a poll succeeds: a hello that works followed by a poll that
+	// is refused (a revoked agent) must not retry every second forever.
 	backoff := time.Second
-	started, needHello := false, true
+	started, needHello, reenrolled := false, true, false
 	for ctx.Err() == nil {
+		// The gateway checks the certificate when a connection is opened, so a
+		// kept-alive connection goes on working after it expires. Treat expiry
+		// as a refusal here rather than waiting for a new connection.
+		if a.c.certExpired(time.Now()) {
+			needHello = true
+		}
 		// Hello again after any failed poll: it's how in-flight attempts are
 		// reconciled after an outage and how new trust config and labels
 		// reach a running agent.
 		if needHello {
-			if err := a.hello(ctx); err != nil {
+			if err := a.helloUnlessExpired(ctx); err != nil {
 				if ctx.Err() != nil {
 					continue
 				}
@@ -165,12 +179,23 @@ func (a *Agent) Run(ctx context.Context) error {
 					if a.cfg.EnrollMethod == "token" {
 						return fmt.Errorf("the gateway no longer accepts this agent's identity (%v); enroll it again with a new token", err)
 					}
+					if reenrolled {
+						// The identity just enrolled was refused too: back off
+						// rather than enroll (and use up an agent) in a loop.
+						a.cfg.Log.Warn("the new identity was rejected as well; waiting before enrolling again", "err", err, "in", backoff)
+						sleep(ctx, jitter(backoff))
+						backoff = min(backoff*2, time.Minute)
+						if ctx.Err() != nil {
+							continue
+						}
+					}
 					a.cfg.Log.Warn("the gateway rejected this agent's identity; enrolling again", "err", err)
 					if id, eerr := a.enroll(ctx); eerr != nil {
 						a.cfg.Log.Warn("re-enrollment failed; retrying", "err", eerr, "in", backoff)
 					} else if eerr := a.useIdentity(id); eerr != nil {
 						return eerr
 					} else {
+						reenrolled = true
 						continue
 					}
 				} else {
@@ -180,8 +205,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				backoff = min(backoff*2, time.Minute)
 				continue
 			}
-			needHello = false
-			backoff = time.Second
+			needHello, reenrolled = false, false
 			if !started {
 				started = true
 				go a.heartbeatLoop(ctx)
@@ -209,6 +233,9 @@ func (a *Agent) enroll(ctx context.Context) (*identity, error) {
 	}
 	var id *identity
 	var err error
+	// Enroll as nobody: the identity being replaced may be one the gateway
+	// refuses during the handshake.
+	a.c.clearCert()
 	switch a.cfg.EnrollMethod {
 	case "token":
 		if a.cfg.EnrollToken == "" {
@@ -233,13 +260,15 @@ func (a *Agent) enroll(ctx context.Context) (*identity, error) {
 	return id, nil
 }
 
+// useIdentity switches to id. The client certificate and a.id change under
+// one lock so a renewal finishing meanwhile can't pair one with the other.
 func (a *Agent) useIdentity(id *identity) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := a.c.setCert(id.CertPEM, id.KeyPEM); err != nil {
 		return err
 	}
-	a.mu.Lock()
 	a.id = id
-	a.mu.Unlock()
 	return nil
 }
 
@@ -251,10 +280,24 @@ func (a *Agent) persist() error {
 	return saveIdentity(a.cfg.StateDir, a.id)
 }
 
+// errCertExpired is the agent noticing its own certificate has expired.
+var errCertExpired = errors.New("the agent's certificate has expired")
+
+// helloUnlessExpired says hello, unless the certificate has already expired.
+func (a *Agent) helloUnlessExpired(ctx context.Context) error {
+	if a.c.certExpired(time.Now()) {
+		return errCertExpired
+	}
+	return a.hello(ctx)
+}
+
 // identityRejected reports whether the gateway refused the agent's
 // certificate itself (revoked, replaced, expired or unknown), as opposed to
 // an outage.
 func identityRejected(err error) bool {
+	if errors.Is(err, errCertExpired) {
+		return true
+	}
 	var se *statusError
 	if errors.As(err, &se) && se.Code == http.StatusUnauthorized {
 		return true
@@ -320,9 +363,23 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 	}
 }
 
+// renewCheckInterval is how often renewLoop looks at the certificate; a
+// failed renewal is retried at the same pace until the certificate expires
+// (then Run re-enrolls or stops).
+var renewCheckInterval = time.Minute
+
+// renewDue reports whether 2/3 of the certificate's lifetime has passed.
+func renewDue(issued, expires, now time.Time) bool {
+	return !expires.IsZero() && !now.Before(issued.Add(expires.Sub(issued)*2/3))
+}
+
 // renewLoop renews the certificate once 2/3 of its lifetime has passed.
 func (a *Agent) renewLoop(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	every := a.renewEvery
+	if every <= 0 {
+		every = time.Minute
+	}
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		select {
@@ -331,25 +388,36 @@ func (a *Agent) renewLoop(ctx context.Context) {
 		case <-t.C:
 		}
 		issued, expires := a.c.certExpiry()
-		if expires.IsZero() || time.Now().Before(issued.Add(expires.Sub(issued)*2/3)) {
+		if !renewDue(issued, expires, time.Now()) {
 			continue
 		}
+		a.mu.Lock()
+		renewing := a.id
+		a.mu.Unlock()
 		cert, key, err := a.c.renew(ctx)
 		if err != nil {
 			a.cfg.Log.Warn("certificate renewal failed", "err", err)
 			continue
 		}
-		if err := a.c.setCert(cert, key); err == nil {
-			a.mu.Lock()
-			a.id.CertPEM, a.id.KeyPEM = cert, key
+		a.mu.Lock()
+		if a.id != renewing {
+			// Re-enrolled while renewing: this certificate is the old identity's.
 			a.mu.Unlock()
-			if err := a.persist(); err != nil {
-				// The new certificate works in memory; on restart the old one
-				// is still accepted until it expires, then the agent re-enrolls.
-				a.cfg.Log.Error("could not save the renewed certificate", "err", err)
-			}
-			a.cfg.Log.Info("certificate renewed")
+			continue
 		}
+		if err := a.c.setCert(cert, key); err != nil {
+			a.mu.Unlock()
+			a.cfg.Log.Warn("the renewed certificate is unusable; retrying", "err", err)
+			continue
+		}
+		a.id.CertPEM, a.id.KeyPEM = cert, key
+		a.mu.Unlock()
+		if err := a.persist(); err != nil {
+			// The new certificate works in memory; on restart the old one
+			// is still accepted until it expires, then the agent re-enrolls.
+			a.cfg.Log.Error("could not save the renewed certificate", "err", err)
+		}
+		a.cfg.Log.Info("certificate renewed")
 	}
 }
 

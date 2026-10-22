@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/lib/pq"
 
@@ -105,6 +106,12 @@ func (s *Server) authenticateAgent(r *http.Request) (agentIdentity, error) {
 		return agentIdentity{}, authError("client certificate required")
 	}
 	cert := r.TLS.VerifiedChains[0][0]
+	// The handshake checked validity, but a kept-alive connection outlives
+	// it: without this an agent could keep working past its certificate's
+	// TTL, so a revoked enrollment rule's agents wouldn't lapse.
+	if now := time.Now(); now.After(cert.NotAfter) || now.Before(cert.NotBefore) {
+		return agentIdentity{}, authError("client certificate has expired")
+	}
 	a := agentIdentity{Serial: SerialHex(cert.SerialNumber)}
 	var isCurrent, hasPrev bool
 	if err := s.DB.QueryRowContext(r.Context(), `SELECT org_id, agent_id, is_current, has_prev FROM nfx_route_agent($1)`, a.Serial).

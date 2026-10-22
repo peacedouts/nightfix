@@ -356,7 +356,7 @@ func TestNoCAFileUsesSystemRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.http.Transport.(*http.Transport).TLSClientConfig.RootCAs != nil {
+	if c.transport().TLSClientConfig.RootCAs != nil {
 		t.Fatal("an empty CA pool trusts nothing; without --ca-file the system roots should be used")
 	}
 }

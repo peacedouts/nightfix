@@ -58,7 +58,7 @@ jobs:
           grep -E -e '--- FAIL|^FAIL|panic:|_test\.go:[0-9]+:|-test.shuffle' test.log | head -60 | sed 's/^/::error::/' || true
           exit $status
       - name: Coverage
-        run: scripts/coverage.sh cover.out 75 | tee -a "$GITHUB_STEP_SUMMARY"
+        run: scripts/coverage.sh cover.out 80 | tee -a "$GITHUB_STEP_SUMMARY"
 
   vulncheck:
     runs-on: ubuntu-latest

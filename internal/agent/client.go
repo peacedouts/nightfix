@@ -38,11 +38,12 @@ type identity struct {
 // client talks to the agent gateway over mutual TLS.
 type client struct {
 	endpoint string
-	http     *http.Client
+	http     *http.Client // its Transport is always the current one (currentTransport)
+	pool     *x509.CertPool
 
 	mu   sync.Mutex
-	cert *tls.Certificate
 	leaf *x509.Certificate
+	tr   *http.Transport // presents the current certificate
 }
 
 func newClient(endpoint string, caPEM []byte) (*client, error) {
@@ -55,24 +56,59 @@ func newClient(endpoint string, caPEM []byte) (*client, error) {
 			return nil, errors.New("could not parse CA certificate")
 		}
 	}
-	c := &client{endpoint: endpoint}
-	tlsCfg := &tls.Config{
-		RootCAs:    pool,
-		MinVersion: tls.VersionTLS13,
-		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			if c.cert == nil {
-				return &tls.Certificate{}, nil // enrollment: no client cert yet
-			}
-			return c.cert, nil
-		},
-	}
-	c.http = &http.Client{
-		Timeout:   60 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsCfg, Proxy: http.ProxyFromEnvironment, MaxIdleConnsPerHost: 8},
-	}
+	c := &client{endpoint: endpoint, pool: pool}
+	c.tr = c.newTransport(nil)
+	c.http = &http.Client{Timeout: 60 * time.Second, Transport: currentTransport{c}}
 	return c, nil
+}
+
+// newTransport returns a transport whose connections present cert (none
+// when nil: enrollment).
+func (c *client) newTransport(cert *tls.Certificate) *http.Transport {
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:    c.pool,
+			MinVersion: tls.VersionTLS13,
+			GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				if cert == nil {
+					return &tls.Certificate{}, nil
+				}
+				return cert, nil
+			},
+		},
+		Proxy:               http.ProxyFromEnvironment,
+		MaxIdleConnsPerHost: 8,
+		// Connections left on a replaced transport are closed once idle.
+		IdleConnTimeout: 90 * time.Second,
+	}
+}
+
+// currentTransport sends each request with the transport for the current
+// certificate.
+type currentTransport struct{ c *client }
+
+func (t currentTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return t.c.transport().RoundTrip(r)
+}
+
+func (c *client) transport() *http.Transport {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.tr
+}
+
+// switchCert starts presenting cert. A connection is tied to the certificate
+// it was opened with, so this needs a new transport: closing idle
+// connections isn't enough, because one busy at the time (a long poll)
+// would go back to the pool and carry later requests with the old
+// certificate. Once the gateway has seen the renewed certificate it retires
+// the old one, and that request would be refused as a revoked identity.
+func (c *client) switchCert(cert *tls.Certificate, leaf *x509.Certificate) {
+	c.mu.Lock()
+	old := c.tr
+	c.leaf, c.tr = leaf, c.newTransport(cert)
+	c.mu.Unlock()
+	old.CloseIdleConnections()
 }
 
 func (c *client) setCert(certPEM, keyPEM string) error {
@@ -84,13 +120,14 @@ func (c *client) setCert(certPEM, keyPEM string) error {
 	if err != nil {
 		return err
 	}
-	c.mu.Lock()
-	c.cert, c.leaf = &kp, leaf
-	c.mu.Unlock()
-	// Drop pooled connections so the next request presents the new cert.
-	c.http.Transport.(*http.Transport).CloseIdleConnections()
+	c.switchCert(&kp, leaf)
 	return nil
 }
+
+// clearCert stops presenting a client certificate. Enrollment needs none,
+// and one the gateway rejects at the TLS layer (expired, say) would fail the
+// enrollment's handshake as well.
+func (c *client) clearCert() { c.switchCert(nil, nil) }
 
 func (c *client) certExpiry() (issued, expires time.Time) {
 	c.mu.Lock()
@@ -99,6 +136,12 @@ func (c *client) certExpiry() (issued, expires time.Time) {
 		return time.Time{}, time.Time{}
 	}
 	return c.leaf.NotBefore, c.leaf.NotAfter
+}
+
+// certExpired reports whether the current certificate's NotAfter has passed.
+func (c *client) certExpired(now time.Time) bool {
+	_, exp := c.certExpiry()
+	return !exp.IsZero() && now.After(exp)
 }
 
 // statusError is a non-2xx response from the gateway.
@@ -203,7 +246,11 @@ func saveIdentity(dir string, id *identity) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(dir, "identity.json"))
+	if err := os.Rename(tmp, filepath.Join(dir, "identity.json")); err != nil {
+		os.Remove(tmp) // it holds the private key
+		return err
+	}
+	return nil
 }
 
 // checkStateDir makes sure the identity can be saved before enrolling.

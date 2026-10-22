@@ -124,3 +124,16 @@ func TestMacroAmplificationIsBounded(t *testing.T) {
 		t.Fatal("oversized result converted")
 	}
 }
+
+func TestCheckBool(t *testing.T) {
+	for _, ok := range []string{`true`, `alert.severity == "critical"`, `alert.labels.service`, `steps.a.outputs.ok`, `size(alert.labels) > 0`} {
+		if err := CheckBool(ok); err != nil {
+			t.Errorf("CheckBool(%s): %v", ok, err)
+		}
+	}
+	for _, bad := range []string{`"critical"`, `1 + 1`, `size(alert.labels)`, `alert.summary + "x"`, `[true]`} {
+		if err := CheckBool(bad); err == nil {
+			t.Errorf("CheckBool(%s) accepted a non-condition", bad)
+		}
+	}
+}

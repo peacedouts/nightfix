@@ -224,6 +224,9 @@ func newServer(ctx context.Context) (*controlplane.Server, error) {
 	if cfg.AllowPrivateTargets {
 		log.Warn("NIGHTFIX_DEV_ALLOW_PRIVATE_TARGETS is set: notification targets may point at any host, including internal addresses. Local development only.")
 	}
+	if p := os.Getenv("NIGHTFIX_SNS_DEV_CERT_PREFIX"); p != "" {
+		log.Warn("NIGHTFIX_SNS_DEV_CERT_PREFIX is set: SNS signing certificates are also trusted from a non-AWS URL. Local development only.", "prefix", p)
+	}
 	if cfg.STSEndpoint != "" {
 		log.Warn("NIGHTFIX_STS_DEV_ENDPOINT is set: IAM enrollment trusts a non-AWS STS. Local development only.")
 	}

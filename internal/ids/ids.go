@@ -81,7 +81,12 @@ func Parse(s string) (UUID, error) {
 	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
 		return u, fmt.Errorf("invalid uuid %q", s)
 	}
+	// Exactly 32 hex digits: a dash anywhere else ("--345678-…") would
+	// otherwise drop out and leave a short, still-decodable string.
 	h := strings.ReplaceAll(s, "-", "")
+	if len(h) != 32 {
+		return u, fmt.Errorf("invalid uuid %q", s)
+	}
 	if _, err := hex.Decode(u[:], []byte(h)); err != nil {
 		return u, fmt.Errorf("invalid uuid %q: %w", s, err)
 	}
