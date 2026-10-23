@@ -2,7 +2,6 @@
 /.state/
 *.test
 coverage.out
-teaser/.wrangler/
 .wrangler/
 
 # Leftovers from the archived full site (see archive/full-site)
