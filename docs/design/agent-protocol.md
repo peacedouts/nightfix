@@ -66,6 +66,7 @@ Decision confirmed Oct 20, 2026. Built into the agent from day one.
 - **v1 default:** one required signer, the org's control-plane key in KMS.
 - **Customer co-signing:** the customer adds a key they hold, e.g. one their CI pipeline uses to sign a runbook's digest when it merges to main. Co-signatures are uploaded through the API and attached to the published version.
 - The required signer list **can be pinned in the agent's local config**, and the local list wins. That's what makes co-signing meaningful: if the control plane alone could remove the customer's key from the list, a compromised control plane could strip the requirement. With the list pinned locally, a compromised control plane can't get new code executed.
+- **What a compromised control plane can still do, with signers pinned.** It decides *when and where* steps run, so it can dispatch any step of a signed runbook directly, skipping `when:` conditions and approval gates (the agent never sees approval state), with parameter values that pass the runbook's declared patterns. It can also forge `steps.<id>.outputs` and the agent's labels, which reach the agent through it. It can't change what a step does, use a parameter value its pattern refuses, or feed alert data into step inputs (the agent doesn't render `alert` or `incident` there). Runbook authors should give every parameter that names something to act on a tight pattern or an enum.
 - Dispatch envelopes (section 6.2) are signed by the control-plane key only. They bind *when and where* to run a step, while the runbook bundle signatures decide *what* may run.
 
 ### 3.4 Signing key rotation
@@ -192,7 +193,7 @@ Any failure produces `Ack(rejected, reason)`. The attempt becomes `rejected`, an
 ### 7.1 Output streaming
 
 - Messages are `OutputChunk { attempt_id, seq, stream: stdout|stderr, data }`, with chunks of at most 32 KiB.
-- **Cap: 1 MiB per attempt.** After that, output is truncated with a marker, and the full exit status is still reported.
+- **Cap: 1 MiB per attempt.** After that, output is truncated with a marker, and the full exit status is still reported. Rows are capped too (50,000 per attempt, the last a "too many chunks" marker): the agent coalesces consecutive writes to one stream, and the control plane ignores empty chunks. Output is accepted while the attempt is dispatched or running and for an hour after it finishes (a cancelled step's last lines, or what an agent that was cut off captured before its attempt was declared lost), then refused with 409.
 - Ordering and dedupe use `seq`. On reconnect, the agent resends unacknowledged chunks from a bounded local buffer.
 
 ### 7.2 Result

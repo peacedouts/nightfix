@@ -68,7 +68,7 @@ echo "ingest URL: $INGEST"
 say "Publishing the ecs-service-restart runbook (validated, canonicalized, signed)"
 RB=examples/runbooks/ecs-service-restart.yaml
 if [ "$SCENARIO" = fail ]; then
-  sed 's/^      timeout: 2m$/      timeout: 10s/' "$RB" > "$WORK/runbook.yaml"; RB="$WORK/runbook.yaml"
+  sed 's/^      timeout: 10m$/      timeout: 10s/' "$RB" > "$WORK/runbook.yaml"; RB="$WORK/runbook.yaml"
 fi
 api -X PUT "$API/v1/runbooks/ecs-service-restart" --data-binary @"$RB" | json '"version %s  %s  signed by %s" % (d["version"], d["digest"][:23]+"…", ", ".join(d["signed_by"]))'
 

@@ -131,7 +131,7 @@ func kmsCall(ctx context.Context, kms KMSClient, action string, input map[string
 			return out, nil
 		}
 		var ae *awscall.Error
-		if errors.As(err, &ae) && ae.Status/100 == 4 && ae.Status != 429 {
+		if errors.As(err, &ae) && !ae.Retryable() {
 			return nil, err // access denied, wrong key, bad ciphertext: retrying won't help
 		}
 		select {

@@ -39,6 +39,9 @@ func Open(ctx context.Context, dsn string) (*DB, error) {
 	sqldb.SetMaxOpenConns(20)
 	sqldb.SetMaxIdleConns(10)
 	sqldb.SetConnMaxIdleTime(5 * time.Minute)
+	// Recycle connections now and then, so any session state that outlives a
+	// transaction (a leaked session-level lock, say) can't last for ever.
+	sqldb.SetConnMaxLifetime(30 * time.Minute)
 	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := sqldb.PingContext(pctx); err != nil {
@@ -47,6 +50,9 @@ func Open(ctx context.Context, dsn string) (*DB, error) {
 	}
 	return &DB{sqldb}, nil
 }
+
+// maxAuditData bounds the data stored with one audit event.
+const maxAuditData = 16 << 10
 
 // Tx is a transaction already scoped to one org.
 type Tx struct {
@@ -115,6 +121,13 @@ func (t *Tx) Audit(ctx context.Context, actorType, actorID, action, resourceType
 	js, err := jsonb(data)
 	if err != nil {
 		return err
+	}
+	// Audit rows are kept for ever and their data is often request input;
+	// keep each one small (the action, actor and resource are always kept).
+	if len(js) > maxAuditData {
+		if js, err = jsonb(map[string]any{"truncated": true, "bytes": len(js)}); err != nil {
+			return err
+		}
 	}
 	_, err = t.ExecContext(ctx, "SELECT nfx_audit($1,$2,$3,$4,$5,$6)", actorType, actorID, action, resourceType, resourceID, js)
 	return err

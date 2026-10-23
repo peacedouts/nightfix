@@ -89,7 +89,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: nightfix migrate | org create --name N --slug S | org link-auth0 --org org_… --auth0-org org_… | serve")
+	fmt.Fprintln(os.Stderr, "usage: nightfix migrate | org create --name N --slug S | org link-auth0 --org org_… --auth0-org org_… | org new-owner-key --org org_… [--revoke-others] | serve")
 	os.Exit(2)
 }
 
@@ -239,6 +239,9 @@ func orgCmd(ctx context.Context, args []string) error {
 	if len(args) > 0 && args[0] == "link-auth0" {
 		return linkAuth0Cmd(ctx, args[1:])
 	}
+	if len(args) > 0 && args[0] == "new-owner-key" {
+		return newOwnerKeyCmd(ctx, args[1:])
+	}
 	if len(args) == 0 || args[0] != "create" {
 		usage()
 	}
@@ -309,6 +312,72 @@ func linkAuth0Cmd(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Printf("linked %s to Auth0 organization %s\n", *org, *auth0Org)
+	return nil
+}
+
+// newOwnerKeyCmd is the recovery path when an org has lost or leaked its
+// owner key: it issues a new one and, with --revoke-others, revokes every
+// other key at once. In a deployment the key goes to Secrets Manager, as
+// org create does, so it never appears in task logs.
+func newOwnerKeyCmd(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("org new-owner-key", flag.ExitOnError)
+	org := fs.String("org", "", "org id (org_…)")
+	revokeOthers := fs.Bool("revoke-others", false, "revoke every other API key of the org (use when a key leaked)")
+	fs.Parse(args)
+	orgID, err := ids.Decode("org", *org)
+	if err != nil {
+		return errors.New("--org org_… is required")
+	}
+	srv, err := newServer(ctx)
+	if err != nil {
+		return err
+	}
+	prefix := os.Getenv("NIGHTFIX_ORG_KEY_SECRET_PREFIX")
+	const actor = "nightfix org new-owner-key"
+	revoke := func(keep string) (int, error) {
+		if !*revokeOthers {
+			return 0, nil
+		}
+		return srv.RevokeOtherKeys(ctx, orgID, keep, actor)
+	}
+	if prefix == "" {
+		key, keyID, _, err := srv.NewOwnerKey(ctx, orgID, actor)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("api key:     %s   (shown once)\n", key)
+		revoked, err := revoke(keyID)
+		if err != nil {
+			return fmt.Errorf("the new key works, but revoking the others failed (run again with --revoke-others): %w", err)
+		}
+		fmt.Printf("revoked:     %d other key(s)\n", revoked)
+		return nil
+	}
+	aws, err := awscall.New(ctx)
+	if err != nil {
+		return err
+	}
+	// The secret is created before the key exists, so a missing permission
+	// fails before anything is revoked.
+	secret := fmt.Sprintf("%s%s-%d", prefix, ids.Encode("org", orgID), time.Now().Unix())
+	if _, err := aws.Call(ctx, "secretsmanager", "CreateSecret", map[string]any{"Name": secret, "SecretString": "pending",
+		"Description": "New Nightfix owner API key. Copy it to your password manager, then delete this secret."}); err != nil {
+		return fmt.Errorf("create secret %s: %w", secret, err)
+	}
+	key, keyID, slug, err := srv.NewOwnerKey(ctx, orgID, actor)
+	if err != nil {
+		return err
+	}
+	// Only once the new key is stored are the others revoked, so a failure
+	// here never leaves the org with no usable key.
+	if _, err := aws.Call(ctx, "secretsmanager", "PutSecretValue", map[string]any{"SecretId": secret, "SecretString": key}); err != nil {
+		return fmt.Errorf("a new owner key for %s was created but couldn't be stored in %s (no key was revoked; run again): %w", slug, secret, err)
+	}
+	revoked, err := revoke(keyID)
+	if err != nil {
+		return fmt.Errorf("the new key is stored in %s, but revoking the others failed (run again with --revoke-others): %w", secret, err)
+	}
+	fmt.Printf("org:         %s (%s)\napi key:     stored in Secrets Manager as %s\nrevoked:     %d other key(s)\n", *org, slug, secret, revoked)
 	return nil
 }
 

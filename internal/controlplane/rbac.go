@@ -319,10 +319,16 @@ func (s *Server) loadUserBindings(tx *db.Tx, p *principal) error {
 	var teams []team
 	for rows.Next() {
 		var t team
-		rows.Scan(&t.id, &t.slug)
+		if err := rows.Scan(&t.id, &t.slug); err != nil {
+			rows.Close()
+			return err
+		}
 		teams = append(teams, t)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	own, err := s.bindingsFor(tx, "user", p.UserID, "user")
 	if err != nil {
 		return err
@@ -384,7 +390,10 @@ func (s *Server) syncIdPTeams(ctx context.Context, tx *db.Tx, userID string, gro
 	var all []string
 	for rows.Next() {
 		var id, g string
-		rows.Scan(&id, &g)
+		if err := rows.Scan(&id, &g); err != nil {
+			rows.Close()
+			return err
+		}
 		all = append(all, id)
 		if contains(groups, g) {
 			want[id] = true

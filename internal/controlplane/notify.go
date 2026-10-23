@@ -249,7 +249,7 @@ func (s *Server) attemptNotification(ctx context.Context, j *notifyJob) *deliver
 		return &deliveryError{msg: withLastError("stopped retrying: the incident was resolved before the page was delivered", j.LastError),
 			permanent: true}
 	}
-	secret, err := s.Sealer.Open(j.Credential, j.OrgID)
+	secret, err := s.unseal(j.Credential, j.OrgID, sealNotifyCredential)
 	if err != nil {
 		// It won't unseal next time either.
 		return &deliveryError{msg: "escalation target credential could not be decrypted", detail: err, permanent: true}
@@ -265,6 +265,10 @@ func withLastError(msg, last string) string {
 }
 
 var errLeaseLost = errors.New("notification lease lost")
+
+// pageFailingAfter is how many failed attempts of a page or resolve make it
+// visible (an Error log and an incident timeline entry) while it retries.
+const pageFailingAfter = 3
 
 // recordNotification stores a delivery result. It never fails the loop: if
 // the result can't be written, it falls back to recording a bare failure,
@@ -338,6 +342,25 @@ func (s *Server) recordFailure(tx *db.Tx, j *notifyJob, derr *deliveryError) err
 		WHERE id = $1 AND lease_id = $2`, j.ID, j.LeaseID, status, attempts, msg, pgInterval(delay))
 	if err := leaseHeld(res, err); err != nil {
 		return err
+	}
+	if !failed && (j.Kind == "page" || j.Kind == "resolve") && attempts == pageFailingAfter && !derr.throttled {
+		// A page that keeps failing (a revoked routing key, say) retries for
+		// up to 24 hours. Say so now, where operators and responders look,
+		// rather than only when it's abandoned.
+		s.Log.Error("page delivery failing", "notification", j.ID, "org", j.OrgID, "type", j.Type, "kind", j.Kind,
+			"incident", j.IncidentID.String, "attempts", attempts, "err", msg)
+		if j.IncidentID.Valid {
+			if _, err := tx.Exec(`SAVEPOINT notify_failing`); err != nil {
+				return err
+			}
+			if err := s.timeline(tx, j.IncidentID.String, "notification.failing", "system", "",
+				fmt.Sprintf("The %s to %s has failed %d times (%s); still retrying. Check the escalation target.", j.Kind, notifyServiceName(j.Type), attempts, msg), nil); err != nil {
+				s.Log.Error("notification failure could not be added to the timeline", "notification", j.ID, "err", err)
+				if _, err := tx.Exec(`ROLLBACK TO SAVEPOINT notify_failing`); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	if !failed {
 		// Notifications queued behind this one for the same destination

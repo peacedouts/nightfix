@@ -71,8 +71,18 @@ type Agent struct {
 	id        *identity
 	allowlist *allowlist
 
+	// steps tracks running step goroutines, so shutdown can let them finish
+	// (scripts get their SIGTERM grace) and report. results is the context
+	// results are sent with: it outlives Run's, and shutdown cancels it once
+	// its grace period is over.
+	steps         sync.WaitGroup
+	resultsOnce   sync.Once
+	results       context.Context
+	resultsCancel context.CancelFunc
+
 	mu       sync.Mutex
 	inflight map[string]context.CancelFunc
+	stopping bool                 // shutting down: in-flight steps were cancelled by the agent itself
 	seen     map[string]time.Time // attempt ids already accepted (replay guard)
 	frozen   bool
 
@@ -149,8 +159,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	// Steps die with the agent (agent-protocol.md §8): on shutdown, cancel
-	// everything in flight so scripts are killed rather than orphaned.
-	defer a.cancelAll()
+	// everything in flight so scripts are stopped rather than orphaned, give
+	// them their SIGTERM grace, and report them.
+	defer a.shutdown()
 
 	// backoff grows across failed hellos, polls and enrollments, and resets
 	// only once a poll succeeds: a hello that works followed by a poll that
@@ -541,8 +552,38 @@ func (a *Agent) handleDispatch(ctx context.Context, d agentapi.Dispatch) {
 		}
 		return
 	}
-	if err := a.c.post(ctx, "/agent/v1/attempts/"+v.env.AttemptID+"/ack", agentapi.Ack{Accepted: true}, nil); err != nil {
-		a.cfg.Log.Warn("ack failed; dropping attempt", "attempt", v.env.AttemptID, "err", err)
+	if err := a.ack(ctx, v.env.AttemptID); err != nil {
+		var se *statusError
+		if errors.As(err, &se) && se.Code/100 == 4 {
+			// Refused (expired, reassigned): the control plane doesn't
+			// consider this agent to be running it.
+			a.cfg.Log.Warn("ack refused; dropping attempt", "attempt", v.env.AttemptID, "err", err)
+			return
+		}
+		// The ack may or may not have been recorded. Don't run the step, and
+		// say so, so the attempt fails as "not started" instead of being
+		// declared lost (and paging as "may or may not have completed").
+		a.cfg.Log.Warn("ack failed; reporting the step as not started", "attempt", v.env.AttemptID, "err", err)
+		// Listed as in flight until the result is delivered, so a hello in
+		// the meantime doesn't make the control plane declare it lost. Marked
+		// seen, so if the lease expires and the same attempt is dispatched
+		// again before the result gets through, the agent refuses it rather
+		// than running it and then delivering the stale "not started" result
+		// onto the running attempt. (That's also why the delete below can't
+		// remove a real step's entry: none can start under this ID.)
+		a.mu.Lock()
+		a.inflight[v.env.AttemptID] = func() {}
+		a.seen[v.env.AttemptID] = time.Now()
+		a.mu.Unlock()
+		a.steps.Add(1)
+		go func() {
+			defer a.steps.Done()
+			a.sendResult(a.resultsCtx(), v.env.AttemptID, agentapi.Result{Status: "failed",
+				Error: "the agent couldn't confirm the dispatch with the control plane, so the step was not started"})
+			a.mu.Lock()
+			delete(a.inflight, v.env.AttemptID)
+			a.mu.Unlock()
+		}()
 		return
 	}
 	stepCtx, cancel := context.WithTimeout(context.Background(), v.step.StepTimeout())
@@ -557,15 +598,65 @@ func (a *Agent) handleDispatch(ctx context.Context, d agentapi.Dispatch) {
 	a.mu.Unlock()
 	a.cfg.Log.Info("running step", "runbook", v.rb.Metadata.Name, "step", v.step.ID, "attempt", v.env.AttemptID)
 
+	a.steps.Add(1)
 	go func() {
+		defer a.steps.Done()
 		defer cancel()
 		res := a.execute(stepCtx, v)
-		a.sendResult(ctx, v.env.AttemptID, res)
+		a.sendResult(a.resultsCtx(), v.env.AttemptID, res)
 		a.mu.Lock()
 		delete(a.inflight, v.env.AttemptID)
 		a.mu.Unlock()
 		a.cfg.Log.Info("step finished", "step", v.step.ID, "status", res.Status, "error", res.Error)
 	}()
+}
+
+// ack confirms a dispatch, retrying a lost response within the dispatch
+// lease (30s): a repeat ack of an attempt already running is a no-op.
+func (a *Agent) ack(ctx context.Context, attemptID string) error {
+	backoff := time.Second
+	for i := 0; ; i++ {
+		err := a.c.post(ctx, "/agent/v1/attempts/"+attemptID+"/ack", agentapi.Ack{Accepted: true}, nil)
+		var se *statusError
+		if err == nil || (errors.As(err, &se) && se.Code/100 == 4 && se.Code != 408 && se.Code != 429) || i >= 3 || ctx.Err() != nil {
+			return err
+		}
+		sleep(ctx, jitter(backoff))
+		backoff *= 2
+	}
+}
+
+// shutdownGrace bounds how long shutdown waits for running steps to stop and
+// report. It must fit in the task's stop timeout (the agent module sets 60s):
+// scripts get 10s after SIGTERM, then results are sent.
+const shutdownGrace = 40 * time.Second
+
+func (a *Agent) shutdown() {
+	a.mu.Lock()
+	a.stopping = true
+	a.mu.Unlock()
+	a.cancelAll()
+	done := make(chan struct{})
+	go func() { a.steps.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(shutdownGrace):
+		a.cfg.Log.Warn("shutting down with steps still running", "attempts", a.inFlight())
+	}
+	a.resultsCtx()
+	a.resultsCancel()
+}
+
+func (a *Agent) isStopping() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.stopping
+}
+
+// resultsCtx is the context results are sent with (see Agent.results).
+func (a *Agent) resultsCtx() context.Context {
+	a.resultsOnce.Do(func() { a.results, a.resultsCancel = context.WithCancel(context.Background()) })
+	return a.results
 }
 
 // sendResult retries until the control plane has the result. Holding it

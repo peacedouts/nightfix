@@ -113,3 +113,15 @@ variable "db_performance_insights" {
   type        = bool
   default     = false
 }
+
+variable "deletion_protection" {
+  description = "Protect the database, load balancers, image repository and secrets from deletion. Set false only for a sandbox you will tear down: it also skips the final DB snapshot and lets destroy empty the image repository."
+  type        = bool
+  default     = true
+}
+
+variable "github_oidc_provider_arn" {
+  description = "ARN of an existing GitHub Actions OIDC provider in this account. Empty creates one; set it for a second environment in the same account (the provider is account-wide)."
+  type        = string
+  default     = ""
+}

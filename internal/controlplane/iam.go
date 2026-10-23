@@ -34,7 +34,9 @@ func (s *Server) Challenge(ctx context.Context, req agentapi.ChallengeRequest) (
 		return nil, httpError{400, "org_id must look like org_…"}
 	}
 	b := make([]byte, 24)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
 	nonce := base64.RawURLEncoding.EncodeToString(b)
 	var ok bool
 	if err := s.DB.QueryRowContext(ctx, `SELECT nfx_create_enroll_challenge($1, $2, $3::interval)`,

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lib/pq"
@@ -47,11 +48,20 @@ func (s *Server) ProcessAlertEvents(ctx context.Context) (int, error) {
 				msg = sql.NullString{String: truncate(cleanText(perr.Error()), 1000), Valid: true}
 				if errors.As(perr, &pe) {
 					s.Log.Warn("alert event rejected", "event", id, "err", perr)
+				} else if ferr := s.processWithoutRemediation(ctx, tx, id); ferr != nil {
+					if isTransient(ferr) {
+						return ferr
+					}
+					s.Log.Error("alert event failed and will not be retried", "event", id, "err", perr, "fallback_err", ferr)
 				} else {
-					s.Log.Error("alert event failed and will not be retried", "event", id, "err", perr)
+					// Default to paging: the alert opened or joined its
+					// incident and paged, without auto-remediation.
+					s.Log.Error("alert event processed without auto-remediation", "event", id, "err", perr)
 				}
 			}
 			_, err := tx.Exec(`UPDATE alert_events SET processed_at = now(), error = $2 WHERE id = $1`, id, msg)
+			// (An event that paged without auto-remediation keeps its error, so
+			// GET /v1/alert-events/failed shows that remediation broke.)
 			return err
 		})
 		if err != nil {
@@ -63,6 +73,96 @@ func (s *Server) ProcessAlertEvents(ctx context.Context) (int, error) {
 		n++
 	}
 }
+
+// processWithoutRemediation processes an event again after a non-transient
+// failure, with runbook triggers switched off, so an alert whose remediation
+// (or anything else past routing) can't be evaluated still opens its
+// incident and pages, with the reason. A runbook version this binary can't
+// decode, say after a rollback, must not silence its services' alerts.
+func (s *Server) processWithoutRemediation(ctx context.Context, tx *db.Tx, id string) error {
+	if _, err := tx.Exec(`SAVEPOINT process_fallback`); err != nil {
+		return err
+	}
+	// The page says what happened, not the internal error (which can name
+	// tables or queries); the error is listed with the event.
+	reason := "an internal error; the event is listed at GET /v1/alert-events/failed"
+	err := s.safely("alert event (no remediation)", func() error {
+		return s.processEvent(context.WithValue(ctx, noRemediationKey{}, reason), tx, id)
+	})
+	if err == nil || errors.Is(err, errIgnore) {
+		return nil
+	}
+	if _, rerr := tx.Exec(`ROLLBACK TO SAVEPOINT process_fallback`); rerr != nil {
+		return rerr
+	}
+	return err
+}
+
+// noRemediationKey, set on the context, makes decideRemediation page at once
+// with its value as the reason instead of matching runbook triggers.
+type noRemediationKey struct{}
+
+// celBudgetPerEvent bounds the CEL an alert event can cost: routing rules,
+// trigger matches, parameter resolution and the started run's step
+// conditions together. Each expression is also limited to 250ms by itself.
+const celBudgetPerEvent = 2 * time.Second
+
+// celMeter is a CEL time budget charged only for time spent evaluating
+// expressions: database waits in between (a row lock, a slow query) don't
+// count, so contention can't switch off auto-remediation or fail a run.
+type celMeter struct {
+	mu   sync.Mutex
+	left time.Duration
+}
+
+type celMeterKey struct{}
+
+// withCELBudget starts an event's CEL budget (kept if one is running).
+func withCELBudget(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(celMeterKey{}).(*celMeter); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, celMeterKey{}, &celMeter{left: celBudgetPerEvent})
+}
+
+// celMeterOf is the event's meter; outside alert processing (a run advanced
+// by the API or an agent's result), a fresh 1s one.
+func celMeterOf(ctx context.Context) *celMeter {
+	if m, ok := ctx.Value(celMeterKey{}).(*celMeter); ok {
+		return m
+	}
+	return &celMeter{left: time.Second}
+}
+
+func (m *celMeter) exhausted() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.left <= 0
+}
+
+// run evaluates with what's left of the budget (a context not derived from
+// any request, so it never cancels database work) and charges the time.
+func (m *celMeter) run(fn func(context.Context) error) error {
+	m.mu.Lock()
+	left := m.left
+	m.mu.Unlock()
+	if left <= 0 {
+		return errCELBudget
+	}
+	c, cancel := context.WithTimeout(context.Background(), left)
+	defer cancel()
+	start := time.Now()
+	err := fn(c)
+	m.mu.Lock()
+	m.left -= time.Since(start)
+	m.mu.Unlock()
+	return err
+}
+
+var errCELBudget = errors.New("the alert's expression budget is used up")
+
+// maxRoutingRules bounds an org's routing rule set.
+const maxRoutingRules = 100
 
 // processError is a permanent problem with an event's content.
 type processError struct{ error }
@@ -159,7 +259,8 @@ func (s *Server) processEvent(ctx context.Context, tx *db.Tx, eventID string) er
 		}
 	}
 
-	svcID, suppressed, err := s.route(tx, a, defaultSvc)
+	ctx = withCELBudget(ctx)
+	svcID, suppressed, err := s.route(ctx, tx, a, defaultSvc)
 	if err != nil {
 		return err
 	}
@@ -189,20 +290,31 @@ func alertVars(a Alert) map[string]any {
 
 // route applies the org's ordered routing rules; first match wins. With no
 // match, the integration's default service applies. No alert is unrouted.
-func (s *Server) route(tx *db.Tx, a Alert, defaultSvc string) (serviceID string, suppressed bool, err error) {
+func (s *Server) route(ctx context.Context, tx *db.Tx, a Alert, defaultSvc string) (serviceID string, suppressed bool, err error) {
 	rows, err := tx.Query(`SELECT match, action, service_id FROM routing_rules ORDER BY priority, created_at`)
 	if err != nil {
 		return "", false, err
 	}
 	defer rows.Close()
 	vars := expr.Vars{"alert": alertVars(a)}
+	// One budget for all of an event's rules: the org's rules run inside the
+	// instance's single alert loop, so slow ones must not hold up every
+	// other org's alerts. Past it, the alert takes the default service (it
+	// still pages).
+	meter := celMeterOf(ctx)
 	for rows.Next() {
 		var match, action string
 		var svc sql.NullString
 		if err := rows.Scan(&match, &action, &svc); err != nil {
 			return "", false, err
 		}
-		ok, err := expr.EvalBool(match, vars)
+		if meter.exhausted() {
+			s.Log.Warn("routing rules took too long for this alert; using the default service", "org", tx.OrgID,
+				"budget", celBudgetPerEvent)
+			return defaultSvc, false, nil
+		}
+		var ok bool
+		err := meter.run(func(c context.Context) (err error) { ok, err = expr.EvalBoolCtx(c, match, vars); return })
 		if err != nil || !ok {
 			continue // a rule that errors on this alert simply doesn't match
 		}

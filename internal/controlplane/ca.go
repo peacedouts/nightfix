@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -155,23 +156,74 @@ func (ca *CA) IssueAgentCert(csrPEM []byte, orgID, agentID string) (certPEM []by
 // SerialHex formats a certificate serial number.
 func SerialHex(n *big.Int) string { return hex.EncodeToString(n.Bytes()) }
 
+// serverCertLifetime is how long a gateway certificate is valid; it's
+// reissued at half that, so a long-running task never serves an expired one.
+const serverCertLifetime = 30 * 24 * time.Hour
+
 // ServerTLS returns a TLS config for the agent gateway: a server certificate
 // for hosts, and client certificates verified against the CA when presented.
 // Enrollment is the only endpoint that accepts a connection without one.
 func (ca *CA) ServerTLS(hosts []string) (*tls.Config, error) {
+	sc := &serverCert{ca: ca, hosts: hosts}
+	if err := sc.issue(time.Now()); err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.Cert)
+	cfg := &tls.Config{
+		ClientCAs:  pool,
+		ClientAuth: tls.VerifyClientCertIfGiven,
+		MinVersion: tls.VersionTLS13,
+	}
+	// Per connection rather than GetCertificate: Go consults GetCertificate
+	// only when Certificates is empty or the client sent a server name, and
+	// agents may connect by IP address.
+	cfg.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		c := cfg.Clone()
+		c.GetConfigForClient = nil
+		c.Certificates = []tls.Certificate{*sc.get(time.Now())}
+		return c, nil
+	}
+	return cfg, nil
+}
+
+type serverCert struct {
+	ca      *CA
+	hosts   []string
+	mu      sync.Mutex
+	cert    *tls.Certificate
+	renewAt time.Time
+}
+
+// get returns the current certificate, reissuing it past half its life. If
+// reissuing fails the current one is kept (it's still valid) and the next
+// handshake tries again.
+func (sc *serverCert) get(now time.Time) *tls.Certificate {
+	sc.mu.Lock()
+	renew := now.After(sc.renewAt)
+	sc.mu.Unlock()
+	if renew {
+		_ = sc.issue(now)
+	}
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.cert
+}
+
+func (sc *serverCert) issue(now time.Time) error {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: randSerial(),
 		Subject:      pkix.Name{CommonName: "nightfix agent gateway"},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().AddDate(1, 0, 0),
+		NotBefore:    now.Add(-time.Minute),
+		NotAfter:     now.Add(serverCertLifetime),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
-	for _, h := range hosts {
+	for _, h := range sc.hosts {
 		h = strings.TrimSpace(h)
 		if ip := net.ParseIP(h); ip != nil {
 			tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
@@ -179,16 +231,13 @@ func (ca *CA) ServerTLS(hosts []string) (*tls.Config, error) {
 			tmpl.DNSNames = append(tmpl.DNSNames, h)
 		}
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, &key.PublicKey, ca.key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, sc.ca.Cert, &key.PublicKey, sc.ca.key)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	pool := x509.NewCertPool()
-	pool.AddCert(ca.Cert)
-	return &tls.Config{
-		Certificates: []tls.Certificate{{Certificate: [][]byte{der, ca.Cert.Raw}, PrivateKey: key}},
-		ClientCAs:    pool,
-		ClientAuth:   tls.VerifyClientCertIfGiven,
-		MinVersion:   tls.VersionTLS13,
-	}, nil
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.cert = &tls.Certificate{Certificate: [][]byte{der, sc.ca.Cert.Raw}, PrivateKey: key}
+	sc.renewAt = now.Add(serverCertLifetime / 2)
+	return nil
 }

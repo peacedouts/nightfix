@@ -16,10 +16,12 @@ const Redacted = "[REDACTED]"
 
 // minNeedle: shorter values are too short to redact without mangling normal
 // output. minB64Core: shortest base64 run kept for a value at a non-zero
-// offset inside a longer encoded string (shorter runs match by chance).
+// offset inside a longer encoded string; with 8 characters (48 random bits)
+// a chance match is negligible, and any value of 7 bytes or more is covered
+// at every offset.
 const (
 	minNeedle  = 4
-	minB64Core = 12
+	minB64Core = 8
 )
 
 // redactor scrubs every resolved secret value, and the encodings a script
@@ -31,8 +33,16 @@ const (
 // redacting all at once (apply) produce the same output.
 type redactor struct {
 	needles []string            // longest first
-	index   map[uint16][]string // by first two bytes, longest first
-	max     int
+	index   map[uint16][]needle // by first two bytes, longest first
+	max     int                 // bytes of input a match can span (line breaks included)
+}
+
+// needle is one form to hide. wrap: base64-alphabet text, matched with up to
+// one line break (LF or CRLF) between any two characters, since encoded
+// output is wrapped at positions that depend on what came before.
+type needle struct {
+	s    string
+	wrap bool
 }
 
 func newRedactor(secrets []string) *redactor {
@@ -46,7 +56,7 @@ func newRedactor(secrets []string) *redactor {
 			}
 		}
 	}
-	r := &redactor{index: map[uint16][]string{}}
+	r := &redactor{index: map[uint16][]needle{}}
 	for n := range set {
 		r.needles = append(r.needles, n)
 	}
@@ -57,13 +67,48 @@ func newRedactor(secrets []string) *redactor {
 		return r.needles[i] < r.needles[j]
 	})
 	for _, n := range r.needles {
+		// Encoded text is wrapped (GNU base64 at 76 columns, openssl at
+		// 64, or anything else) at positions that depend on whatever came
+		// before the secret, so base64 needles match across line breaks.
+		nd := needle{s: n, wrap: len(n) >= minB64Core && strings.Trim(n, b64Alphabet) == ""}
 		k := uint16(n[0])<<8 | uint16(n[1])
-		r.index[k] = append(r.index[k], n)
-	}
-	if len(r.needles) > 0 {
-		r.max = len(r.needles[0])
+		r.index[k] = append(r.index[k], nd)
+		span := len(n)
+		if nd.wrap {
+			span += 2 * (len(n) - 1) // a CRLF between every two characters
+		}
+		r.max = max(r.max, span)
 	}
 	return r
+}
+
+const b64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=-_"
+
+// matchAt returns where needle n, starting at raw[i], ends in raw, or -1.
+// A wrap needle matches with at most one line break (LF or CRLF) between
+// two of its characters, which bounds a match's span (see max).
+func (r *redactor) matchAt(raw string, i int, n needle) int {
+	if !n.wrap {
+		if strings.HasPrefix(raw[i:], n.s) {
+			return i + len(n.s)
+		}
+		return -1
+	}
+	j := i
+	for k := 0; k < len(n.s); k++ {
+		if k > 0 && j < len(raw) {
+			if raw[j] == '\n' {
+				j++
+			} else if raw[j] == '\r' && j+1 < len(raw) && raw[j+1] == '\n' {
+				j += 2
+			}
+		}
+		if j >= len(raw) || raw[j] != n.s[k] {
+			return -1
+		}
+		j++
+	}
+	return j
 }
 
 // secretForms: the value, the value without trailing line endings, with CRLF
@@ -132,6 +177,16 @@ func encodings(s string) []string {
 		url.PathEscape(s), lowerPercent(url.PathEscape(s)),
 		hex.EncodeToString(b), strings.ToUpper(hex.EncodeToString(b)),
 	}
+	// Other common encoders keep different characters: Python's quote (and
+	// quote_plus), JavaScript's encodeURIComponent and encodeURI, and strict
+	// RFC 3986.
+	for _, e := range []string{
+		percentEncode(s, "-._~/", false), percentEncode(s, "-._~", true),
+		percentEncode(s, "-._~!*'()", false), percentEncode(s, "-._~!*'();,/?:@&=+$#", false),
+		percentEncode(s, "-._~", false),
+	} {
+		out = append(out, e, lowerPercent(e))
+	}
 	j := jsonEscape(s, false)
 	out = append(out, j, jsonEscape(s, true), jsonASCII(j), strings.ReplaceAll(j, "/", `\/`))
 	// GNU base64 wraps at 76 columns, openssl/PEM at 64.
@@ -141,8 +196,10 @@ func encodings(s string) []string {
 			out = append(out, wrapLines(raw, w))
 		}
 	}
-	// The value at offset 1 or 2 inside a longer base64 string ("user:pass").
-	for off := 1; off <= 2; off++ {
+	// The value at offset 0, 1 or 2 inside a longer base64 string: "user:" +
+	// password, or token + ":x" (an Authorization: Basic header). Only the
+	// characters that encode the value's bytes alone are matched.
+	for off := 0; off <= 2; off++ {
 		for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
 			e := enc.EncodeToString(append(make([]byte, off), b...))
 			lo, hi := (8*off+5)/6, 8*(off+len(b))/6
@@ -152,6 +209,27 @@ func encodings(s string) []string {
 		}
 	}
 	return out
+}
+
+// percentEncode escapes every byte except ASCII letters, digits and keep;
+// with spacePlus, a space becomes "+".
+func percentEncode(s, keep string, spacePlus bool) string {
+	const hexDigits = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', strings.IndexByte(keep, c) >= 0:
+			b.WriteByte(c)
+		case c == ' ' && spacePlus:
+			b.WriteByte('+')
+		default:
+			b.WriteByte('%')
+			b.WriteByte(hexDigits[c>>4])
+			b.WriteByte(hexDigits[c&15])
+		}
+	}
+	return b.String()
 }
 
 func jsonEscape(s string, html bool) string {
@@ -225,11 +303,27 @@ func (r *redactor) scan(st *scanState, raw string, final bool) (emit, keep strin
 	var b strings.Builder
 	coverEnd, lit := st.cover, 0
 	for i := 0; i < limit; i++ {
-		if i+1 < len(raw) {
-			for _, n := range r.index[uint16(raw[i])<<8|uint16(raw[i+1])] {
-				if strings.HasPrefix(raw[i:], n) {
-					coverEnd = max(coverEnd, i+len(n))
-					break
+		if i+1 < len(raw) && raw[i] != '\n' && raw[i] != '\r' {
+			// Candidates by the next two bytes, and, when a line break
+			// follows, by the next two characters across it (wrapped base64).
+			keys := [2]uint16{uint16(raw[i])<<8 | uint16(raw[i+1])}
+			nk := 1
+			if raw[i+1] == '\n' || (raw[i+1] == '\r' && i+2 < len(raw) && raw[i+2] == '\n') {
+				j := i + 2
+				if raw[i+1] == '\r' {
+					j = i + 3
+				}
+				if j < len(raw) {
+					keys[1], nk = uint16(raw[i])<<8|uint16(raw[j]), 2
+				}
+			}
+		candidates:
+			for _, k := range keys[:nk] {
+				for _, n := range r.index[k] {
+					if end := r.matchAt(raw, i, n); end >= 0 {
+						coverEnd = max(coverEnd, end)
+						break candidates
+					}
 				}
 			}
 		}

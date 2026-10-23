@@ -86,6 +86,40 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("%s:%s failed: %s: %s (HTTP %d)", e.Service, e.Action, e.Code, e.Message, e.Status)
 }
 
+// Retryable reports whether the same call might succeed later: server
+// errors, timeouts and throttling. JSON-protocol services report throttling
+// as HTTP 400 with a throttling code, so the code matters, not just the
+// status. Anything else (access denied, validation, not found) won't change
+// by retrying.
+func (e *Error) Retryable() bool {
+	if e.Status >= 500 || e.Status == 429 || e.Status == 408 {
+		return true
+	}
+	switch e.Code {
+	case "Throttling", "ThrottlingException", "ThrottledException", "RequestThrottledException", "RequestThrottled",
+		"TooManyRequestsException", "ProvisionedThroughputExceededException", "TransactionInProgressException",
+		"RequestLimitExceeded", "BandwidthLimitExceeded", "LimitExceededException", "SlowDown", "PriorRequestNotComplete",
+		"EC2ThrottledException", "RequestTimeout", "RequestTimeoutException", "InternalFailure", "InternalError",
+		"ServiceUnavailable", "ServiceUnavailableException":
+		return true
+	}
+	return false
+}
+
+// Throttled reports whether AWS refused the call for rate (so it wasn't
+// performed).
+func (e *Error) Throttled() bool {
+	if e.Status == 429 {
+		return true
+	}
+	switch e.Code {
+	case "Throttling", "ThrottlingException", "ThrottledException", "RequestThrottledException", "RequestThrottled",
+		"TooManyRequestsException", "RequestLimitExceeded", "SlowDown", "EC2ThrottledException":
+		return true
+	}
+	return false
+}
+
 // Call invokes service:action with input and returns the parsed response.
 func (c *Client) Call(ctx context.Context, service, action string, input map[string]any) (map[string]any, error) {
 	info, ok := Services[service]

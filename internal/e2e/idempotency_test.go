@@ -183,3 +183,29 @@ func TestIdempotencyKeyConcurrentDuplicatesRunOnce(t *testing.T) {
 		t.Fatalf("%d bindings created", got)
 	}
 }
+
+// Someone who can write the database (but can't use the sealing key) can't
+// turn idempotent replay into a decryption service: a sealed value copied
+// into a stored response, from another column or another request, doesn't
+// decrypt there.
+func TestIdempotencyReplayIsNotADecryptionOracle(t *testing.T) {
+	x := setupIngest(t, nil)
+	first := x.idem(x.key, "POST", "/v1/teams", "k1", `{"slug":"payments"}`)
+	if first.code != 200 {
+		t.Fatalf("first request: %+v", first)
+	}
+	second := x.idem(x.key, "POST", "/v1/teams", "k2", `{"slug":"billing"}`)
+	if second.code != 200 {
+		t.Fatalf("second request: %+v", second)
+	}
+	for name, src := range map[string]string{
+		"the org's signing key":      `(SELECT private_key FROM signing_keys LIMIT 1)`,
+		"another request's response": `(SELECT response FROM idempotency_keys WHERE key = 'k2')`,
+	} {
+		x.exec(`UPDATE idempotency_keys SET response = ` + src + ` WHERE key = 'k1'`)
+		r := x.idem(x.key, "POST", "/v1/teams", "k1", `{"slug":"payments"}`)
+		if r.code == 200 || strings.Contains(r.body, "billing") || len(r.body) == 64 {
+			t.Fatalf("replay with %s copied in: %+v", name, r)
+		}
+	}
+}

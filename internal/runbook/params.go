@@ -1,6 +1,7 @@
 package runbook
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"regexp"
@@ -15,6 +16,12 @@ import (
 // `from` expressions over the trigger context, then defaults. Every value is
 // type-checked and validated against pattern / enum / min / max.
 func ResolveParams(rb *Runbook, supplied map[string]any, ctx expr.Vars) (map[string]any, error) {
+	return ResolveParamsCtx(context.Background(), rb, supplied, ctx)
+}
+
+// ResolveParamsCtx is ResolveParams with a deadline for the from:
+// expressions together (see expr.EvalCtx).
+func ResolveParamsCtx(goctx context.Context, rb *Runbook, supplied map[string]any, ctx expr.Vars) (map[string]any, error) {
 	out := map[string]any{}
 	for _, name := range sortedKeys(rb.Spec.Parameters) {
 		p := rb.Spec.Parameters[name]
@@ -25,7 +32,7 @@ func ResolveParams(rb *Runbook, supplied map[string]any, ctx expr.Vars) (map[str
 		if sv, ok := supplied[name]; ok {
 			v, found = sv, true
 		} else if p.From != "" {
-			fv, err := expr.Eval(p.From, ctx)
+			fv, err := expr.EvalCtx(goctx, p.From, ctx)
 			if err == nil && fv != nil {
 				v, found = fv, true
 			}

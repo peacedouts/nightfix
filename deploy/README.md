@@ -32,7 +32,8 @@ ingest.nightfix.dev ─┤                                 │
 - **`nfx_app` password:** generated ephemerally and written write-only, so it never appears in Terraform state or plans.
 - **Credential-sealing key:** created by the control plane on first start with `kms:GenerateDataKey`. Only the KMS ciphertext is stored, in Postgres, so the database alone can't unseal anything.
 - **Agent CA:** created on first start and stored in Postgres, with its private key sealed.
-- **Customer credentials** (Slack webhooks, PagerDuty keys, Slack signing secrets): sealed per org.
+- **Customer credentials** (Slack webhooks, PagerDuty keys, Slack signing secrets), org signing keys and stored idempotent responses: sealed per org and per purpose, so a ciphertext copied into another column, row or org doesn't decrypt there.
+- **Audit log:** the app role can read audit events and append them only through `nfx_audit`, which computes the hash chain; it can't insert, update or delete rows directly.
 
 Nothing on the tasks' disks matters, and nothing secret is in Terraform state.
 
@@ -44,7 +45,7 @@ You need:
 - An AWS account (a dedicated one is best).
 - Terraform 1.11 or newer.
 - The AWS CLI and `jq`.
-- A Cloudflare API token with **Zone → DNS → Edit** on `nightfix.dev` only.
+- A Cloudflare API token with **Zone → DNS → Edit** and **Zone → Zone → Read** on `nightfix.dev` only.
 
 ### 1. State bucket
 
@@ -96,11 +97,13 @@ There are two AWS roles:
 The deploy role can run any code as the control plane, because that's what deploying is, so set the environment up carefully. Create a GitHub **environment** named `production` (Settings → Environments) and:
 - Under **Deployment branches and tags**, choose **Selected branches and tags** and add only `main`. **This is required.** Without it, anyone who can push a branch can run an edited deploy workflow in the environment.
 - Add yourself as a **required reviewer**, so each rollout waits for your approval. On a private repo this needs a paid GitHub plan (Pro, Team or Enterprise); the free plan has no "Deployment protection rules" section. The branch restriction is the essential part. Add a reviewer at the latest when anyone else gets write access.
+- **Protect `main`.** Everything above trusts `main`. The push role, the signature deploys check (`images.yml` on `main`) and the environment all key on it. So `main` must require a pull request with an approving review and block force-pushes (Settings → Rules, or branch protection). On a private repo that needs a paid plan too. Until it's in place, everyone with write access can, in effect, deploy to production.
 
 ### 4. Build and roll out
 
-- Push to `main`, or re-run the **images** workflow. It pushes the control-plane image to ECR, signed and with an SBOM.
-- Run the **deploy** workflow. It runs migrations as the RDS master user, then rolls the service. If new tasks don't become healthy, ECS rolls back by itself.
+- Push to `main`, or run the **images** workflow on `main` (Actions → images → Run workflow). It pushes the control-plane image to ECR, signed and with an SBOM, unless that commit's image is already there.
+- Run the **deploy** workflow. It checks that the image's signature names `images.yml` on `main` *and that commit*, runs migrations as the RDS master user, then rolls the service. If new tasks don't become healthy, ECS rolls back by itself and the workflow fails.
+- After any later `terraform apply` that changes a task definition (new environment variables, Auth0 settings), run **deploy** again. Terraform registers its revisions with `image_tag` (default `latest`, which is never pushed), so until the next deploy the admin scripts and new tasks can't pull their image. Alternatively, apply with `-var image_tag=<the deployed commit>`.
 
 ```bash
 curl https://api.nightfix.dev/healthz        # ok
@@ -117,11 +120,13 @@ This runs a one-off admin task. The task writes the org's owner API key straight
 
 To link a customer's Auth0 Organization once they've shown they control it, run `deploy/scripts/link-auth0.sh org_… <auth0 org id>`. This is an operator-only step, run as the same kind of admin task.
 
+If an org loses its owner key, or one leaks and nobody can rotate it through the API (`POST /v1/api-keys`, then revoke the old key), run `deploy/scripts/new-owner-key.sh org_… --revoke-others`. It revokes every key the org has and issues a new owner key, delivered through Secrets Manager the same way.
+
 ### 6. Make the agent image public
 
 Under GitHub → **Packages** → `nightfix-agent` → **Package settings**, set visibility to **Public** so customers can pull it. The repository itself stays private.
 
-Every push to `main` publishes `:sha-<commit>` and nothing else: no `:latest` and no `:main`. The agent runs under the customer's IAM role and decides what to execute, so a moving tag would let any new build reach every customer on their next restart. The agent module refuses anything but a digest or a `sha-` tag. Before handing customers an image, check its signature:
+Every push to `main` publishes `:sha-<commit>` and nothing else: no `:latest` and no `:main`. The agent runs under the customer's IAM role and decides what to execute, so anything that can change would let a new build reach every customer on their next restart. GHCR tags, `sha-` tags included, can be re-pushed by anyone with write access to the package, so the agent module accepts only a digest. Use the tag to find the digest, then check its signature:
 
 ```bash
 cosign verify ghcr.io/peacedouts/nightfix-agent@sha256:… \
@@ -135,7 +140,7 @@ In the customer's AWS account:
 
 ```hcl
 module "nightfix_agent" {
-  source = "github.com/peacedouts/nightfix//deploy/terraform/modules/nightfix-agent"   # or a copy
+  source = "github.com/peacedouts/nightfix//deploy/terraform/modules/nightfix-agent?ref=<commit>"   # or a copy
 
   org_id     = "org_…"
   image      = "ghcr.io/peacedouts/nightfix-agent@sha256:…"   # pinned; verify it with cosign
@@ -154,7 +159,14 @@ module "nightfix_agent" {
 }
 ```
 
-`deploy/terraform/examples/agent` is a complete example. Then let that role in:
+`deploy/terraform/examples/agent` is a complete example. The repository is private until launch, so customers can't fetch the module from it yet: hand them a copy, or publish the module (a public repo or registry) first. Always pin `?ref=` to a commit, so a later change to the module can't change their IAM.
+
+**What `ecs:UpdateService` allows.** UpdateService can do more than force a new deployment. It can also point a service at another task definition, with another task role, or turn on ECS Exec. Anyone who can publish a runbook the agent runs (a Responder within scope, or a compromised control plane when the agent doesn't pin signers) could use that. To keep it narrow:
+- give the agent only the clusters whose services it may restart;
+- pin the org's signing key (`required_signers`) and, for production, the runbooks' digests in the agent's allowlist;
+- don't keep task definitions with powerful task roles in those clusters.
+
+Then let that role in:
 
 ```bash
 curl -X POST https://api.nightfix.dev/v1/enrollment-rules -H "Authorization: Bearer $NIGHTFIX_API_KEY" \
@@ -162,13 +174,15 @@ curl -X POST https://api.nightfix.dev/v1/enrollment-rules -H "Authorization: Bea
 curl https://api.nightfix.dev/v1/agents -H "Authorization: Bearer $NIGHTFIX_API_KEY"   # two agents, online
 ```
 
+Set `max_agents` to twice the module's `desired_count`: a rolling restart briefly runs old and new agents together, and new ones are refused once the limit is reached. Anyone in the account who can start a task with the agent's role (`ecs:RunTask` on its family, or `RegisterTaskDefinition` plus `iam:PassRole` on the role) can act as an agent. AWS can't scope a task role's trust to one cluster, so grant those permissions narrowly.
+
 The agents enroll by proving they hold that role, with no tokens to copy or leak. They re-enroll on every start, which suits Fargate. To pin the org's signing key, set `required_signers` to the `agent_pin` from `GET /v1/signing-keys` (`key_id=base64-public-key`). Then the agent refuses any runbook that key didn't sign, whatever the control plane says later. A key of the customer's own (co-signing) goes in the same list.
 
 ## Operating it
 
 - **Roll out:** run **deploy** with a commit SHA from `main`. It resolves the image to a digest, refuses it unless its Sigstore signature names `images.yml` on `main`, and pins the migrate, service and admin task definitions to that digest. **Roll back:** run it with an earlier SHA. Migrations only move forward, so a rollback to code older than the current schema must still work against that schema. Keep migrations additive.
 - **Logs:** CloudWatch `/nightfix/prod/controlplane`. Migrate output is under the `controlplane/migrate` stream prefix.
-- **Alarms** (SNS → email): fewer tasks running than desired, API/ingest 5xx, unhealthy ingest targets, database CPU and free storage.
+- **Alarms** (SNS → email): fewer tasks running than desired, API/ingest 5xx, unhealthy ingest targets, database CPU and free storage, **any `level=ERROR` log line** (an alert event that couldn't be processed, a worker or partition-maintenance failure), and **pages failing** (a page or resolve that has failed 3 times, or any notification that was abandoned, Slack updates and approval messages included; the incident's timeline says why). Failed alert events are listed at `GET /v1/alert-events/failed`.
 - **Images:** each commit's image is kept, so a rollback can always pull it. Only untagged leftovers expire, after 14 days.
 - **Backups:** RDS keeps 14 days of point-in-time recovery, and there's a final snapshot on delete. Deletion protection is on for the database and both load balancers.
 - **Rotate the app's database password:** bump `secret_string_wo_version` in `data.tf`, `terraform apply`, then run **deploy**. Migrate sets the new password and the rollout picks it up. Existing tasks keep their open connections, but new connections fail until they're replaced, so do it in a quiet moment.
@@ -187,6 +201,19 @@ CI validates the Terraform against the real providers and builds both images, bu
 - **The admin task:** `create-org.sh` stores the key and the script reads it back.
 - **Database log settings:** the parameter group sets `log_parameter_max_length` and `log_parameter_max_length_on_error` to 0, so logs carry no query data. Both are standard Postgres 16 settings, but AWS doesn't document whether RDS lets you change them. If `terraform apply` rejects one, remove that `parameter` block.
 - **Performance Insights:** it's off by default (`db_performance_insights`). Before turning it on, check that your instance class supports it.
+- **Can the agent's role be held to restarts?** In the sandbox, try `ecs:UpdateService` with a different `taskDefinition`, and with `enableExecuteCommand`, using the agent role. If Deny statements on the `ecs:task-definition` and `ecs:enable-execute-command` condition keys stop those calls but still allow `forceNewDeployment`, add them to the example policy. AWS's reference doesn't say which keys UpdateService evaluates, and a wrong key would either do nothing or block the restart runbook.
+
+## Known gaps, accepted for now
+
+- **Migrations run as the RDS master user**, which holds `rds_superuser`. Migrate needs only CREATEROLE and ownership of the schema; a dedicated migrator login would narrow it.
+- **The sealing KMS key uses the default key policy**, which delegates to IAM. An account principal with broad `kms:*` could use it. An explicit key policy (task and admin roles only, plus a break-glass role for deletion) is the next step, once there's a break-glass role to name. It has no `prevent_destroy`, so sandboxes can be torn down. Production relies on the 30-day deletion window.
+- **No provider lock files are committed.** Sessions that work on this repository can't reach the Terraform registry. Run `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64` in each directory once and commit the `.terraform.lock.hcl` files.
+- **No per-tenant rate or concurrency limits.** Each instance has one 20-connection pool for the API, ingest, the agent gateway and the workers. Request sizes, routing rules (100, with a 1s CEL budget per alert), outputs, notes and audit entries are capped, and the expensive audit-chain check runs only on request, one at a time per org. But a tenant sending many requests at once can still slow others. The unauthenticated enrollment-challenge endpoint has no throttle either. Add per-org and per-IP limits, and separate pools for ingest and workers, before onboarding many tenants.
+- **Queue claims slow down with one org's backlog.** The alert-event and notification claims scan an org's unprocessed rows. With a 100k-event (or 50k-page) backlog in one org, each claim takes about 0.3–0.4s, which slows every org on the instance. Measure with `NIGHTFIX_LIMITS=1 go test ./internal/e2e -run TestLimits`. Fixing it means a per-org queue-head design.
+- **Tables kept for ever.** Alerts, incidents, timelines, notifications, runs and audit events aren't archived yet. The design's monthly audit partitions and S3 export aren't built either. Fine for the first customers; plan archival before a year of volume.
+- **One person, two Auth0 accounts.** Approvals count distinct users. Someone with two accounts in the org (say, two logins with the same verified email) that both hold a qualifying binding counts twice toward `count > 1` and can approve their own run. Keep one account per person in the IdP; dedupe by verified email if that ever isn't enforceable.
+- **A compromised control plane decides when steps run.** Pinned signers stop it running new code, but it can dispatch any step of a signed runbook directly (skipping `when:` and approval gates) with parameters that pass their patterns. See agent-protocol.md §3.3.
+- **Build tooling images** (`tonistiigi/binfmt` for the agent's QEMU, `moby/buildkit`) are pulled by tag in the jobs that sign. Pin them by digest along with the base images (see "Supply-chain items").
 
 ## Not here yet
 

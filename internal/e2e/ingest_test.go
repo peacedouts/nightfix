@@ -18,6 +18,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -126,9 +127,27 @@ func (x *ingestHarness) send(body map[string]any) int {
 	return x.sendTo(x.ingest, x.secret, body)
 }
 
+// deliveryBody marshals a webhook alert with a unique "delivery" field (the
+// normalizer ignores it). Each send is a distinct delivery, as a real
+// sender's repeat would be; identical bytes signed in the same second are
+// one delivery and acknowledged as a duplicate.
+func deliveryBody(body map[string]any) []byte {
+	m := make(map[string]any, len(body)+1)
+	for k, v := range body {
+		m[k] = v
+	}
+	if _, ok := m["delivery"]; !ok {
+		m["delivery"] = deliverySeq.Add(1)
+	}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+var deliverySeq atomic.Int64
+
 // sendTo posts a signed webhook alert to an integration's ingest URL.
 func (x *ingestHarness) sendTo(ingest, secret string, body map[string]any) int {
-	b, _ := json.Marshal(body)
+	b := deliveryBody(body)
 	req, _ := http.NewRequest("POST", ingest, bytes.NewReader(b))
 	req.Header.Set(controlplane.WebhookSignatureHeader, controlplane.SignWebhook(secret, b, time.Now()))
 	resp, err := http.DefaultClient.Do(req)
@@ -187,7 +206,7 @@ func TestIngestReopenDoesNotCollideWithNewerIncident(t *testing.T) {
 	x.send(map[string]any{"dedup_key": "A", "summary": "A down again"})
 	x.tick() // used to fail with a duplicate key on incidents_open_group, forever
 	x.send(map[string]any{"dedup_key": "B", "summary": "B down", "status": "resolved"})
-	x.send(map[string]any{"dedup_key": "A", "summary": "A down", "status": "resolved"})
+	x.send(map[string]any{"dedup_key": "A", "summary": "A ok again", "status": "resolved"})
 	x.tick()
 	x.tick()
 	st := x.statuses()
@@ -383,5 +402,51 @@ func TestFailedAlertEventsAreListed(t *testing.T) {
 	}
 	if len(failed) != 1 || failed[0]["error"] == "" || !strings.HasPrefix(fmt.Sprint(failed[0]["integration"]), "int_") {
 		t.Fatalf("failed events: %v", failed)
+	}
+}
+
+// A signed webhook delivered a second time inside its 5-minute window (a
+// sender's retry, or a captured request replayed) is acknowledged and not
+// stored, so replaying "firing" can't re-fire an alert that has resolved.
+func TestIngestReplayedWebhookIsNotStoredAgain(t *testing.T) {
+	x := setupIngest(t, nil)
+	b, _ := json.Marshal(map[string]any{"dedup_key": "A", "summary": "A down"})
+	sig := controlplane.SignWebhook(x.secret, b, time.Now())
+	post := func() (int, string) {
+		req, _ := http.NewRequest("POST", x.ingest, bytes.NewReader(b))
+		req.Header.Set(controlplane.WebhookSignatureHeader, sig)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(out)
+	}
+	if code, _ := post(); code != http.StatusAccepted {
+		t.Fatalf("first delivery: %d", code)
+	}
+	x.tick()
+	x.send(map[string]any{"dedup_key": "A", "status": "resolved", "summary": "A ok"})
+	x.tick()
+	if st := x.statuses(); st[1] != "resolved" {
+		t.Fatalf("incidents %v; want #1 resolved", st)
+	}
+
+	code, body := post()
+	if code != http.StatusOK || !strings.Contains(body, "duplicate") {
+		t.Fatalf("replayed delivery: %d %s, want 200 duplicate", code, body)
+	}
+	x.tick()
+	if st := x.statuses(); len(st) != 1 || st[1] != "resolved" {
+		t.Fatalf("after the replay, incidents %v; want only #1, resolved", st)
+	}
+
+	// A new signature (a different second) over the same content is a new
+	// delivery. Identical content signed in the same second is the same
+	// delivery as far as anyone can tell, and is acknowledged once.
+	sig = controlplane.SignWebhook(x.secret, b, time.Now().Add(-2*time.Second))
+	if code, _ := post(); code != http.StatusAccepted {
+		t.Fatalf("new delivery of the same content: %d", code)
 	}
 }

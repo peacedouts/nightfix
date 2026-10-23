@@ -383,7 +383,10 @@ func TestAckRefusedForOthersAndFinishedAttempts(t *testing.T) {
 	}
 
 	e.ack(a)
-	wantHTTPError(t, "second ack", e.s.Ack(ctx, e.a, a, agentapi.Ack{Accepted: true}), 409)
+	// A repeat accept is a retry whose first response was lost: a no-op.
+	if err := e.s.Ack(ctx, e.a, a, agentapi.Ack{Accepted: true}); err != nil {
+		t.Fatalf("second ack (a retry): %v", err)
+	}
 	wantHTTPError(t, "reject after accepting", e.s.Ack(ctx, e.a, a, agentapi.Ack{Accepted: false}), 409)
 	e.dsResult(a, "succeeded", nil)
 	wantHTTPError(t, "ack after the result", e.s.Ack(ctx, e.a, a, agentapi.Ack{Accepted: true}), 409)
@@ -424,8 +427,9 @@ func TestHeartbeatRenewsOnlyListedAttempts(t *testing.T) {
 	if err := e.s.Heartbeat(ctx, e.a, agentapi.Heartbeat{InFlight: []string{a1}}); err != nil {
 		t.Fatal(err)
 	}
-	if left := e.dsAttempt(r1, a1).LeaseLeft.Float64; left < 25 || left > 31 {
-		t.Fatalf("listed attempt's lease has %.1fs left; want ~30s", left)
+	// A running attempt's lease is the longer RunningLease (5m by default).
+	if left := e.dsAttempt(r1, a1).LeaseLeft.Float64; left < 295 || left > 301 {
+		t.Fatalf("listed attempt's lease has %.1fs left; want ~300s", left)
 	}
 	if left := e.dsAttempt(r2, a2).LeaseLeft.Float64; left > 0 {
 		t.Fatalf("unlisted attempt's lease was renewed (%.1fs left)", left)
@@ -890,5 +894,38 @@ func TestRetryBackoffIsCapped(t *testing.T) {
 		if got := retryBackoff(n); got != want {
 			t.Errorf("retryBackoff(%d) = %v, want %v", n, got, want)
 		}
+	}
+}
+
+// A result that arrives after its attempt was declared lost (the agent was
+// quiet past its running lease) can't change the run any more, but it's
+// recorded, once, so whoever handles the run knows what happened.
+func TestLateResultForLostAttemptIsRecorded(t *testing.T) {
+	e := setupRunHarness(t)
+	ctx := context.Background()
+	r1 := e.startNamed("one")
+	a1 := e.poll()
+	if a1 == "" {
+		t.Fatal("expected a dispatch")
+	}
+	e.ack(a1)
+	e.dsExec(`UPDATE step_attempts SET lease_expires_at = now() - interval '1 second'`)
+	if _, err := e.s.ProcessExpiredLeases(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.dsAttempt(r1, a1).State; st != "lost" {
+		t.Fatalf("attempt is %q after its lease expired, want lost", st)
+	}
+	for range 2 {
+		if err := e.s.Result(ctx, e.a, a1, agentapi.Result{Status: "succeeded"}); err != nil {
+			t.Fatalf("late result: %v", err)
+		}
+	}
+	state := e.dsAttempt(r1, a1).State
+	noted := e.dsCount(`SELECT (length(error) - length(replace(error, 'late result: succeeded', ''))) / length('late result: succeeded')
+		FROM step_attempts WHERE id = $1`, a1)
+	errText := fmt.Sprintf("%d note(s)", noted)
+	if state != "lost" || noted != 1 {
+		t.Fatalf("after a late result the attempt is %q with error %q; want lost, noted once", state, errText)
 	}
 }

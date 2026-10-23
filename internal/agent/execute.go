@@ -17,15 +17,31 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/peacedouts/nightfix/internal/agent/awscall"
 	"github.com/peacedouts/nightfix/internal/agentapi"
 	"github.com/peacedouts/nightfix/internal/expr"
 	"github.com/peacedouts/nightfix/internal/runbook"
 )
 
-// stepVars is the CEL context a step sees on the agent.
+// stepVars is the CEL context for a wait step's until condition.
 func (a *Agent) stepVars(v *verified, secrets map[string]any) expr.Vars {
+	return a.vars(v, secrets, []string{"alert", "incident", "run", "steps"})
+}
+
+// inputVars is the context for a step's inputs (aws input, env, files) and
+// its outputs, which later steps' inputs can use. It
+// leaves out alert and incident data: they're shaped by whoever publishes the
+// alert and arrive in the envelope unvalidated, while parameters derived from
+// them are checked against the runbook's patterns (ValidateParams). The
+// linter refuses runbooks that use them there; this holds even for a bundle
+// that skipped the linter.
+func (a *Agent) inputVars(v *verified, secrets map[string]any) expr.Vars {
+	return a.vars(v, secrets, []string{"run", "steps"})
+}
+
+func (a *Agent) vars(v *verified, secrets map[string]any, context []string) expr.Vars {
 	vars := expr.Vars{"params": v.env.Params, "target": a.id.Labels}
-	for _, k := range []string{"alert", "incident", "run", "steps"} {
+	for _, k := range context {
 		if x, ok := v.env.Context[k]; ok {
 			vars[k] = x
 		}
@@ -71,9 +87,16 @@ func (a *Agent) execute(ctx context.Context, v *verified) agentapi.Result {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		res.Status = "timed_out"
 		res.Error = "step exceeded its timeout of " + v.step.StepTimeout().String()
+		var wt waitTimeout
+		if errors.As(err, &wt) && wt.last != nil {
+			res.Error += "; last check: " + out.red.apply(wt.last.Error())
+		}
 	case errors.Is(ctx.Err(), context.Canceled):
 		res.Status = "cancelled"
 		res.Error = "cancelled by the control plane"
+		if a.isStopping() {
+			res.Error = "the agent shut down before the step finished"
+		}
 	case err != nil:
 		res.Status = "failed"
 		res.Error = out.red.apply(err.Error())
@@ -81,7 +104,9 @@ func (a *Agent) execute(ctx context.Context, v *verified) agentapi.Result {
 		res.Status = "succeeded"
 	}
 	if res.Status == "succeeded" && len(v.step.Outputs) > 0 {
-		vars := a.stepVars(v, nil) // outputs never see secrets
+		// Outputs never see secrets, nor alert data: they feed later steps'
+		// inputs, which mustn't carry unvalidated alert values.
+		vars := a.inputVars(v, nil)
 		vars["result"] = result
 		res.Outputs = map[string]any{}
 		for name, src := range v.step.Outputs {
@@ -234,7 +259,7 @@ func (a *Agent) fetchSecret(ctx context.Context, ref runbook.SecretRef) (string,
 }
 
 func (a *Agent) renderInput(v *verified, input map[string]any) (map[string]any, error) {
-	r, err := expr.Render(input, a.stepVars(v, nil))
+	r, err := expr.Render(input, a.inputVars(v, nil))
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +282,22 @@ func (a *Agent) runAWS(ctx context.Context, v *verified, out *streamer) (map[str
 		return nil, err
 	}
 	out.log(fmt.Sprintf("calling %s:%s", v.step.Service, v.step.Action))
-	res, err := a.cfg.AWS.Call(ctx, v.step.Service, v.step.Action, input)
+	var res map[string]any
+	for i, backoff := 0, time.Second; ; i, backoff = i+1, backoff*2 {
+		res, err = a.cfg.AWS.Call(ctx, v.step.Service, v.step.Action, input)
+		// Throttling is likely during an incident, and a throttled call
+		// wasn't performed, so retrying it is safe even for a change. A
+		// server error might have been performed, so it isn't retried.
+		var ae *awscall.Error
+		if err == nil || !errors.As(err, &ae) || !ae.Throttled() || i >= 4 || ctx.Err() != nil {
+			break
+		}
+		out.log(fmt.Sprintf("%s:%s throttled (%s); retrying", v.step.Service, v.step.Action, ae.Code))
+		select {
+		case <-ctx.Done():
+		case <-time.After(jitter(backoff)):
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -277,13 +317,22 @@ func (a *Agent) runWait(ctx context.Context, v *verified, out *streamer) (map[st
 	if err != nil {
 		return nil, err
 	}
+	var last error // the latest check problem, for the timeout's message
 	for i := 1; ; i++ {
 		res, err := a.cfg.AWS.Call(ctx, c.Service, c.Action, input)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, waitTimeout{ctx.Err(), last}
 			}
 			out.log(fmt.Sprintf("check %d: %v", i, err))
+			// A check that can never succeed (access denied, no such
+			// cluster, invalid input) fails the step now, rather than
+			// polling out the whole timeout and reporting "timed out".
+			var ae *awscall.Error
+			if errors.As(err, &ae) && !ae.Retryable() {
+				return nil, fmt.Errorf("check %d: %w", i, err)
+			}
+			last = err
 		} else {
 			// Secret material in the response (a SecureString, a decrypted
 			// key) must be redacted from this check's log lines too: an until
@@ -296,6 +345,7 @@ func (a *Agent) runWait(ctx context.Context, v *verified, out *streamer) (map[st
 			done, err := expr.EvalBool(v.step.Until, vars)
 			if err != nil {
 				out.log(fmt.Sprintf("check %d: until: %v", i, err))
+				last = fmt.Errorf("until: %w", err)
 			} else if done {
 				out.log(fmt.Sprintf("check %d: condition met", i))
 				return res, nil
@@ -305,14 +355,26 @@ func (a *Agent) runWait(ctx context.Context, v *verified, out *streamer) (map[st
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, waitTimeout{ctx.Err(), last}
 		case <-time.After(v.step.WaitInterval()):
 		}
 	}
 }
 
+// waitTimeout is a wait step's context error with its last check problem,
+// so a timeout says why the condition was never met.
+type waitTimeout struct{ ctx, last error }
+
+func (w waitTimeout) Error() string {
+	if w.last == nil {
+		return w.ctx.Error()
+	}
+	return w.ctx.Error() + "; last check: " + w.last.Error()
+}
+func (w waitTimeout) Unwrap() error { return w.ctx }
+
 func (a *Agent) runShell(ctx context.Context, v *verified, secrets map[string]any, out *streamer) (map[string]any, *int, error) {
-	vars := a.stepVars(v, secrets)
+	vars := a.inputVars(v, secrets)
 	dir, err := os.MkdirTemp("", "nfx-step-")
 	if err != nil {
 		return nil, nil, err
@@ -462,6 +524,7 @@ type streamer struct {
 
 	mu        sync.Mutex
 	seq       int
+	attempted int // highest seq handed to an upload; those chunks are never changed
 	pending   []agentapi.OutputChunk
 	tails     map[string]string // per stream: raw bytes held back in case a secret continues in the next write
 	states    map[string]*scanState
@@ -514,6 +577,11 @@ func (s *streamer) addLocked(stream, data string) {
 	if s.truncated {
 		return
 	}
+	// Measured as it will arrive: JSON carries invalid UTF-8 as U+FFFD (three
+	// bytes for one), so binary output sized before that would exceed
+	// MaxChunkBytes on arrival and be cut by the control plane.
+	// The control plane also replaces NUL (Postgres text can't hold it).
+	data = strings.ReplaceAll(strings.ToValidUTF8(data, "\uFFFD"), "\x00", "\uFFFD")
 	if room := agentapi.MaxOutputBytes - s.sent; len(data) > room {
 		data = truncateUTF8(data, room)
 		s.truncated = true
@@ -525,6 +593,15 @@ func (s *streamer) addLocked(stream, data string) {
 		}
 		data = data[len(piece):]
 		s.sent += len(piece)
+		// Coalesce with the last chunk if no upload has carried it yet, so a
+		// step that writes a byte at a time doesn't become a row per byte.
+		// (One that has may already be stored, and resends are deduped by
+		// seq, so it must stay as it was.)
+		if n := len(s.pending); n > 0 && s.pending[n-1].Seq > s.attempted && s.pending[n-1].Stream == stream &&
+			len(s.pending[n-1].Data)+len(piece) <= agentapi.MaxChunkBytes {
+			s.pending[n-1].Data += piece
+			continue
+		}
 		s.seq++
 		s.pending = append(s.pending, agentapi.OutputChunk{Seq: s.seq, Stream: stream, Data: piece})
 	}
@@ -592,10 +669,30 @@ func (s *streamer) flush() {
 	s.mu.Lock()
 	batch := s.pending
 	s.pending = nil
+	s.attempted = s.seq
 	s.mu.Unlock()
 	for len(batch) > 0 {
-		n := min(len(batch), 64)
+		// Batches are sized by their encoded size, not chunk count: binary
+		// output JSON-escapes to up to 6 bytes a byte, and the gateway
+		// refuses bodies over 4 MiB.
+		n, size := 0, 0
+		for n < len(batch) && n < 64 {
+			b, _ := json.Marshal(batch[n])
+			if n > 0 && size+len(b) > maxOutputBatchBytes {
+				break
+			}
+			size += len(b)
+			n++
+		}
 		err := s.a.c.post(context.Background(), "/agent/v1/attempts/"+s.attempt+"/output", agentapi.OutputBatch{Chunks: batch[:n]}, nil)
+		var se *statusError
+		if err != nil && errors.As(err, &se) && se.Code/100 == 4 && se.Code != 408 && se.Code != 429 {
+			// Refused: sending it again can't help, so don't hold up the
+			// step's result behind it.
+			s.a.cfg.Log.Warn("output refused; dropping it", "attempt", s.attempt, "chunks", n, "err", err)
+			batch = batch[n:]
+			continue
+		}
 		if err != nil {
 			s.a.cfg.Log.Warn("output upload failed; will retry", "attempt", s.attempt, "err", err)
 			s.mu.Lock()
@@ -606,6 +703,10 @@ func (s *streamer) flush() {
 		batch = batch[n:]
 	}
 }
+
+// maxOutputBatchBytes keeps an output request well under the gateway's
+// 4 MiB body limit.
+const maxOutputBatchBytes = 1 << 20
 
 func (s *streamer) close() {
 	s.mu.Lock()
@@ -620,4 +721,23 @@ func (s *streamer) close() {
 	s.mu.Unlock()
 	close(s.done)
 	s.wg.Wait()
+	// The final flush failed (the control plane unreachable as the step
+	// ended): keep trying for a while, before the result goes, so the
+	// output isn't lost (agent-protocol.md §7.1).
+	backoff := 500 * time.Millisecond
+	for deadline := time.Now().Add(outputRetryFor); s.hasPending() && time.Now().Before(deadline); {
+		time.Sleep(jitter(backoff))
+		backoff = min(backoff*2, 10*time.Second)
+		s.flush()
+	}
+}
+
+// outputRetryFor bounds how long a finished step's output is retried before
+// its result is sent anyway (the result itself is retried much longer).
+var outputRetryFor = 2 * time.Minute
+
+func (s *streamer) hasPending() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pending) > 0
 }

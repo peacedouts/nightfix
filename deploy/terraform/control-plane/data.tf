@@ -82,13 +82,22 @@ resource "aws_db_instance" "main" {
 
   backup_retention_period         = 14
   copy_tags_to_snapshot           = true
-  deletion_protection             = true
-  skip_final_snapshot             = false
-  final_snapshot_identifier       = "${local.name}-final"
+  deletion_protection             = var.deletion_protection
+  skip_final_snapshot             = !var.deletion_protection
+  final_snapshot_identifier       = var.deletion_protection ? "${local.name}-final" : null
   auto_minor_version_upgrade      = true
   performance_insights_enabled    = var.db_performance_insights
   performance_insights_kms_key_id = var.db_performance_insights ? aws_kms_key.data.arn : null
   enabled_cloudwatch_logs_exports = ["postgresql"]
+
+  # RDS would otherwise create the export log group itself, with no
+  # retention, and leave it behind on destroy.
+  depends_on = [aws_cloudwatch_log_group.rds]
+}
+
+resource "aws_cloudwatch_log_group" "rds" {
+  name              = "/aws/rds/instance/${local.name}/postgresql"
+  retention_in_days = 30
 }
 
 # nfx_app's password. Generated ephemerally and written write-only, so it
@@ -102,7 +111,7 @@ ephemeral "random_password" "app_db" {
 resource "aws_secretsmanager_secret" "app_db" {
   name                    = "${local.name}/db-app-password"
   description             = "Password for the nfx_app database role"
-  recovery_window_in_days = 7
+  recovery_window_in_days = var.deletion_protection ? 7 : 0
 }
 
 resource "aws_secretsmanager_secret_version" "app_db" {
@@ -114,8 +123,9 @@ resource "aws_secretsmanager_secret_version" "app_db" {
 # --- Container registry ------------------------------------------------------
 
 resource "aws_ecr_repository" "controlplane" {
-  name                 = "nightfix/controlplane"
+  name                 = "${local.name}/controlplane"
   image_tag_mutability = "IMMUTABLE"
+  force_delete         = !var.deletion_protection
   image_scanning_configuration {
     scan_on_push = true
   }

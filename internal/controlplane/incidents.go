@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -245,7 +246,11 @@ type triggerMatch struct {
 	MaxRunsPerHour  int
 }
 
-func (s *Server) matchTriggers(tx *db.Tx, svc serviceRow, a Alert) ([]triggerMatch, error) {
+// errTriggerBudget: the service's trigger matches didn't all fit in the
+// per-event CEL budget, so which runbooks match is unknown.
+var errTriggerBudget = errors.New("runbook triggers took too long to evaluate")
+
+func (s *Server) matchTriggers(ctx context.Context, tx *db.Tx, svc serviceRow, a Alert) ([]triggerMatch, error) {
 	rows, err := tx.Query(`SELECT r.id, r.name, t.version, t.mode, t.match, t.before_paging,
 			COALESCE(EXTRACT(EPOCH FROM t.cooldown), 0)::float8, COALESCE(t.max_runs_per_hour, 0)
 		FROM runbook_triggers t JOIN runbooks r ON r.id = t.runbook_id
@@ -259,6 +264,7 @@ func (s *Server) matchTriggers(tx *db.Tx, svc serviceRow, a Alert) ([]triggerMat
 	vars := expr.Vars{"alert": alertVars(a)}
 	var out []triggerMatch
 	seen := map[string]bool{}
+	meter := celMeterOf(ctx)
 	for rows.Next() {
 		var m triggerMatch
 		var match string
@@ -267,7 +273,14 @@ func (s *Server) matchTriggers(tx *db.Tx, svc serviceRow, a Alert) ([]triggerMat
 			return nil, err
 		}
 		m.Cooldown = secs(cd)
-		ok, err := expr.EvalBool(match, vars)
+		if meter.exhausted() {
+			return nil, errTriggerBudget
+		}
+		var ok bool
+		err := meter.run(func(c context.Context) (err error) { ok, err = expr.EvalBoolCtx(c, match, vars); return })
+		if errors.Is(err, errCELBudget) {
+			return nil, errTriggerBudget
+		}
 		if err != nil || !ok {
 			continue
 		}
@@ -284,7 +297,13 @@ func (s *Server) matchTriggers(tx *db.Tx, svc serviceRow, a Alert) ([]triggerMat
 // decideRemediation implements remediate-before-paging
 // (alert-incident-model.md §8).
 func (s *Server) decideRemediation(ctx context.Context, tx *db.Tx, inc incidentRow, svc serviceRow, a Alert) error {
-	matches, err := s.matchTriggers(tx, svc, a)
+	if reason, ok := ctx.Value(noRemediationKey{}).(string); ok {
+		return s.page(ctx, tx, inc, "Auto-remediation couldn't be evaluated for this alert ("+reason+"); paging without it")
+	}
+	matches, err := s.matchTriggers(ctx, tx, svc, a)
+	if errors.Is(err, errTriggerBudget) {
+		return s.page(ctx, tx, inc, "The service's runbook triggers took too long to evaluate; paging without auto-remediation")
+	}
 	if err != nil {
 		return err
 	}
@@ -397,18 +416,45 @@ func (s *Server) tryAutoRun(ctx context.Context, tx *db.Tx, inc incidentRow, m t
 		return "", "", err
 	}
 	incCtx := map[string]any{"id": ids.Encode("inc", inc.ID), "number": inc.Number, "title": inc.Title, "severity": inc.Severity}
-	params, perr := runbook.ResolveParams(rb, nil, expr.Vars{"alert": alertCtx, "incident": incCtx})
+	var params map[string]any
+	var perr error
+	if err := celMeterOf(ctx).run(func(c context.Context) error {
+		params, perr = runbook.ResolveParamsCtx(c, rb, nil, expr.Vars{"alert": alertCtx, "incident": incCtx})
+		return nil
+	}); err != nil {
+		perr = err
+	}
 	if perr != nil {
 		return "", "parameters could not be resolved from the alert: " + perr.Error(), nil
 	}
+	// A healthy matching agent must be able to run every agent step type the
+	// runbook uses (an agent that reported no capabilities is offered
+	// anything, as in dispatch). Otherwise the run would wait for an agent
+	// that never comes, and the page would go out only when the run failed.
+	var needed []string
+	seen := map[string]bool{}
+	for _, st := range rb.Spec.Steps {
+		if !st.RunsOnControlPlane() && !seen[st.Type] {
+			seen[st.Type] = true
+			needed = append(needed, st.Type)
+		}
+	}
 	var healthy int
-	if err := tx.QueryRow(`SELECT count(*) FROM agents WHERE status = 'online' AND revoked_at IS NULL AND NOT frozen_local
-		AND last_seen_at > now() - interval '45 seconds' AND labels @> $1::jsonb`,
-		db.JSON[map[string]string]{V: selector(rb)}).Scan(&healthy); err != nil {
+	var missing []string
+	if err := tx.QueryRow(`WITH ok AS (
+			SELECT capabilities FROM agents WHERE status = 'online' AND revoked_at IS NULL AND NOT frozen_local
+			  AND last_seen_at > now() - interval '45 seconds' AND labels @> $1::jsonb)
+		SELECT (SELECT count(*) FROM ok),
+		       COALESCE((SELECT array_agg(t ORDER BY t) FROM unnest($2::text[]) t
+		                 WHERE NOT EXISTS (SELECT 1 FROM ok WHERE cardinality(ok.capabilities) = 0 OR t = ANY(ok.capabilities))), '{}')`,
+		db.JSON[map[string]string]{V: selector(rb)}, stringArray(needed)).Scan(&healthy, (*stringArray)(&missing)); err != nil {
 		return "", "", err
 	}
 	if healthy == 0 {
 		return "", "no healthy agent matches the runbook's target", nil
+	}
+	if len(missing) > 0 {
+		return "", "no healthy agent matching the runbook's target can run its " + strings.Join(missing, ", ") + " steps", nil
 	}
 	// Serializes the counts below with any concurrent start of this runbook
 	// (several control-plane instances process events in parallel), so
@@ -531,6 +577,13 @@ func (s *Server) serviceName(tx *db.Tx, id string) string {
 
 // enqueue writes notifications to the outbox for targets of the given types.
 func (s *Server) enqueue(tx *db.Tx, inc incidentRow, kind string, types []string, payload map[string]any) (int, error) {
+	return s.enqueueTargets(tx, inc, kind, types, payload, true)
+}
+
+// enqueueTargets queues a notification for each of the incident's service
+// targets of the given types; with catchAll, a service that has none falls
+// back to the catch-all service's (pages must go somewhere).
+func (s *Server) enqueueTargets(tx *db.Tx, inc incidentRow, kind string, types []string, payload map[string]any, catchAll bool) (int, error) {
 	payload["incident_id"] = inc.ID
 	payload["incident_number"] = inc.Number
 	payload["kind"] = kind
@@ -552,7 +605,7 @@ func (s *Server) enqueue(tx *db.Tx, inc incidentRow, kind string, types []string
 	if err != nil {
 		return 0, err
 	}
-	if len(ts) == 0 {
+	if len(ts) == 0 && catchAll {
 		if ts, err = targets("service_id = (SELECT id FROM services WHERE is_catch_all) AND $2::text IS NOT NULL", "catch-all"); err != nil {
 			return 0, err
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -43,6 +44,9 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 			Scan(&orgID); err != nil {
 			return nil, httpError{401, "unknown, used or expired enrollment challenge"}
 		}
+		// Refusals before the caller has proved an AWS identity aren't
+		// audited: anyone who knows an org id could otherwise fill its
+		// permanent audit log (challenges are unauthenticated).
 		if ids.Encode("org", orgID) != req.OrgID {
 			return nil, httpError{401, "challenge was issued for a different org"}
 		}
@@ -108,7 +112,7 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 				return err
 			}
 			if active >= max {
-				return httpError{403, fmt.Sprintf("this enrollment token has been used for %d agent(s), its limit; create a new one", active)}
+				return enrollLimit{httpError{403, fmt.Sprintf("this enrollment token has been used for %d agent(s), its limit; create a new one", active)}}
 			}
 		} else {
 			// IAM agents prove their role on every enrollment, and agents
@@ -119,7 +123,7 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 				return err
 			}
 			if active >= max {
-				return httpError{403, fmt.Sprintf("enrollment rule allows at most %d live agents", max)}
+				return enrollLimit{httpError{403, fmt.Sprintf("enrollment rule allows at most %d live agents", max)}}
 			}
 		}
 		agentID := ids.NewString()
@@ -140,10 +144,38 @@ func (s *Server) Enroll(ctx context.Context, req agentapi.EnrollRequest) (*agent
 		audit["labels"], audit["cert_serial"] = labels.V, serial
 		return tx.Audit(ctx, "agent", agentID, "agent.enroll", "agent", agentID, audit)
 	})
+	var limit enrollLimit
+	if errors.As(err, &limit) {
+		actor := iamArn
+		if actor == "" {
+			actor = "token:" + ids.Encode("enr", ruleID)
+		}
+		s.auditEnrollDenial(ctx, orgID, actor, limit.msg, map[string]string{"rule": ids.Encode("enr", ruleID)})
+		return nil, limit.httpError
+	}
 	if err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// enrollLimit is an enrollment refused because its rule is at max_agents;
+// the transaction rolls back, so it's audited separately.
+type enrollLimit struct{ httpError }
+
+// auditEnrollDenial records a refused enrollment once the org is known, in
+// its own transaction (the refusal itself rolls back). Best effort: failing
+// to audit doesn't change the answer.
+func (s *Server) auditEnrollDenial(ctx context.Context, orgID, actor, reason string, meta map[string]string) {
+	data := map[string]string{"reason": reason}
+	for k, v := range meta {
+		data[k] = v
+	}
+	if err := s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
+		return tx.Audit(ctx, "agent", actor, "agent.enroll_denied", "enrollment", actor, data)
+	}); err != nil {
+		s.Log.Warn("enrollment denial could not be audited", "org", orgID, "reason", reason, "err", err)
+	}
 }
 
 // Renew issues a new certificate and retires the old serial.
@@ -198,6 +230,9 @@ func (s *Server) Hello(ctx context.Context, a agentIdentity, h agentapi.Hello) (
 		if err := s.renewLeases(tx, a, h.InFlight); err != nil {
 			return err
 		}
+		if err := s.loseUnlisted(ctx, tx, a, h.InFlight); err != nil {
+			return err
+		}
 		tc, err := trustConfig(tx)
 		if err != nil {
 			return err
@@ -217,8 +252,53 @@ func (s *Server) renewLeases(tx *db.Tx, a agentIdentity, inFlight []string) erro
 	}
 	_, err := tx.Exec(`UPDATE step_attempts SET lease_expires_at = now() + $3::interval
 		WHERE agent_id = $1 AND id = ANY($2::uuid[]) AND state = 'running'`,
-		a.AgentID, stringArray(inFlight), pgInterval(s.Cfg.LeaseDuration))
+		a.AgentID, stringArray(inFlight), pgInterval(s.Cfg.RunningLease))
 	return err
+}
+
+// loseUnlisted: a hello lists every attempt the agent is still running or
+// holding a result for, so a running attempt of this agent that it doesn't
+// list (it restarted mid-step) is lost now, not when its lease runs out
+// (agent-protocol.md §8.2).
+func (s *Server) loseUnlisted(ctx context.Context, tx *db.Tx, a agentIdentity, inFlight []string) error {
+	rows, err := tx.Query(`SELECT id FROM step_attempts WHERE agent_id = $1 AND state = 'running'
+		AND NOT (id = ANY($2::uuid[])) FOR UPDATE`, a.AgentID, stringArray(inFlight))
+	if err != nil {
+		return err
+	}
+	var lost []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		lost = append(lost, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range lost {
+		// Each under a savepoint: one that can't be handled (its runbook
+		// version can't be decoded, say) is left to the lease worker rather
+		// than failing the hello, which would keep the agent out of service.
+		if _, err := tx.Exec(`SAVEPOINT lose_unlisted`); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`UPDATE step_attempts SET state = 'lost', finished_at = now(),
+				error = 'the agent restarted without finishing the step' WHERE id = $1`, id)
+		if err == nil {
+			err = s.onAttemptFinished(ctx, tx, id, "lost", attemptOutcome{Error: "the agent restarted without finishing the step"})
+		}
+		if err != nil {
+			s.Log.Warn("could not mark an unlisted attempt lost; leaving it to its lease", "attempt", id, "err", err)
+			if _, rerr := tx.Exec(`ROLLBACK TO SAVEPOINT lose_unlisted`); rerr != nil {
+				return rerr
+			}
+		}
+	}
+	return nil
 }
 
 // Poll long-polls for one step attempt for this agent.
@@ -369,12 +449,15 @@ func (s *Server) Ack(ctx context.Context, a agentIdentity, attemptID string, ack
 		if err != nil {
 			return err
 		}
+		if state == "running" && ack.Accepted {
+			return nil // a retried ack whose first response was lost
+		}
 		if state != "dispatched" {
 			return httpError{409, "attempt is " + state}
 		}
 		if ack.Accepted {
 			_, err := tx.Exec(`UPDATE step_attempts SET state = 'running', started_at = now(),
-				lease_expires_at = now() + $2::interval WHERE id = $1`, attemptID, pgInterval(s.Cfg.LeaseDuration))
+				lease_expires_at = now() + $2::interval WHERE id = $1`, attemptID, pgInterval(s.Cfg.RunningLease))
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE step_attempts SET state = 'rejected', error = $2, finished_at = now() WHERE id = $1`,
@@ -399,18 +482,60 @@ func (s *Server) Heartbeat(ctx context.Context, a agentIdentity, h agentapi.Hear
 	})
 }
 
+// maxOutputChunks caps an attempt's output rows, the last of them a marker.
+// The agent coalesces consecutive writes to one stream into a chunk, but a
+// step alternating stdout and stderr line by line still makes a row a line,
+// so the cap is set well above what a step's 1 MiB of text normally needs.
+var maxOutputChunks = 50_000 // a variable for tests
+
+// outputGrace is how long after an attempt finishes its output is accepted:
+// long enough for an agent that was cut off (its attempt declared lost) to
+// deliver what it captured, which is what someone deciding the page needs.
+const outputGrace = time.Hour
+
 // Output stores redacted output chunks, capped per attempt.
 func (s *Server) Output(ctx context.Context, a agentIdentity, attemptID string, b agentapi.OutputBatch) error {
 	return s.DB.WithOrg(ctx, a.OrgID, func(tx *db.Tx) error {
-		if _, err := lockAttempt(tx, a, attemptID); err != nil {
+		state, err := lockAttempt(tx, a, attemptID)
+		if err != nil {
 			return err
 		}
-		var stored int
-		if err := tx.QueryRow(`SELECT COALESCE(sum(octet_length(data)), 0) FROM step_output_chunks WHERE attempt_id = $1`, attemptID).Scan(&stored); err != nil {
+		if state != "dispatched" && state != "running" {
+			// A finished attempt's record is settled. Its last output may
+			// still be on the way (a step cancelled or timed out by the
+			// control plane, a flush retried as it ended), so there's a short
+			// grace period; after that, output is refused.
+			var late bool
+			if err := tx.QueryRow(`SELECT finished_at IS NULL OR finished_at < now() - $2::interval FROM step_attempts WHERE id = $1`,
+				attemptID, pgInterval(outputGrace)).Scan(&late); err != nil {
+				return err
+			}
+			if late {
+				return httpError{409, "attempt is " + state}
+			}
+		}
+		var stored, rows int
+		if err := tx.QueryRow(`SELECT COALESCE(sum(octet_length(data)), 0), count(*) FROM step_output_chunks WHERE attempt_id = $1`,
+			attemptID).Scan(&stored, &rows); err != nil {
 			return err
 		}
 		for _, c := range b.Chunks {
-			if stored >= agentapi.MaxOutputBytes {
+			// Bytes and rows are both capped: empty or tiny chunks would
+			// otherwise add rows without ever reaching the byte cap.
+			if stored >= agentapi.MaxOutputBytes || rows >= maxOutputChunks {
+				break
+			}
+			if c.Data == "" {
+				continue
+			}
+			if rows == maxOutputChunks-1 {
+				// The last row says the rest was dropped, instead of the
+				// output just stopping (often before the error at its end).
+				if _, err := tx.Exec(`INSERT INTO step_output_chunks (org_id, attempt_id, seq, stream, data)
+					SELECT $1,$2,$3,'log',$4 WHERE NOT EXISTS (SELECT 1 FROM step_output_chunks WHERE attempt_id = $2 AND seq = $3)`,
+					tx.OrgID, attemptID, c.Seq, "\n[output truncated: too many chunks]\n"); err != nil {
+					return err
+				}
 				break
 			}
 			// Output is arbitrary bytes from customer scripts; Postgres text
@@ -438,6 +563,7 @@ func (s *Server) Output(ctx context.Context, a agentIdentity, attemptID string, 
 				continue
 			}
 			stored += len(data)
+			rows++
 		}
 		return nil
 	})
@@ -450,8 +576,14 @@ func (s *Server) Result(ctx context.Context, a agentIdentity, attemptID string, 
 		if err != nil {
 			return err
 		}
+		if state == "lost" {
+			// Declared lost after the agent went quiet past its running lease,
+			// and the run has moved on (retried, or handed to a human). Too
+			// late to change the run, but the human deciding should know.
+			return s.noteLateResult(tx, attemptID, r)
+		}
 		if state != "running" && state != "dispatched" {
-			return nil // already terminal (duplicate, cancelled or lost): accept and ignore
+			return nil // already terminal (duplicate or cancelled): accept and ignore
 		}
 		switch r.Status {
 		case "succeeded", "failed", "timed_out", "cancelled":
@@ -463,6 +595,15 @@ func (s *Server) Result(ctx context.Context, a agentIdentity, attemptID string, 
 		// the step ended up "lost" with its real outcome discarded.
 		r.Error = truncate(cleanText(r.Error), maxStoredError)
 		r.Outputs, _ = cleanJSONValue(r.Outputs).(map[string]any)
+		// The agent fails a step whose outputs exceed 1 MiB; hold the
+		// control plane to the same bound whatever an agent sends.
+		if b, _ := json.Marshal(r.Outputs); len(b) > agentapi.MaxOutputBytes {
+			r.Outputs = nil
+			if r.Status == "succeeded" {
+				r.Status = "failed"
+				r.Error = fmt.Sprintf("the step's outputs are %d KiB, over the %d KiB limit", len(b)>>10, agentapi.MaxOutputBytes>>10)
+			}
+		}
 		// The control plane's own cancellations are already terminal above,
 		// so a "cancelled" report means the agent stopped the step itself
 		// (typically shutting down mid-step). The step may or may not have
@@ -492,6 +633,39 @@ func (s *Server) Result(ctx context.Context, a agentIdentity, attemptID string, 
 }
 
 var _ = errors.New
+
+// noteLateResult puts a result that arrived after its attempt was declared
+// lost on the incident's timeline, once.
+func (s *Server) noteLateResult(tx *db.Tx, attemptID string, r agentapi.Result) error {
+	var incident sql.NullString
+	var stepID string
+	var noted bool
+	if err := tx.QueryRow(`SELECT r.incident_id, a.step_id, a.error LIKE '%(late result:%'
+		FROM step_attempts a JOIN runbook_runs r ON r.id = a.run_id WHERE a.id = $1`, attemptID).Scan(&incident, &stepID, &noted); err != nil {
+		return err
+	}
+	if noted {
+		return nil
+	}
+	status := r.Status
+	switch status {
+	case "succeeded", "failed", "timed_out", "cancelled":
+	default:
+		return httpError{400, "invalid result status"}
+	}
+	if _, err := tx.Exec(`UPDATE step_attempts SET error = coalesce(error, '') || $2 WHERE id = $1`,
+		attemptID, " (late result: "+status+")"); err != nil {
+		return err
+	}
+	if !incident.Valid {
+		return nil
+	}
+	msg := fmt.Sprintf("After step %s was declared lost, its agent reconnected and reported it %s", stepID, status)
+	if e := truncate(cleanText(r.Error), 500); e != "" {
+		msg += " — " + e
+	}
+	return s.timeline(tx, incident.String, "run.step_late_result", "agent", "", msg, map[string]any{"step": stepID, "status": status})
+}
 
 // maxStoredError bounds error text stored from agents.
 const maxStoredError = 16 << 10

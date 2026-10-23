@@ -77,13 +77,13 @@ func (s *Server) withIdempotency(w http.ResponseWriter, r *http.Request, p princ
 		return
 	}
 	if !claimed {
-		s.replayIdempotent(w, r, p, prev, sum[:])
+		s.replayIdempotent(w, r, p, key, prev, sum[:])
 		return
 	}
 
 	rec := &capturedResponse{header: w.Header(), code: http.StatusOK}
 	serve(rec)
-	s.finishIdempotencyKey(ctx, p, key, reqID, rec)
+	s.finishIdempotencyKey(ctx, p, key, reqID, r.Method, r.URL.Path, rec)
 	w.WriteHeader(rec.code)
 	w.Write(rec.body.Bytes())
 }
@@ -120,7 +120,7 @@ func (s *Server) claimIdempotencyKey(ctx context.Context, p principal, key, meth
 }
 
 // replayIdempotent answers a request whose key is already taken.
-func (s *Server) replayIdempotent(w http.ResponseWriter, r *http.Request, p principal, prev idempotencyRecord, bodyHash []byte) {
+func (s *Server) replayIdempotent(w http.ResponseWriter, r *http.Request, p principal, key string, prev idempotencyRecord, bodyHash []byte) {
 	switch {
 	case prev.Method != r.Method || prev.Path != r.URL.Path || !bytes.Equal(prev.BodyHash, bodyHash):
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
@@ -129,7 +129,7 @@ func (s *Server) replayIdempotent(w http.ResponseWriter, r *http.Request, p prin
 		w.Header().Set("Retry-After", "1")
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "a request with this Idempotency-Key is still in progress; retry shortly"})
 	default:
-		body, err := s.Sealer.Open(prev.Response, p.OrgID)
+		body, err := s.unseal(prev.Response, p.OrgID, sealIdempotentReplies, p.actor(), key, r.Method, r.URL.Path)
 		if err != nil {
 			s.reply(w, nil, err)
 			return
@@ -143,14 +143,14 @@ func (s *Server) replayIdempotent(w http.ResponseWriter, r *http.Request, p prin
 
 // finishIdempotencyKey stores the response for replay, or releases the claim
 // after a server error so a retry can run.
-func (s *Server) finishIdempotencyKey(ctx context.Context, p principal, key, reqID string, rec *capturedResponse) {
+func (s *Server) finishIdempotencyKey(ctx context.Context, p principal, key, reqID, method, path string, rec *capturedResponse) {
 	// Record it even if the client has gone away: its retry needs the answer.
 	err := s.DB.WithOrg(context.WithoutCancel(ctx), p.OrgID, func(tx *db.Tx) error {
 		if rec.code >= 500 {
 			_, err := tx.Exec(`DELETE FROM idempotency_keys WHERE principal = $1 AND key = $2 AND request_id = $3`, p.actor(), key, reqID)
 			return err
 		}
-		sealed, err := s.Sealer.Seal(rec.body.Bytes(), p.OrgID)
+		sealed, err := s.seal(rec.body.Bytes(), p.OrgID, sealIdempotentReplies, p.actor(), key, method, path)
 		if err != nil {
 			return err
 		}

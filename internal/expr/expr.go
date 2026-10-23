@@ -124,6 +124,21 @@ func valSize(v ref.Val) uint64 {
 
 const ()
 
+// References reports whether src uses the variable name anywhere (a
+// comprehension variable of the same name counts too, which errs on the
+// safe side). src must compile.
+func References(src, name string) (bool, error) {
+	e, err := getEnv()
+	if err != nil {
+		return false, err
+	}
+	a, iss := e.Parse(src)
+	if iss != nil && iss.Err() != nil {
+		return false, iss.Err()
+	}
+	return identRefs(a.NativeRep().Expr(), name) > 0, nil
+}
+
 func identRefs(e celast.Expr, name string) int {
 	n := 0
 	celast.PreOrderVisit(e, celast.NewExprVisitor(func(x celast.Expr) {
@@ -225,6 +240,17 @@ type Vars map[string]any
 
 // Eval evaluates src and returns a JSON-shaped Go value.
 func Eval(src string, vars Vars) (any, error) {
+	return EvalCtx(context.Background(), src, vars)
+}
+
+// EvalCtx is Eval with a caller's deadline as well: it stops at whichever
+// comes first, ctx's or the per-expression limit. Callers that evaluate many
+// expressions for one event (routing rules, trigger matches) use it to bound
+// their total.
+func EvalCtx(parent context.Context, src string, vars Vars) (any, error) {
+	if err := parent.Err(); err != nil {
+		return nil, fmt.Errorf("evaluate %q: %w", src, err)
+	}
 	p, err := program(src)
 	if err != nil {
 		return nil, err
@@ -233,10 +259,13 @@ func Eval(src string, vars Vars) (any, error) {
 	for k, v := range vars {
 		act[k] = Normalize(v)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), maxEvalTime)
+	ctx, cancel := context.WithTimeout(parent, maxEvalTime)
 	defer cancel()
 	out, _, err := p.ContextEval(ctx, act)
 	if err != nil {
+		if perr := parent.Err(); perr != nil {
+			return nil, fmt.Errorf("evaluate %q: %w", src, perr)
+		}
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("evaluate %q: took longer than %v", src, maxEvalTime)
 		}
@@ -248,7 +277,12 @@ func Eval(src string, vars Vars) (any, error) {
 
 // EvalBool evaluates src and requires a boolean result.
 func EvalBool(src string, vars Vars) (bool, error) {
-	v, err := Eval(src, vars)
+	return EvalBoolCtx(context.Background(), src, vars)
+}
+
+// EvalBoolCtx is EvalBool with a caller's deadline (see EvalCtx).
+func EvalBoolCtx(ctx context.Context, src string, vars Vars) (bool, error) {
+	v, err := EvalCtx(ctx, src, vars)
 	if err != nil {
 		return false, err
 	}

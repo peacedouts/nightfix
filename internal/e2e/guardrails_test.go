@@ -12,11 +12,13 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -155,7 +157,7 @@ func (g *guard) clear(key string) {
 
 func (g *guard) send(body map[string]any) {
 	g.t.Helper()
-	b, _ := json.Marshal(body)
+	b := deliveryBody(body)
 	req, _ := http.NewRequest("POST", g.ingest, bytes.NewReader(b))
 	req.Header.Set(controlplane.WebhookSignatureHeader, controlplane.SignWebhook(g.secret, b, time.Now()))
 	resp, err := http.DefaultClient.Do(req)
@@ -365,6 +367,21 @@ func TestGuardrailNoHealthyAgentPagesWithoutRunning(t *testing.T) {
 	g := setupGuard(t, nil, rb)
 	g.fire("A", "high", ordersSvc)
 	g.assertBlocked(1, "no healthy agent matches the runbook's target")
+}
+
+// An online agent that matches the target but can't run the runbook's step
+// types (here: it reports only shell, and the runbook uses aws)
+// doesn't count: holding the page would only delay it until the run failed.
+func TestGuardrailAgentWithoutTheStepTypesPagesWithoutRunning(t *testing.T) {
+	g := setupGuard(t, nil, held("orders-restart"))
+	if err := g.db.WithOrg(context.Background(), g.rawOrg, func(tx *db.Tx) error {
+		_, err := tx.Exec(`UPDATE agents SET capabilities = '{shell}'`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	g.fire("A", "high", ordersSvc)
+	g.assertBlocked(1, "can run its aws steps")
 }
 
 func TestGuardrailCooldownForIdenticalParams(t *testing.T) {
@@ -605,3 +622,21 @@ func TestGuardrailReopenedFixIsNotCountedAsVerified(t *testing.T) {
 		t.Fatalf("the run of a fix that didn't hold is still verified: %+v", runs[0])
 	}
 }
+
+// deliveryBody marshals a webhook alert with a unique "delivery" field (the
+// normalizer ignores it), so each send is a distinct delivery, as a real
+// sender's repeat would be. Identical bytes signed in the same second are one
+// delivery. (ingest_test.go, in the external test package, has the same.)
+func deliveryBody(body map[string]any) []byte {
+	m := make(map[string]any, len(body)+1)
+	for k, v := range body {
+		m[k] = v
+	}
+	if _, ok := m["delivery"]; !ok {
+		m["delivery"] = deliverySeq.Add(1)
+	}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+var deliverySeq atomic.Int64

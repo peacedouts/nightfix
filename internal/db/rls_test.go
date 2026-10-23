@@ -129,10 +129,15 @@ func TestAuditIsAppendOnlyAndChained(t *testing.T) {
 		t.Fatalf("audit chain broken at seq %d", broken.Int64)
 	}
 
-	// The app role cannot update or delete audit rows.
+	// The app role cannot update or delete audit rows, or insert them other
+	// than through nfx_audit (the hash is unkeyed, so a direct insert could
+	// append an event that verifies).
 	for _, stmt := range []string{
 		`UPDATE audit_events SET action = 'tampered' WHERE seq = 2`,
 		`DELETE FROM audit_events WHERE seq = 2`,
+		`INSERT INTO audit_events (org_id, seq, at, actor_type, actor_id, action, resource_type, resource_id, data, prev_hash, hash, hash_version)
+		 SELECT org_id, seq + 1, at, actor_type, actor_id, 'forged', resource_type, resource_id, data, hash, hash, hash_version
+		 FROM audit_events ORDER BY seq DESC LIMIT 1`,
 	} {
 		err := pool.WithOrg(ctx, a, func(tx *db.Tx) error {
 			_, err := tx.Exec(stmt)

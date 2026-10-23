@@ -166,10 +166,14 @@ func (s *Server) advance(ctx context.Context, tx *db.Tx, runID string) error {
 	if err != nil {
 		return err
 	}
+	// Conditions share a CEL budget (the alert event's, when a trigger
+	// started the run inside alert processing).
+	meter := celMeterOf(ctx)
 	for idx := run.CurrentStep; idx < len(rb.Spec.Steps); idx++ {
 		step := rb.Spec.Steps[idx]
 		if step.When != "" {
-			ok, err := expr.EvalBool(step.When, stepVars(run))
+			var ok bool
+			err := meter.run(func(c context.Context) (err error) { ok, err = expr.EvalBoolCtx(c, step.When, stepVars(run)); return })
 			if err != nil {
 				return s.finishRun(ctx, tx, run, rb, "failed", fmt.Sprintf("step %s: when: %v", step.ID, err))
 			}

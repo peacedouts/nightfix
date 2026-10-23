@@ -67,7 +67,7 @@ func (s *Server) apiCreateSlackApp(r *http.Request, p principal) (any, error) {
 	}
 	id := ids.NewString()
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
-		sealed, err := s.Sealer.Seal([]byte(req.SigningSecret), p.OrgID)
+		sealed, err := s.seal([]byte(req.SigningSecret), p.OrgID, sealSlackSigning)
 		if err != nil {
 			return err
 		}
@@ -168,7 +168,7 @@ func (s *Server) slackRequest(w http.ResponseWriter, r *http.Request) (orgID str
 		http.Error(w, "unknown app", http.StatusNotFound)
 		return
 	}
-	secret, err := s.Sealer.Open(sealed, orgID)
+	secret, err := s.unseal(sealed, orgID, sealSlackSigning)
 	if err != nil {
 		s.Log.Error("slack: unseal signing secret", "app", appID, "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

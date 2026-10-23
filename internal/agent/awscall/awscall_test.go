@@ -333,3 +333,24 @@ func TestSignGetCallerIdentity(t *testing.T) {
 		t.Fatal("signature verifies for a different nonce")
 	}
 }
+
+// JSON-protocol services report throttling as HTTP 400: the code decides.
+func TestErrorRetryable(t *testing.T) {
+	for _, c := range []struct {
+		e    Error
+		want bool
+	}{
+		{Error{Code: "ThrottlingException", Status: 400}, true},
+		{Error{Code: "TooManyRequestsException", Status: 400}, true},
+		{Error{Code: "InternalFailure", Status: 500}, true},
+		{Error{Status: 503}, true},
+		{Error{Status: 429}, true},
+		{Error{Code: "AccessDeniedException", Status: 400}, false},
+		{Error{Code: "ClusterNotFoundException", Status: 400}, false},
+		{Error{Code: "ValidationException", Status: 400}, false},
+	} {
+		if got := c.e.Retryable(); got != c.want {
+			t.Errorf("%s (HTTP %d): Retryable() = %v, want %v", c.e.Code, c.e.Status, got, c.want)
+		}
+	}
+}

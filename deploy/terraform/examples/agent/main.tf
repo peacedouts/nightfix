@@ -47,6 +47,12 @@ variable "ecs_cluster_name" {
   default     = "prod-east"
 }
 
+variable "required_signers" {
+  description = "Pin the org's signing key in the agent: the agent_pin from GET /v1/signing-keys, split on commas. Empty trusts the control plane's list."
+  type        = list(string)
+  default     = []
+}
+
 variable "nightfix_api_url" {
   description = "Nightfix API (for a sandbox control plane, its api_url output)"
   type        = string
@@ -70,6 +76,7 @@ module "nightfix_agent" {
   subnet_ids       = var.subnet_ids
   nightfix_api_url = var.nightfix_api_url
   agent_endpoint   = var.agent_endpoint
+  required_signers = var.required_signers
 
   # Exactly what examples/runbooks/ecs-service-restart.yaml calls, scoped to
   # one cluster's services. The agent can do nothing else in this account.

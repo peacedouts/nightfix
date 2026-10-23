@@ -195,11 +195,13 @@ Context available to expressions:
 |---|---|
 | `params` | Resolved, validated parameters |
 | `secrets` | Secret values (only in `env` / `files` / `http.headers`) |
-| `alert` | `source`, `severity`, `summary`, `labels`, `annotations`, `raw` (when triggered by an alert) |
-| `incident` | `id`, `title`, `severity`, `url` |
+| `alert` | `source`, `severity`, `summary`, `labels`, `annotations`, `raw` (when triggered by an alert). Not in step inputs (`aws.input`, `env`, `files`): see below |
+| `incident` | `id`, `title`, `severity`, `url`. Not in step inputs either |
 | `run` | `id`, `requestedBy`, `startedAt`, `mode` |
 | `target` | Matched agent's labels, e.g. `target.env`. Not available in `when:`, which the control plane evaluates before an agent is chosen; the linter rejects it there |
 | `steps` | `steps.<id>.outputs.*`, `steps.<id>.status` |
+
+**Alert data reaches a step only through a parameter.** Whoever can publish an alert shapes its labels and summary, and the agent validates parameters only. So `alert.*` and `incident.*` can't be used in a step's inputs, or in its `outputs` (which later steps' inputs read); declare a parameter with `from: alert.labels.service` and a `pattern` (or make it an enum), and use `params.service`. The linter refuses the direct form, and the agent doesn't offer `alert` or `incident` when rendering inputs or evaluating outputs, so a bundle that skipped the linter can't use them either. `onFailure.message`, rendered by the control plane for people, may use them.
 
 ---
 
@@ -433,7 +435,7 @@ How `approval` steps behave, as implemented in `internal/controlplane/approvals.
 - **Slack.** Approval requests go to the service's Slack targets with Approve/Reject buttons when the org has registered a Slack app (`POST /v1/slack-apps`), otherwise with API instructions. Button clicks are authenticated by Slack's v0 signature with a 5-minute timestamp window, and the workspace is pinned when `team_id` is set. Replies go only to Slack's `response_url` host. A Slack user is linked to a Nightfix user only by a one-time code (60 bits, 10 minutes) that Nightfix issues to the signed-in user and that they type into Slack (`/nightfix link <code>`), never by profile email. The code only travels Nightfix → Slack: the reverse (a code shown in Slack, redeemed in Nightfix) is phishable like an OAuth device code, because an attacker could ask an admin to "enter this code". Slack decisions use the member's last-synced teams, so they require a sign-in to this org within 7 days.
 - **Concurrency.** Locks are always taken org → run → gate (freeze, decisions, run timeouts and gate expiry), so these can't deadlock each other.
 - **Trust boundary.** Approvals are enforced by the control plane. The agent doesn't yet verify signed approval evidence before running later steps; that's a candidate follow-up that pairs with customer co-signing.
-- **Routing.** A run in an incident asks in its service's Slack targets. A run outside an incident, or one whose service has no Slack target, asks in the runbook team's approval channel, else the org default (`PUT /v1/approval-channels`); decisions are posted to the same place. With nothing configured, `GET /v1/approvals` still lists it.
+- **Routing.** A run in an incident asks in its service's Slack targets. A run outside an incident, or one whose service has no Slack target, asks in the runbook team's approval channel, else the org default (`PUT /v1/approval-channels`); decisions are posted to the same place. A run in an incident with none of those goes to the catch-all service's Slack targets as a last resort. With nothing configured at all, `GET /v1/approvals` still lists it.
 - **Not yet built.** Approver groups other than roles, and `manual` checklist steps, come later.
 
 ## 10. Open questions

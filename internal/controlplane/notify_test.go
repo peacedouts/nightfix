@@ -87,7 +87,7 @@ func (h *notifyHarness) org() (org, svc string) {
 
 func (h *notifyHarness) target(org, svc, typ, secret string, cfg map[string]string) string {
 	h.t.Helper()
-	sealed, err := h.s.Sealer.Seal([]byte(secret), org)
+	sealed, err := h.s.seal([]byte(secret), org, sealNotifyCredential)
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func (h *notifyHarness) target(org, svc, typ, secret string, cfg map[string]stri
 
 func (h *notifyHarness) channel(org, url string) string {
 	h.t.Helper()
-	sealed, _ := h.s.Sealer.Seal([]byte(url), org)
+	sealed, _ := h.s.seal([]byte(url), org, sealNotifyCredential)
 	id := ids.NewString()
 	h.exec(org, `INSERT INTO approval_channels (id, org_id, credential, created_by) VALUES ($1,$2,$3,'test')`, id, org, sealed)
 	return id
@@ -761,7 +761,7 @@ func TestNotifyStaleLeaseCannotRecord(t *testing.T) {
 		t.Fatalf("delivered %d notifications while the only one was leased", n)
 	}
 	h.exec(org, `UPDATE notifications SET lease_until = now() - interval '1 second'`)
-	h.exec(org, `UPDATE escalation_targets SET credential = $1`, func() []byte { b, _ := h.s.Sealer.Seal([]byte("http://127.0.0.1:2/y"), org); return b }())
+	h.exec(org, `UPDATE escalation_targets SET credential = $1`, func() []byte { b, _ := h.s.seal([]byte("http://127.0.0.1:2/y"), org, sealNotifyCredential); return b }())
 	h.deliver() // takes the row over: fails, attempt 1
 	h.s.recordNotification(context.Background(), &notifyJob{OrgID: org, ID: page, LeaseID: stale, Kind: "page", Type: "slack"}, nil)
 	if got := h.row(org, page); got.Status != "pending" || got.Attempts != 1 {

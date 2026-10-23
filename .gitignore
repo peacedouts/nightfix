@@ -12,3 +12,10 @@ website/
 .claude/
 cover.out
 test.log
+
+# Terraform: local state, plugins and per-environment settings stay out of git
+**/.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+backend.hcl

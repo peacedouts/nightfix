@@ -42,3 +42,13 @@ output "github_variables" {
     TASKS_SECURITY_GROUP = aws_security_group.tasks.id
   }
 }
+
+output "vpc_id" {
+  description = "The control plane's VPC (the sandbox smoke test runs the agent and demo service in it)"
+  value       = aws_vpc.main.id
+}
+
+output "private_subnet_ids" {
+  description = "Private subnets with a NAT gateway"
+  value       = aws_subnet.private[*].id
+}

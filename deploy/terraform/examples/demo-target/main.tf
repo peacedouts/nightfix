@@ -1,11 +1,12 @@
 # A service for demonstrating Nightfix on real AWS: an ECS service that
-# reports itself unhealthy a few minutes after it starts, a CloudWatch alarm
-# on that, and the SNS topic that delivers the alarm to Nightfix.
+# reports itself unhealthy from a set time (break_at), a CloudWatch alarm on
+# that, and the SNS topic that delivers the alarm to Nightfix.
 #
-# A forced new deployment (what the ecs-service-restart runbook does) starts
-# a fresh, healthy task, so the alarm clears: the incident auto-remediates
-# and nobody is paged. With heal_on_restart = false every task starts broken,
-# so the restart doesn't help and on-call is paged (the demo-fail story).
+# Only tasks started before break_at break, so a forced new deployment (what
+# the ecs-service-restart runbook does) starts a healthy task, the alarm
+# clears and nobody is paged; it doesn't break again later. With
+# heal_on_restart = false every task is broken, so the restart doesn't help
+# and on-call is paged (the demo-fail story).
 #
 # No image to build: the task runs a few lines of Python on the public
 # python image and logs one JSON line every 10 seconds. A metric filter turns
@@ -15,7 +16,8 @@
 #   1. Create the Nightfix integration first, pinned to this topic:
 #        POST /v1/integrations {"type":"cloudwatch", "default_service":"checkout-api",
 #          "topic_arn":"arn:aws:sns:<region>:<account>:nightfix-demo-alarms"}
-#   2. terraform apply -var vpc_id=… -var 'subnet_ids=[…]' -var ingest_url=<the integration's ingest_url>
+#   2. terraform apply -var vpc_id=… -var 'subnet_ids=[…]' -var ingest_url=<the integration's ingest_url> \
+#        -var break_at=$(( $(date +%s) + 300 ))      # breaks in 5 minutes
 #
 # Nightfix confirms the SNS subscription itself once it has verified the
 # signature. See deploy/aws-smoke-test.md for the whole run.
@@ -65,10 +67,10 @@ variable "service_name" {
   default     = "checkout-api"
 }
 
-variable "break_after_seconds" {
-  description = "How long a new task reports healthy before it reports unhealthy"
+variable "break_at" {
+  description = "Unix time from which tasks started before it report unhealthy (once). 0 never breaks on its own."
   type        = number
-  default     = 300
+  default     = 0
 }
 
 variable "heal_on_restart" {
@@ -82,10 +84,10 @@ locals {
   script     = <<-PY
     import json, os, time
     start = time.time()
-    after = int(os.environ["BREAK_AFTER"])
+    break_at = int(os.environ["BREAK_AT"])
     heal = os.environ["HEAL_ON_RESTART"] == "true"
     while True:
-        bad = (not heal) or time.time() - start > after
+        bad = (not heal) or (break_at > 0 and start < break_at <= time.time())
         print(json.dumps({"cluster": os.environ["CLUSTER"], "service": os.environ["SERVICE"], "unhealthy": 1 if bad else 0}), flush=True)
         time.sleep(10)
   PY
@@ -147,7 +149,7 @@ resource "aws_ecs_task_definition" "demo" {
     environment = [
       { name = "CLUSTER", value = var.cluster_name },
       { name = "SERVICE", value = var.service_name },
-      { name = "BREAK_AFTER", value = tostring(var.break_after_seconds) },
+      { name = "BREAK_AT", value = tostring(var.break_at) },
       { name = "HEAL_ON_RESTART", value = tostring(var.heal_on_restart) },
     ]
     logConfiguration = {
@@ -172,10 +174,9 @@ resource "aws_ecs_service" "demo" {
     security_groups  = [aws_security_group.demo.id]
     assign_public_ip = false
   }
-  # The runbook forces new deployments; Terraform shouldn't undo them.
-  lifecycle {
-    ignore_changes = [task_definition]
-  }
+  # A forced deployment (the runbook) keeps the task definition, so there's
+  # nothing for Terraform to undo; changing heal_on_restart or break_at
+  # rolls out a new one.
 }
 
 resource "aws_cloudwatch_log_metric_filter" "unhealthy" {
@@ -196,6 +197,9 @@ resource "aws_cloudwatch_log_metric_filter" "unhealthy" {
 
 resource "aws_sns_topic" "alarms" {
   name = local.topic_name
+  # Sign deliveries with SHA-256 (version 1, the default, uses SHA-1).
+  # Nightfix verifies both.
+  signature_version = 2
 }
 
 # Nightfix confirms the subscription itself after verifying its signature.
@@ -204,6 +208,10 @@ resource "aws_sns_topic_subscription" "nightfix" {
   protocol               = "https"
   endpoint               = var.ingest_url
   endpoint_auto_confirms = true
+
+  # Nightfix fetches SNS's signing certificate before confirming; allow for a
+  # slow first confirmation.
+  confirmation_timeout_in_minutes = 5
 }
 
 # The example runbook's trigger matches alarm names starting "ecs-unhealthy-".

@@ -23,16 +23,17 @@ variable "agent_endpoint" {
 
 variable "image" {
   description = <<-EOT
-    Agent image, pinned. The agent runs under your IAM role and decides what
-    to execute, so a moving tag would let any new build reach your account on
-    the next task restart. Use a digest (ghcr.io/peacedouts/nightfix-agent@sha256:…)
-    or an immutable commit tag (…:sha-<40-char commit>). Verify it with cosign
-    before pinning (see the deployment guide).
+    Agent image, pinned by digest (ghcr.io/peacedouts/nightfix-agent@sha256:…).
+    The agent runs under your IAM role and decides what to execute, so
+    anything that can change would let a new build reach your account on the
+    next task restart. That includes :sha-<commit> tags: registry tags can be
+    re-pushed. Verify the digest with cosign before pinning (see the
+    deployment guide).
   EOT
   type        = string
   validation {
-    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.image)) || can(regex(":sha-[0-9a-f]{40}$", var.image))
-    error_message = "Pin the agent image by digest (@sha256:…) or commit tag (:sha-<commit>); moving tags like :latest or :main aren't allowed."
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.image))
+    error_message = "Pin the agent image by digest (…@sha256:<64 hex>). Registry tags, including :sha-<commit>, can be re-pushed."
   }
 }
 
@@ -92,6 +93,10 @@ variable "required_signers" {
   description = "Signers every runbook must carry, pinned in the agent itself, each as \"key_id=base64-public-key\" (a bare key_id doesn't pin the key). With your own key here, even a compromised Nightfix can't get new code run in your account."
   type        = list(string)
   default     = []
+  validation {
+    condition     = alltrue([for s in var.required_signers : can(regex("^[^=,\\s]+=[A-Za-z0-9+/]+={0,2}$", s))])
+    error_message = "Each required signer is \"key_id=base64-public-key\" (the agent_pin from GET /v1/signing-keys, split on commas)."
+  }
 }
 
 variable "ca_pem" {

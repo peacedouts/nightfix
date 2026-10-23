@@ -66,13 +66,15 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		// long after it was received, so it could be processed after a later
 		// event from the same source (events are processed oldest first).
 		var m snsMessage
+		var whAt time.Time
+		var whSig string
 		switch typ {
 		case "webhook":
-			secret, err := s.Sealer.Open(cred, orgID)
+			secret, err := s.unseal(cred, orgID, sealWebhookSecret)
 			if err != nil {
 				return err
 			}
-			if err := verifyWebhook(string(secret), body, r.Header.Get(WebhookSignatureHeader), time.Now()); err != nil {
+			if whAt, whSig, err = verifyWebhook(string(secret), body, r.Header.Get(WebhookSignatureHeader), time.Now()); err != nil {
 				return httpError{http.StatusUnauthorized, err.Error()}
 			}
 		case "cloudwatch":
@@ -111,10 +113,29 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		// time (not the transaction's start), so events order as they arrive.
 		return s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
 			// Shared with other deliveries, exclusive with the claim of this
-			// org's next event (migration 0023): an event isn't processed
+			// org's next event (migrations 0023, 0026): an event isn't picked
 			// while an older one may still be committing.
+			// The claim holds it only for an instant (migration 0026); if it
+			// can't be had in 5s something is wrong, and failing lets the
+			// sender retry instead of holding a connection.
+			if _, err := tx.Exec(`SET LOCAL lock_timeout = '5s'`); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(`SELECT pg_advisory_xact_lock_shared(hashtextextended('nfx_ingest:' || $1, 0))`, orgID); err != nil {
 				return err
+			}
+			if typ == "webhook" {
+				// The same signed delivery a second time (a sender's retry, or
+				// a captured request replayed inside the window): acknowledge
+				// it and store nothing, so it can't re-fire a resolved alert.
+				fresh, err := s.freshDelivery(tx, integrationID, "whsig:"+whSig, whAt.Add(webhookWindow))
+				if err != nil {
+					return err
+				}
+				if !fresh {
+					status, result = http.StatusOK, "duplicate"
+					return nil
+				}
 			}
 			if typ == "cloudwatch" {
 				fresh, err := s.freshSNSNotification(tx, integrationID, m)
@@ -174,9 +195,16 @@ func (s *Server) freshSNSNotification(tx *db.Tx, integrationID string, m snsMess
 	if now.After(expires) {
 		expires = now
 	}
+	return s.freshDelivery(tx, integrationID, m.MessageID, expires.Add(s.Cfg.SNSMaxMessageAge))
+}
+
+// freshDelivery records a delivery's id until it expires and reports whether
+// it's the first time the id was seen. Expired ids are deleted by the
+// partition-maintenance worker (nfx_expire_ingest_message_ids).
+func (s *Server) freshDelivery(tx *db.Tx, integrationID, id string, expires time.Time) (bool, error) {
 	res, err := tx.Exec(`INSERT INTO ingest_message_ids (org_id, integration_id, message_id, expires_at) VALUES ($1,$2,$3,$4)
 		ON CONFLICT (org_id, integration_id, message_id) DO NOTHING`,
-		tx.OrgID, integrationID, m.MessageID, expires.Add(s.Cfg.SNSMaxMessageAge))
+		tx.OrgID, integrationID, id, expires.Add(time.Minute))
 	if err != nil {
 		return false, err
 	}

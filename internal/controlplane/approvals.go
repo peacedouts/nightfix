@@ -140,7 +140,9 @@ func (s *Server) openGate(ctx context.Context, tx *db.Tx, run runRow, rb *runboo
 func (s *Server) notifyApproval(tx *db.Tx, rb *runbook.Runbook, inc *incidentRow, kind string, payload map[string]any) error {
 	if inc != nil {
 		payload["title"], payload["service"], payload["severity"] = inc.Title, s.serviceName(tx, inc.ServiceID), inc.Severity
-		n, err := s.enqueue(tx, *inc, kind, []string{"slack"}, payload)
+		// Not the catch-all service's: Approve buttons belong with the
+		// service's people or the runbook team's approval channel.
+		n, err := s.enqueueTargets(tx, *inc, kind, []string{"slack"}, payload, false)
 		if err != nil || n > 0 {
 			return err
 		}
@@ -150,7 +152,14 @@ func (s *Server) notifyApproval(tx *db.Tx, rb *runbook.Runbook, inc *incidentRow
 		WHERE (t.slug = $1 AND t.archived_at IS NULL) OR c.team_id IS NULL
 		ORDER BY c.team_id IS NULL LIMIT 1`, rb.Metadata.Team).Scan(&channel)
 	if isNoRows(err) {
-		return nil // nowhere configured; GET /v1/approvals still lists it
+		// No approval channel: the catch-all service's Slack targets are the
+		// last resort, so a request isn't sent nowhere (it's also listed at
+		// GET /v1/approvals).
+		if inc != nil {
+			_, err := s.enqueueTargets(tx, *inc, kind, []string{"slack"}, payload, true)
+			return err
+		}
+		return nil
 	}
 	if err != nil {
 		return err
@@ -515,7 +524,7 @@ func (s *Server) apiPutApprovalChannel(r *http.Request, p principal) (any, error
 			}
 			team = tid
 		}
-		sealed, err := s.Sealer.Seal([]byte(req.URL), p.OrgID)
+		sealed, err := s.seal([]byte(req.URL), p.OrgID, sealNotifyCredential)
 		if err != nil {
 			return err
 		}

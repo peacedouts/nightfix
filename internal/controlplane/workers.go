@@ -50,16 +50,31 @@ func (s *Server) RunWorkers(ctx context.Context, tick time.Duration) {
 	go func() {
 		t := time.NewTicker(10 * time.Second)
 		defer t.Stop()
-		lastPartitions := time.Time{}
+		lastPartitions, lastPartitionTry := time.Time{}, time.Time{}
 		for {
-			s.DB.ExecContext(ctx, `SELECT nfx_mark_stale_agents()`)
-			if time.Since(lastPartitions) > time.Hour {
-				if _, err := s.DB.ExecContext(ctx, `SELECT nfx_ensure_partitions(3)`); err != nil && ctx.Err() == nil {
-					s.Log.Error("partitions", "err", err)
+			// Failures here are logged at Error: a stale-agent sweep that never
+			// runs keeps dead agents "online" (holding pages for nothing), and
+			// partitions that stop being created break ingest days later.
+			if _, err := s.DB.ExecContext(ctx, `SELECT nfx_mark_stale_agents()`); err != nil && ctx.Err() == nil {
+				s.Log.Error("worker", "loop", "stale agents", "err", err)
+			}
+			if time.Since(lastPartitions) > time.Hour && time.Since(lastPartitionTry) > 5*time.Minute {
+				// Partitions are made a week ahead, so a failure has days to
+				// be retried. Each step has a short lock timeout: dropping a
+				// partition locks its parent table, and must not queue
+				// ingest behind it for long.
+				lastPartitionTry = time.Now()
+				ok := true
+				for _, q := range []string{`SELECT nfx_ensure_partitions(7)`, `SELECT nfx_drop_expired_partitions(30, 90)`} {
+					if err := s.maintenance(ctx, q); err != nil && ctx.Err() == nil {
+						s.Log.Error("partitions", "step", q, "err", err)
+						ok = false
+					}
 				}
-				s.DB.ExecContext(ctx, `SELECT nfx_drop_expired_partitions(30, 90)`)
 				s.expireDedupRecords(ctx)
-				lastPartitions = time.Now()
+				if ok {
+					lastPartitions = time.Now()
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -109,3 +124,21 @@ func (s *Server) expireDedupRecords(ctx context.Context) {
 }
 
 func decodeB64(s string) ([]byte, error) { return base64.StdEncoding.DecodeString(s) }
+
+// maintenance runs one partition-maintenance statement with a short lock
+// timeout, so it gives up (and is retried) rather than holding a queue of
+// ingests behind its table lock.
+func (s *Server) maintenance(ctx context.Context, q string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SET LOCAL lock_timeout = '2s'`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, q); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

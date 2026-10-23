@@ -181,5 +181,7 @@ resource "aws_ecs_service" "controlplane" {
   lifecycle {
     ignore_changes = [task_definition]
   }
-  depends_on = [aws_lb_listener.https, aws_lb_listener.agent]
+  # The target groups attach to the ALB through the listener rules; ECS
+  # refuses a service whose target group has no load balancer yet.
+  depends_on = [aws_lb_listener_rule.api, aws_lb_listener_rule.ingest, aws_lb_listener.agent]
 }

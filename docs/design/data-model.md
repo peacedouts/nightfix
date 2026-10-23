@@ -105,7 +105,7 @@ Columns are the important ones, not exhaustive. Every tenant table also has `org
 | `step_attempts` | `id`, `run_id`, `step_id`, `attempt_number`, `state`, `agent_id`, `lease_expires_at`, `exit_code`, `outputs`, `error`, `not_before`, `started_at`, `finished_at` | The agent work queue (`SKIP LOCKED`). `not_before` holds a retry back until its backoff has passed (0021) |
 | `approval_gates` | `id`, `run_id`, `step_index`, `step_id`, `required_count` (1–10), `from_roles`, `exclude_requester`, `status` (`pending` \| `approved` \| `rejected` \| `expired` \| `cancelled`), `requested_at`, `expires_at`, `decided_at` | One per approval step per run (built; semantics in `runbook-schema.md` §9) |
 | `approvals` | `id`, `run_id`, `step_id`, `approver_id`, `decision` (`approved` \| `rejected`), `comment`, `decided_at`, `expires_at` | One decision per person per gate. DB trigger: approver ≠ requester when the gate sets `exclude_requester` |
-| `step_output_chunks` | `attempt_id`, `seq`, `stream`, `data`, `received_at` | **Partitioned by day**, 90-day default retention; 1 MiB cap per attempt |
+| `step_output_chunks` | `attempt_id`, `seq`, `stream`, `data`, `received_at` | **Partitioned by day**, 90-day default retention; 1 MiB and 50,000 rows per attempt |
 
 **Trigger-to-service links (decided Oct 20, 2026):** runbook triggers carry an optional `services:` list, required for `auto` triggers. `runbook_triggers.services` is indexed (GIN) so the control plane can find a service's triggers in one query when an incident opens.
 
@@ -124,8 +124,8 @@ Columns are the important ones, not exhaustive. Every tenant table also has `org
 | `incidents` | `id`, `number`, `service_id`, `group_key`, `status`, `severity`, `title`, `opened_at`, `ack_at`, `ack_by`, `resolved_at`, `resolution`, `hold_until`, `upstream_refs` | `upstream_refs` stores PagerDuty / incident.io IDs for auto-resolve |
 | `incident_alerts` | `incident_id`, `alert_id`, `attached_at`, `detached_at` | Join table so an alert's history across incidents is kept |
 | `incident_timeline` | `id`, `incident_id`, `at`, `type`, `actor_type`, `actor_id`, `data` | Append-only |
-| `notifications` | `id`, `incident_id`, `target_id`, `channel_id`, `kind` (`page` \| `resolve` \| `update` \| `approval`), `payload`, `status` (`pending` \| `sent` \| `failed`), `attempts`, `next_attempt_at`, `lease_until`, `lease_id`, `last_error`, `sent_at` | Outbox for upstream pages and Slack posts (built). Workers claim a row on a short lease and send outside any transaction; the result is recorded only under the same `lease_id`. Rows for one incident+target, or one approval channel, go out in order. Pages and resolves retry for up to 24h |
-| `slack_apps` | `id`, `team_id` (Slack workspace; requests from others are refused), `signing_secret` (sealed), `archived_at` | The org's Slack app, used to verify button clicks and slash commands (built) |
+| `notifications` | `id`, `incident_id`, `target_id`, `channel_id`, `kind` (`page` \| `resolve` \| `acknowledge` \| `update` \| `approval`), `payload`, `status` (`pending` \| `sent` \| `failed`), `attempts`, `next_attempt_at`, `lease_until`, `lease_id`, `last_error`, `sent_at` | Outbox for upstream pages and Slack posts (built). Workers claim a row on a short lease and send outside any transaction; the result is recorded only under the same `lease_id`. Rows for one incident+target, or one approval channel, go out in order. Pages and resolves retry for up to 24h |
+| `slack_apps` | `id`, `team_id` (Slack workspace; when set, requests from others are refused), `signing_secret` (sealed), `archived_at` | The org's Slack app, used to verify button clicks and slash commands (built) |
 | `slack_user_links` | `slack_team_id`, `slack_user_id`, `user_id`, `linked_at` | Links a Slack user to a Nightfix member; created only by a one-time code (built) |
 | `slack_link_codes` | `code_hash`, `user_id`, `expires_at` | One-time codes Nightfix issues to a signed-in user for `/nightfix link <code>` (built) |
 | `approval_channels` | `id`, `team_id` (null = org default), `type` (`slack`), `credential` (sealed webhook URL), `created_by` | Where approval requests go for runs outside an incident (built) |
@@ -152,7 +152,7 @@ Ingest uses `INSERT … ON CONFLICT` against these indexes, so two events for th
 
 | Table | Key columns | Notes |
 |---|---|---|
-| `audit_events` | `id`, `at`, `actor_type`, `actor_id`, `action`, `resource_type`, `resource_id`, `data`, `request_id`, `source_ip`, `prev_hash`, `hash` | **Partitioned by month**, ≥ 1-year retention |
+| `audit_events` | `id`, `at`, `actor_type`, `actor_id`, `action`, `resource_type`, `resource_id`, `data`, `request_id`, `source_ip`, `prev_hash`, `hash` | **Partitioned by month**, ≥ 1-year retention. Appended only through `nfx_audit` (the app role has no INSERT since 0029) |
 
 Immutability is enforced three ways:
 
@@ -273,12 +273,12 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 | GET, POST | `/teams` | List / create teams |
 | GET, PATCH, DELETE | `/teams/{id}` | Read / update / archive |
 | PUT, DELETE | `/teams/{id}/members/{user_id}` | Manage manual membership |
-| PUT | `/org/auth0` | Connect the org's Auth0 Organization (built) |
+| PUT | `/org/auth0` | Connect the org's Auth0 Organization (development only; in production it returns 403 and operators link with `nightfix org link-auth0`) |
 | POST | `/me/slack-link-code` | Issue a one-time code to link the caller's Slack user (built) |
 | GET, POST | `/role-bindings` | List / create bindings |
 | DELETE | `/role-bindings/{id}` | Remove |
-| GET, POST | `/api-keys` | List / create (secret returned once) |
-| DELETE | `/api-keys/{id}` | Revoke |
+| GET, POST | `/api-keys` | List / create (secret returned once; only owners create admin or owner keys) (built) |
+| POST | `/api-keys/{id}/revoke` | Revoke; the org's last owner credential can't be revoked (built) |
 
 **Agents and trust**
 
@@ -314,7 +314,7 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 | GET | `/runs/{id}/steps/{step_id}/output` | Output; supports `Accept: text/event-stream` for live streaming |
 | POST | `/runs/{id}/cancel` | Cancel |
 | POST | `/runs/{id}/steps/{step_id}/approve`, `/reject` | Approval decisions |
-| GET | `/approvals` | Pending approvals the caller can decide (built) |
+| GET | `/approvals` | All pending approvals in the org (built; not yet filtered to the ones the caller can decide) |
 | GET, PUT | `/approval-channels` | Org-default and per-team approval channels (built) |
 | POST | `/runs/{id}/steps/{step_id}/confirm` | Complete a `manual` checklist step |
 

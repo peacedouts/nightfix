@@ -73,6 +73,7 @@ func (s *Server) APIHandler() http.Handler {
 		return out, nil
 	})
 	s.identityRoutes(route)
+	s.apiKeyRoutes(route)
 	route("POST /v1/services", "admin", s.apiCreateService)
 	route("GET /v1/services", "viewer", s.apiListServices)
 	route("POST /v1/services/{name}/escalation-targets", "admin", s.apiCreateTarget)
@@ -257,7 +258,7 @@ func (s *Server) apiCreateTarget(r *http.Request, p principal) (any, error) {
 		if err != nil {
 			return err
 		}
-		sealed, err := s.Sealer.Seal([]byte(secret), p.OrgID)
+		sealed, err := s.seal([]byte(secret), p.OrgID, sealNotifyCredential)
 		if err != nil {
 			return err
 		}
@@ -352,7 +353,7 @@ func (s *Server) apiCreateIntegration(r *http.Request, p principal) (any, error)
 		var sealed []byte
 		if req.Type == "webhook" {
 			secret, _, _ = newSecret("whsec")
-			if sealed, err = s.Sealer.Seal([]byte(secret), p.OrgID); err != nil {
+			if sealed, err = s.seal([]byte(secret), p.OrgID, sealWebhookSecret); err != nil {
 				return err
 			}
 		}
@@ -458,6 +459,9 @@ func (s *Server) apiPutRoutingRules(r *http.Request, p principal) (any, error) {
 	}
 	if err := readJSON(r, &req); err != nil {
 		return nil, err
+	}
+	if len(req) > maxRoutingRules {
+		return nil, httpError{400, fmt.Sprintf("at most %d routing rules", maxRoutingRules)}
 	}
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM routing_rules`); err != nil {
@@ -1047,6 +1051,7 @@ func (s *Server) apiGetRun(r *http.Request, p principal) (any, error) {
 		var finished sql.NullTime
 		tx.QueryRow(`SELECT verified, started_at, finished_at FROM runbook_runs WHERE id = $1`, id).Scan(&verified, &started, &finished)
 		var steps []map[string]any
+		outBudget := maxRunViewOutput
 		rows, err := tx.Query(`SELECT id, step_id, attempt_number, state, exit_code, outputs, error FROM step_attempts
 			WHERE run_id = $1 ORDER BY step_index, attempt_number`, id)
 		if err != nil {
@@ -1064,6 +1069,12 @@ func (s *Server) apiGetRun(r *http.Request, p principal) (any, error) {
 				return err
 			}
 			st := map[string]any{"step": sid, "attempt": n, "state": state, "outputs": outputs.V}
+			// Outputs share one response budget across attempts, like output.
+			if b, _ := json.Marshal(outputs.V); len(b) > outBudget {
+				st["outputs"], st["outputs_omitted"] = nil, fmt.Sprintf("%d KiB, over this view's budget", len(b)>>10)
+			} else {
+				outBudget -= len(b)
+			}
 			if exit.Valid {
 				st["exit_code"] = exit.Int64
 			}
@@ -1309,12 +1320,18 @@ func (s *Server) apiTimeline(r *http.Request, p principal) (any, error) {
 			return err
 		}
 		defer rows.Close()
+		// A page also stops at about 1 MiB of messages; the next page starts
+		// after the last entry returned.
+		size := 0
 		for rows.Next() {
 			var id int64
 			var at time.Time
 			var typ, actor, msg string
 			if err := rows.Scan(&id, &at, &typ, &actor, &msg); err != nil {
 				return err
+			}
+			if size += len(msg); size > maxRunViewOutput && len(out) > 0 {
+				break
 			}
 			out = append(out, map[string]any{"id": id, "at": at, "type": typ, "actor": actor, "message": msg})
 		}
@@ -1438,13 +1455,29 @@ func (s *Server) setFrozen(ctx context.Context, p principal, frozen bool) (any, 
 
 func (s *Server) apiAudit(r *http.Request, p principal) (any, error) {
 	out := []map[string]any{}
+	verify := r.URL.Query().Get("verify") == "true" || r.URL.Query().Get("verify") == "1"
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
-		var broken sql.NullInt64
-		if err := tx.QueryRow(`SELECT nfx_verify_audit_chain()`).Scan(&broken); err != nil {
-			return err
-		}
-		if broken.Valid {
-			return httpError{500, fmt.Sprintf("audit chain verification failed at seq %d", broken.Int64)}
+		// Verifying walks the org's whole chain, which grows for ever, so it
+		// runs only when asked (?verify=true) and one at a time per org:
+		// polling it would hold the instance's connections.
+		if verify {
+			var mine bool
+			if err := tx.QueryRow(`SELECT pg_try_advisory_xact_lock(hashtextextended('nfx_audit_verify:' || $1, 0))`, p.OrgID).Scan(&mine); err != nil {
+				return err
+			}
+			if !mine {
+				return httpError{429, "an audit chain verification for this org is already running; try again shortly"}
+			}
+			if _, err := tx.Exec(`SET LOCAL statement_timeout = '5min'`); err != nil {
+				return err
+			}
+			var broken sql.NullInt64
+			if err := tx.QueryRow(`SELECT nfx_verify_audit_chain()`).Scan(&broken); err != nil {
+				return err
+			}
+			if broken.Valid {
+				return httpError{500, fmt.Sprintf("audit chain verification failed at seq %d", broken.Int64)}
+			}
 		}
 		rows, err := tx.Query(`SELECT seq, at, actor_type, actor_id, action, resource_type, resource_id FROM audit_events ORDER BY seq DESC LIMIT 200`)
 		if err != nil {

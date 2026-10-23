@@ -44,12 +44,18 @@ type Config struct {
 	SNSMaxMessageAge time.Duration
 	// STSEndpoint overrides the regional STS URL for IAM enrollment. Local
 	// development and tests only.
-	STSEndpoint   string
-	Auth0         Auth0Config
+	STSEndpoint string
+	Auth0       Auth0Config
+	// LeaseDuration is how long a dispatched attempt has to be acknowledged.
 	LeaseDuration time.Duration
-	EnvelopeTTL   time.Duration
-	PollWait      time.Duration
-	HTTPClient    *http.Client // for SNS, STS and Slack interaction replies (fixed hosts)
+	// RunningLease is how long a running attempt survives without hearing
+	// from its agent (heartbeats renew it). Longer than LeaseDuration, so a
+	// network blip of a few minutes doesn't turn a step that's still running
+	// (and whose result the agent will deliver) into "lost" and a page.
+	RunningLease time.Duration
+	EnvelopeTTL  time.Duration
+	PollWait     time.Duration
+	HTTPClient   *http.Client // for SNS, STS and Slack interaction replies (fixed hosts)
 	// AllowPrivateTargets lifts the host allowlist on tenant-supplied
 	// notification URLs (Slack webhooks, approval channels, PagerDuty
 	// events_url) and lets the notification client connect to loopback and
@@ -71,6 +77,9 @@ func (c *Config) defaults() {
 	if c.LeaseDuration == 0 {
 		c.LeaseDuration = 30 * time.Second
 	}
+	if c.RunningLease == 0 {
+		c.RunningLease = 5 * time.Minute
+	}
 	if c.EnvelopeTTL == 0 {
 		c.EnvelopeTTL = 2 * time.Minute
 	}
@@ -84,7 +93,10 @@ func (c *Config) defaults() {
 		c.SlackMaxLoginAge = 7 * 24 * time.Hour
 	}
 	if c.HTTPClient == nil {
-		c.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+		// Every host it talks to is fixed (SNS, STS, Slack), and none of
+		// them redirects; following one would take the request elsewhere.
+		c.HTTPClient = &http.Client{Timeout: 10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	}
 	if c.NotifyHTTPClient == nil {
 		c.NotifyHTTPClient = newNotifyClient(c.AllowPrivateTargets)
@@ -105,8 +117,10 @@ type Server struct {
 	keyMu sync.Mutex
 	keys  map[string]signing.Key // org -> active control-plane signing key
 
-	snsCertMu sync.Mutex
-	snsCerts  map[string][]byte
+	snsCertMu   sync.Mutex
+	snsCerts    map[string][]byte
+	snsFetch    chan struct{}            // bounds uncached certificate fetches, which unauthenticated requests can cause
+	snsInflight map[string]chan struct{} // certificate fetches in progress, by URL
 
 	workers sync.WaitGroup // RunWorkers' notification workers
 }
@@ -118,7 +132,7 @@ func New(d *db.DB, sealer *signing.Sealer, ca *CA, cfg Config, log *slog.Logger)
 		log = slog.Default()
 	}
 	return &Server{DB: d, Sealer: sealer, CA: ca, Cfg: cfg, Log: log,
-		keys: map[string]signing.Key{}, snsCerts: map[string][]byte{}}
+		keys: map[string]signing.Key{}, snsCerts: map[string][]byte{}, snsFetch: make(chan struct{}, 4)}
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +165,7 @@ func (s *Server) CreateOrg(ctx context.Context, name, slug string) (*NewOrg, err
 	}
 	apiKey, prefix, hash := newSecret("nfx")
 	err = s.DB.WithOrg(ctx, orgID, func(tx *db.Tx) error {
-		sealed, err := s.Sealer.Seal(key.Private, orgID)
+		sealed, err := s.seal(key.Private, orgID, sealSigningKey, key.ID)
 		if err != nil {
 			return err
 		}
@@ -193,7 +207,7 @@ func (s *Server) signingKey(tx *db.Tx) (signing.Key, error) {
 	if err != nil {
 		return k, fmt.Errorf("load signing key: %w", err)
 	}
-	priv, err := s.Sealer.Open(sealed, tx.OrgID)
+	priv, err := s.unseal(sealed, tx.OrgID, sealSigningKey, id)
 	if err != nil {
 		return k, fmt.Errorf("unseal signing key: %w", err)
 	}

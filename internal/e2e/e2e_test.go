@@ -247,7 +247,7 @@ func runbookYAML(t *testing.T, waitTimeout string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.Replace(string(b), "      timeout: 2m\n", "      timeout: "+waitTimeout+"\n", 1)
+	return strings.Replace(string(b), "      timeout: 10m\n", "      timeout: "+waitTimeout+"\n", 1)
 }
 
 func status(inc map[string]any) string { return fmt.Sprint(inc["status"]) }
@@ -299,7 +299,7 @@ func TestAutoRemediatedWithoutPaging(t *testing.T) {
 		t.Log("  " + l)
 	}
 	var audit []map[string]any
-	e.call("GET", "/v1/audit-events", nil, &audit) // also re-verifies the hash chain
+	e.call("GET", "/v1/audit-events?verify=true", nil, &audit) // also re-verifies the hash chain
 	if len(audit) < 8 {
 		t.Fatalf("expected a populated audit log, got %d events", len(audit))
 	}

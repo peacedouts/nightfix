@@ -35,10 +35,20 @@ data "aws_iam_policy_document" "assume" {
       type        = "Service"
       identifiers = ["ecs-tasks.amazonaws.com"]
     }
+    # AWS's recommended confused-deputy guard for task roles. Scoping
+    # SourceArn to one cluster isn't supported, so anyone in this account who
+    # can run a task with this role (ecs:RunTask on the agent's family, or
+    # RegisterTaskDefinition plus iam:PassRole on the role) can act as the
+    # agent: grant those narrowly.
     condition {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
       values   = [data.aws_caller_identity.current.account_id]
+    }
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:${data.aws_partition.current.partition}:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"]
     }
   }
 }
@@ -119,7 +129,14 @@ resource "aws_ecs_task_definition" "agent" {
     image                  = var.image
     essential              = true
     readonlyRootFilesystem = true
-    mountPoints            = [{ sourceVolume = "tmp", containerPath = "/tmp" }]
+    # ECS's init process runs as PID 1 and reaps children a script left
+    # behind; otherwise each becomes a zombie under the agent.
+    linuxParameters = { initProcessEnabled = true }
+    # On stop the agent cancels running steps, gives scripts 10s after
+    # SIGTERM and reports them (up to 40s), so give it more than the 30s
+    # default before SIGKILL.
+    stopTimeout = 60
+    mountPoints = [{ sourceVolume = "tmp", containerPath = "/tmp" }]
     environment = [
       { name = "NIGHTFIX_ENDPOINT", value = var.agent_endpoint },
       { name = "NIGHTFIX_ORG_ID", value = var.org_id },

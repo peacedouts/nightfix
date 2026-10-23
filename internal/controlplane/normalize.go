@@ -164,7 +164,7 @@ func normalizeCloudWatch(integrationID, message string, severityMap map[string]s
 		summary = a.AlarmName + ": " + a.NewStateReason
 	}
 	return Alert{
-		Fingerprint: "cw:" + integrationID + ":" + a.AlarmArn,
+		Fingerprint: "cw:" + integrationID + ":" + boundedKey(a.AlarmArn),
 		Status:      status,
 		Severity:    sev,
 		Summary:     truncate(summary, 300),
@@ -251,8 +251,13 @@ func SignWebhook(secret string, body []byte, t time.Time) string {
 	return "t=" + ts + ",v1=" + hex.EncodeToString(m.Sum(nil))
 }
 
-// verifyWebhook checks the HMAC signature and a 5-minute replay window.
-func verifyWebhook(secret string, body []byte, header string, now time.Time) error {
+// webhookWindow is how far a signed webhook's timestamp may be from now.
+const webhookWindow = 5 * time.Minute
+
+// verifyWebhook checks the HMAC signature and the replay window, and returns
+// the signature's time and the signature itself, which identify this
+// delivery (ingest refuses a second delivery with the same signature).
+func verifyWebhook(secret string, body []byte, header string, now time.Time) (time.Time, string, error) {
 	var ts, sig string
 	for _, part := range strings.Split(header, ",") {
 		k, v, _ := strings.Cut(strings.TrimSpace(part), "=")
@@ -264,14 +269,14 @@ func verifyWebhook(secret string, body []byte, header string, now time.Time) err
 		}
 	}
 	if ts == "" || sig == "" {
-		return errors.New("missing or malformed signature header")
+		return time.Time{}, "", errors.New("missing or malformed signature header")
 	}
 	sec, err := strconv.ParseInt(ts, 10, 64)
 	if err != nil {
-		return errors.New("bad signature timestamp")
+		return time.Time{}, "", errors.New("bad signature timestamp")
 	}
-	if d := now.Sub(time.Unix(sec, 0)); d > 5*time.Minute || d < -5*time.Minute {
-		return errors.New("signature timestamp outside the 5-minute window")
+	if d := now.Sub(time.Unix(sec, 0)); d > webhookWindow || d < -webhookWindow {
+		return time.Time{}, "", errors.New("signature timestamp outside the 5-minute window")
 	}
 	m := hmac.New(sha256.New, []byte(secret))
 	m.Write([]byte(ts + "."))
@@ -279,9 +284,21 @@ func verifyWebhook(secret string, body []byte, header string, now time.Time) err
 	want := m.Sum(nil)
 	got, err := hex.DecodeString(sig)
 	if err != nil || !hmac.Equal(got, want) {
-		return errors.New("signature mismatch")
+		return time.Time{}, "", errors.New("signature mismatch")
 	}
-	return nil
+	return time.Unix(sec, 0), hex.EncodeToString(want), nil
+}
+
+// boundedKey keeps a source-supplied identity short enough to index: real
+// alarm ARNs are at most about 320 bytes, and anything longer (which only a
+// publisher to the pinned topic could send) is hashed rather than refused,
+// so the event is still processed and pages.
+func boundedKey(k string) string {
+	if len(k) <= 400 {
+		return k
+	}
+	sum := sha256.Sum256([]byte(k))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // truncate cuts s to at most n bytes without splitting a UTF-8 character

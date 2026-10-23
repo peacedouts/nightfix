@@ -65,7 +65,9 @@ spec:
       name: Wait for service to stabilize
       type: wait
       interval: 2s
-      timeout: 2m
+      # A Fargate replacement (pull, start, stop the old task) often takes
+      # several minutes on real AWS.
+      timeout: 10m
       check:
         aws:
           service: ecs

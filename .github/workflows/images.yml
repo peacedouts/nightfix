@@ -11,18 +11,23 @@ name: images
 #
 # Only main builds images, and only immutable commit tags are published (no
 # :latest, no :main, no release tags). Anyone with write access can push a
-# tag, so tags never get a pushed or signed image. Customers pin a digest or
-# a sha- tag; deploys verify the signature names images.yml on main.
+# tag, so tags never get a pushed or signed image. Customers pin a digest
+# (GHCR tags can be re-pushed, so a sha- tag is only a way to find one);
+# deploys verify the signature names images.yml on main and the commit.
 
 on:
   push:
     branches: [main]
+  # To build the current main commit again, e.g. after setting the AWS
+  # repository variables. Only main builds; an existing ECR tag is kept.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   agent:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -59,14 +64,15 @@ jobs:
         run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/nightfix-agent@${{ steps.build.outputs.digest }}
 
   controlplane:
-    if: vars.AWS_PUSH_ROLE_ARN != '' && vars.ECR_REPOSITORY != ''
+    if: github.ref == 'refs/heads/main' && vars.AWS_PUSH_ROLE_ARN != '' && vars.ECR_REPOSITORY != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write # AWS OIDC and Sigstore keyless signing
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      # No QEMU: the build stage runs natively and cross-compiles, and the
+      # final stage has no RUN, so nothing executes as arm64.
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
@@ -74,7 +80,22 @@ jobs:
           role-to-assume: ${{ vars.AWS_PUSH_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
       - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+      # ECR tags are immutable: a re-run for a commit that's already pushed
+      # keeps the existing image, and signs it if an earlier run pushed it
+      # but failed to sign (deploys refuse unsigned images).
+      - id: exists
+        env:
+          REPO: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          digest=$(aws ecr describe-images --repository-name "${REPO#*/}" --image-ids imageTag="$GITHUB_SHA" \
+            --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)
+          if [ -n "$digest" ] && [ "$digest" != "None" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+            echo "$REPO:$GITHUB_SHA is already pushed ($digest)."
+          fi
       - id: build
+        if: steps.exists.outputs.already != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -85,4 +106,19 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Sign
+        if: steps.exists.outputs.already != 'true'
         run: cosign sign --yes ${{ vars.ECR_REPOSITORY }}@${{ steps.build.outputs.digest }}
+      - name: Sign the existing image if it isn't signed
+        if: steps.exists.outputs.already == 'true'
+        env:
+          IMAGE: ${{ vars.ECR_REPOSITORY }}@${{ steps.exists.outputs.digest }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if cosign verify "$IMAGE" \
+              --certificate-identity "https://github.com/$GH_REPO/.github/workflows/images.yml@refs/heads/main" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-github-workflow-sha "$GITHUB_SHA" > /dev/null 2>&1; then
+            echo "Already signed."
+          else
+            cosign sign --yes "$IMAGE"
+          fi

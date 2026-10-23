@@ -330,13 +330,24 @@ func (s *Server) apiDeleteBinding(r *http.Request, p principal) (any, error) {
 		return nil, httpError{404, "not found"}
 	}
 	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		if err := lockOwners(tx); err != nil {
+			return err
+		}
 		var role string
 		if err := tx.QueryRow(`SELECT role FROM role_bindings WHERE id = $1`, id).Scan(&role); err != nil {
+			if isNoRows(err) {
+				return httpError{404, "not found"}
+			}
 			return err
 		}
 		if roleRank[role] >= roleRank["admin"] {
 			if err := p.atLeast("owner"); err != nil {
 				return httpError{403, "only an owner can remove an " + role + " binding"}
+			}
+		}
+		if role == "owner" {
+			if err := lastOwnerCheck(tx, "", id); err != nil {
+				return err
 			}
 		}
 		if _, err := tx.Exec(`DELETE FROM role_bindings WHERE id = $1`, id); err != nil {

@@ -51,7 +51,7 @@ func (s *Server) allowedSNSURL(raw string) bool {
 		}
 	}
 	u, err := url.Parse(raw)
-	return err == nil && u.Scheme == "https" && snsHostRe.MatchString(u.Hostname())
+	return err == nil && u.Scheme == "https" && u.Port() == "" && u.User == nil && snsHostRe.MatchString(u.Hostname())
 }
 
 // stringToSign builds the canonical SNS signing string.
@@ -116,33 +116,76 @@ func (s *Server) verifySNS(ctx context.Context, m snsMessage) error {
 }
 
 func (s *Server) snsCert(ctx context.Context, u string) (*x509.Certificate, error) {
-	s.snsCertMu.Lock()
-	der, ok := s.snsCerts[u]
-	s.snsCertMu.Unlock()
-	if !ok {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-		resp, err := s.Cfg.HTTPClient.Do(req)
-		if err != nil {
-			return nil, errSNSCertUnavailable{fmt.Errorf("fetch SNS certificate: %w", err)}
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		if err != nil || resp.StatusCode != http.StatusOK {
-			return nil, errSNSCertUnavailable{fmt.Errorf("fetch SNS certificate: status %d", resp.StatusCode)}
-		}
-		b, _ := pem.Decode(body)
-		if b == nil {
-			return nil, errors.New("SNS certificate is not PEM")
-		}
-		der = b.Bytes
+	for {
 		s.snsCertMu.Lock()
-		if len(s.snsCerts) >= maxCachedSNSCerts {
-			s.snsCerts = map[string][]byte{} // AWS uses a handful; just stop growth
+		if der, ok := s.snsCerts[u]; ok {
+			s.snsCertMu.Unlock()
+			return x509.ParseCertificate(der)
 		}
-		s.snsCerts[u] = der
+		// One fetch per URL at a time: a burst of real deliveries after a
+		// restart waits for the first fetch instead of each making its own.
+		if wait, ok := s.snsInflight[u]; ok {
+			s.snsCertMu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return nil, errSNSCertUnavailable{ctx.Err()}
+			}
+		}
+		if s.snsInflight == nil {
+			s.snsInflight = map[string]chan struct{}{}
+		}
+		done := make(chan struct{})
+		s.snsInflight[u] = done
 		s.snsCertMu.Unlock()
+
+		der, err := s.fetchSNSCert(ctx, u)
+		s.snsCertMu.Lock()
+		delete(s.snsInflight, u)
+		if err == nil {
+			if len(s.snsCerts) >= maxCachedSNSCerts {
+				s.snsCerts = map[string][]byte{} // AWS uses a handful; just stop growth
+			}
+			s.snsCerts[u] = der
+		}
+		s.snsCertMu.Unlock()
+		close(done)
+		if err != nil {
+			return nil, err
+		}
+		return x509.ParseCertificate(der)
 	}
-	return x509.ParseCertificate(der)
+}
+
+func (s *Server) fetchSNSCert(ctx context.Context, u string) ([]byte, error) {
+	// Anyone who knows an integration's URL can make this fetch happen (the
+	// signature can only be checked after it), so only a few distinct URLs
+	// are fetched at once; the rest are answered 503, which SNS retries. AWS
+	// signs with a handful of certificates, so real deliveries hit the cache.
+	if s.snsFetch != nil {
+		select {
+		case s.snsFetch <- struct{}{}:
+			defer func() { <-s.snsFetch }()
+		default:
+			return nil, errSNSCertUnavailable{errors.New("fetch SNS certificate: too many fetches in progress")}
+		}
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	resp, err := s.Cfg.HTTPClient.Do(req)
+	if err != nil {
+		return nil, errSNSCertUnavailable{fmt.Errorf("fetch SNS certificate: %w", err)}
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return nil, errSNSCertUnavailable{fmt.Errorf("fetch SNS certificate: status %d", resp.StatusCode)}
+	}
+	b, _ := pem.Decode(body)
+	if b == nil {
+		return nil, errors.New("SNS certificate is not PEM")
+	}
+	return b.Bytes, nil
 }
 
 // confirmSNSSubscription visits SubscribeURL after the confirmation message

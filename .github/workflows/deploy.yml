@@ -59,10 +59,13 @@ jobs:
         run: |
           digest=$(aws ecr describe-images --repository-name "${REPO#*/}" --image-ids imageTag="$TAG" \
             --query 'imageDetails[0].imageDigest' --output text)
+          # The signature must also name this exact commit, so a tag that
+          # resolves to an older signed image (a rollback attack) is refused.
           cosign verify "$REPO@$digest" \
             --certificate-identity "https://github.com/$GH_REPO/.github/workflows/images.yml@refs/heads/main" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
-          echo "Verified $REPO@$digest (signed by images.yml on main)"
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-sha "$TAG" > /dev/null
+          echo "Verified $REPO@$digest (signed by images.yml on main at $TAG)"
           echo "ref=$REPO@$digest" >> "$GITHUB_OUTPUT"
 
       - name: Register task definitions
@@ -95,9 +98,19 @@ jobs:
             exit 1
           fi
 
+      # services-stable also succeeds after the circuit breaker has rolled
+      # back to the old revision, so check the new one is what's running.
       - name: Roll out
+        env:
+          NEW_TD: ${{ steps.taskdefs.outputs.service }}
+          SERVICE: ${{ vars.ECS_SERVICE }}
         run: |
-          aws ecs update-service --cluster "$CLUSTER" --service "${{ vars.ECS_SERVICE }}" \
-            --task-definition "${{ steps.taskdefs.outputs.service }}" > /dev/null
-          aws ecs wait services-stable --cluster "$CLUSTER" --services "${{ vars.ECS_SERVICE }}"
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --task-definition "$NEW_TD" > /dev/null
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          read -r td state < <(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --query 'services[0].deployments[?status==`PRIMARY`]|[0].[taskDefinition,rolloutState]' --output text)
+          if [ "$td" != "$NEW_TD" ] || [ "$state" != "COMPLETED" ]; then
+            echo "::error::the rollout of $TAG didn't complete (running: $td, $state); ECS rolled back. Migrations had already run; see the service events and task logs."
+            exit 1
+          fi
           echo "Deployed $TAG"

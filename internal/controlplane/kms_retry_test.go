@@ -35,7 +35,8 @@ func TestKMSCallRetriesOnlyTransientFailures(t *testing.T) {
 		t.Fatalf("access denied: %v after %d calls, want it returned after 1", err, k.calls)
 	}
 
-	throttled := &awscall.Error{Service: "kms", Action: "Decrypt", Code: "ThrottlingException", Status: 429}
+	// KMS (a JSON-protocol service) reports throttling as HTTP 400.
+	throttled := &awscall.Error{Service: "kms", Action: "Decrypt", Code: "ThrottlingException", Status: 400}
 	k = &scriptedKMS{errs: []error{throttled, errors.New("connection reset")}}
 	start := time.Now()
 	if _, err := kmsCall(ctx, k, "Decrypt", nil); err != nil || k.calls != 3 {

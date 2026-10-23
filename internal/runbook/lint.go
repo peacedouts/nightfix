@@ -17,6 +17,9 @@ type Issue struct {
 	Message string `json:"message"`
 }
 
+// MaxMarkdownBytes bounds a note or manual step's markdown.
+const MaxMarkdownBytes = 16 << 10
+
 func (i Issue) String() string { return i.Path + ": " + i.Message }
 
 // Issues is a list of findings; it implements error when non-empty.
@@ -236,7 +239,7 @@ func Lint(rb *Runbook) Issues {
 		default:
 			add("spec.onFailure.action", "must be escalate, notify or none")
 		}
-		lintTemplate("spec.onFailure.message", f.Message, false, add)
+		lintTemplate("spec.onFailure.message", f.Message, false, false, add)
 	}
 	return is
 }
@@ -309,9 +312,20 @@ func lintStep(path string, s Step, rb *Runbook, add func(string, string, ...any)
 		}
 		if err := expr.Check(s.Outputs[k]); err != nil {
 			add(path+".outputs."+k, "%v", err)
+		} else {
+			// Outputs feed later steps' inputs, where alert data can't go.
+			for _, name := range []string{"alert", "incident"} {
+				if uses, _ := expr.References(s.Outputs[k], name); uses {
+					add(path+".outputs."+k, "%s data can't be used in step outputs; declare a parameter with `from:` and a pattern or enum", name)
+				}
+			}
 		}
 	}
 	// Narrative text is shown to humans; no templating, no secrets.
+	if len(s.Markdown) > MaxMarkdownBytes {
+		// Notes are copied onto the incident timeline on every run.
+		add(path+".markdown", fmt.Sprintf("markdown is at most %d KiB", MaxMarkdownBytes>>10))
+	}
 	if expr.HasTemplate(s.Markdown) {
 		add(path+".markdown", "templates are not allowed in markdown")
 	}
@@ -356,11 +370,11 @@ func lintStep(path string, s Step, rb *Runbook, add func(string, string, ...any)
 			} else if ReservedEnv(k) {
 				add(path+".env."+k, "%s is reserved: the shell or the agent acts on it", k)
 			}
-			lintTemplate(path+".env."+k, s.Env[k], true, add)
+			lintTemplate(path+".env."+k, s.Env[k], true, true, add)
 			checkSecretRefs(path+".env."+k, s.Env[k], rb, add)
 		}
 		for _, k := range sortedKeys(s.Files) {
-			lintTemplate(path+".files."+k, s.Files[k], true, add)
+			lintTemplate(path+".files."+k, s.Files[k], true, true, add)
 			checkSecretRefs(path+".files."+k, s.Files[k], rb, add)
 		}
 		switch s.RunOn {
@@ -411,19 +425,31 @@ func lintAWSCall(path, service, action string, input map[string]any, add func(st
 		add(path+".action", "is required")
 	}
 	walkStrings(input, func(p, v string) {
-		lintTemplate(path+".input"+p, v, false, add)
+		lintTemplate(path+".input"+p, v, false, true, add)
 	})
 }
 
 // lintTemplate compiles every ${{ }} in v. Secrets are only allowed where
-// allowSecrets is set (env, files, http headers).
-func lintTemplate(path, v string, allowSecrets bool, add func(string, string, ...any)) {
+// allowSecrets is set (env, files, http headers). In a step's inputs
+// (agentStep), alert and incident data can't be used directly: whoever can
+// shape an alert's labels or summary would choose the value the step acts
+// on, and the agent validates only parameters. It goes through a parameter
+// with `from:` and a pattern or enum instead, which the agent checks.
+func lintTemplate(path, v string, allowSecrets, agentStep bool, add func(string, string, ...any)) {
 	for _, e := range expr.TemplateExprs(v) {
-		if err := expr.Check(e); err != nil {
+		err := expr.Check(e)
+		if err != nil {
 			add(path, "%v", err)
 		}
 		if !allowSecrets && strings.Contains(e, "secrets") {
 			add(path, "secrets may only be referenced in env, files or http headers")
+		}
+		if agentStep && err == nil {
+			for _, name := range []string{"alert", "incident"} {
+				if uses, _ := expr.References(e, name); uses {
+					add(path, "%s data can't be used in step inputs; declare a parameter with `from: %s...` and a pattern or enum, and use params.<name>", name, name)
+				}
+			}
 		}
 	}
 }

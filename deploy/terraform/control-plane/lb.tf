@@ -6,7 +6,7 @@ resource "aws_lb" "public" {
   subnets                    = aws_subnet.public[*].id
   security_groups            = [aws_security_group.alb.id]
   drop_invalid_header_fields = true
-  enable_deletion_protection = true
+  enable_deletion_protection = var.deletion_protection
   idle_timeout               = 60
 }
 
@@ -102,7 +102,7 @@ resource "aws_lb" "agent" {
   subnets                          = aws_subnet.public[*].id
   security_groups                  = [aws_security_group.nlb.id]
   enable_cross_zone_load_balancing = true
-  enable_deletion_protection       = true
+  enable_deletion_protection       = var.deletion_protection
 }
 
 resource "aws_lb_target_group" "agent" {

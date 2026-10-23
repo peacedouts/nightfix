@@ -89,3 +89,62 @@ resource "aws_cloudwatch_metric_alarm" "db_storage" {
   alarm_actions       = local.alarm_actions
   ok_actions          = local.alarm_actions
 }
+
+# Work that silently isn't getting done doesn't show up as 5xx or missing
+# tasks: an alert event that couldn't be processed, a page that keeps
+# failing, a worker loop or partition maintenance erroring. All of those log
+# at level=ERROR, so any such line alarms. The page-specific one says what
+# to check first.
+resource "aws_cloudwatch_log_metric_filter" "errors" {
+  name           = "${local.name}-errors"
+  log_group_name = aws_cloudwatch_log_group.controlplane.name
+  pattern        = "\"level=ERROR\""
+  metric_transformation {
+    namespace     = "Nightfix/${var.environment}"
+    name          = "ErrorLogLines"
+    value         = "1"
+    default_value = "0"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "errors" {
+  alarm_name          = "${local.name}-error-logs"
+  alarm_description   = "The control plane logged an error (CloudWatch Logs: filter level=ERROR). Failed alert events: GET /v1/alert-events/failed."
+  namespace           = "Nightfix/${var.environment}"
+  metric_name         = "ErrorLogLines"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
+}
+
+resource "aws_cloudwatch_log_metric_filter" "pages_failing" {
+  name           = "${local.name}-pages-failing"
+  log_group_name = aws_cloudwatch_log_group.controlplane.name
+  pattern        = "?\"page delivery failing\" ?\"notification abandoned\""
+  metric_transformation {
+    namespace     = "Nightfix/${var.environment}"
+    name          = "PagesFailing"
+    value         = "1"
+    default_value = "0"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "pages_failing" {
+  alarm_name          = "${local.name}-pages-failing"
+  alarm_description   = "A customer's page or resolve keeps failing or was abandoned (its incident timeline says why: often a revoked PagerDuty routing key or Slack webhook)."
+  namespace           = "Nightfix/${var.environment}"
+  metric_name         = "PagesFailing"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
+}

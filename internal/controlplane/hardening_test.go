@@ -121,7 +121,7 @@ func TestIdempotencyKeyReusedWithAnotherMethod(t *testing.T) {
 	s := &Server{}
 	h := sha256.Sum256(nil)
 	w := httptest.NewRecorder()
-	s.replayIdempotent(w, httptest.NewRequest("POST", "/v1/teams", nil), principal{},
+	s.replayIdempotent(w, httptest.NewRequest("POST", "/v1/teams", nil), principal{}, "k",
 		idempotencyRecord{Method: "PUT", Path: "/v1/teams", BodyHash: h[:], Status: sql.NullInt64{Int64: 200, Valid: true}}, h[:])
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("got %d, want 422", w.Code)
@@ -245,4 +245,17 @@ func adminForPool(t *testing.T, pool *db.DB) *sql.DB {
 	}
 	t.Cleanup(func() { admin.Close() })
 	return admin
+}
+
+// An oversized AlarmArn is hashed into the fingerprint, so it stays
+// indexable (and the event pages) instead of failing the insert.
+func TestCloudWatchFingerprintIsBounded(t *testing.T) {
+	long := "arn:aws:cloudwatch:us-east-1:123456789012:alarm:" + strings.Repeat("x", 3000)
+	if k := boundedKey(long); len(k) > 400 || k == boundedKey(long+"y") {
+		t.Fatalf("boundedKey(%d bytes) = %d bytes, distinct=%v", len(long), len(k), k != boundedKey(long+"y"))
+	}
+	short := "arn:aws:cloudwatch:us-east-1:123456789012:alarm:ecs-unhealthy-checkout"
+	if boundedKey(short) != short {
+		t.Fatal("a normal ARN must be used as is (existing alerts keep their fingerprints)")
+	}
 }

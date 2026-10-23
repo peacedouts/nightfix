@@ -42,7 +42,7 @@ Integration ──► Alert ──(routing rules)──► Service ──(groupi
 |---|---|---|
 | **CloudWatch via SNS** | SNS message signature verified against the AWS signing cert; topic ARN must match the integration; handles `SubscriptionConfirmation` automatically | integration + `AlarmArn` |
 | **Prometheus Alertmanager** | Bearer token or HMAC header | Alertmanager's per-alert `fingerprint` |
-| **Generic webhook** | HMAC-SHA256 signature header with a per-integration secret, plus timestamp (5-minute replay window) | `dedup_key` field if present, else configured label hash |
+| **Generic webhook** | HMAC-SHA256 signature header with a per-integration secret, plus timestamp (5-minute replay window; a signature already seen inside the window is acknowledged and not stored, so a replayed "firing" can't re-fire a resolved alert) | `dedup_key` field if present, else configured label hash |
 | **PagerDuty / incident.io inbound** | Their webhook signature schemes | Their incident or alert ID |
 
 Each integration gets a unique URL: `https://ingest.nightfix.dev/v1/i/<integration_id>`. The integration ID identifies the org; the credential proves the sender.
@@ -54,9 +54,11 @@ Each integration gets a unique URL: `https://ingest.nightfix.dev/v1/i/<integrati
 3. Return **`202 Accepted`** immediately. Target p99 under 200 ms.
 4. Normalize and process asynchronously from the Postgres queue (`SKIP LOCKED`).
 
-Processing is at-least-once. Every step after persistence is idempotent, keyed on the event ID and the alert fingerprint.
+Processing is at-least-once. Every step after persistence is idempotent, keyed on the event ID and the alert fingerprint. An event that fails for a reason other than a transient one (connection, lock, timeout) is processed once more with auto-remediation switched off, so its incident still opens and pages, saying auto-remediation couldn't be evaluated (principle 5). Either way the event is listed at `GET /v1/alert-events/failed` with its error, and an Error log line alarms.
 
-Ingest runs as its own ECS service (same codebase, separate deployment and scaling) so a bad UI deploy or API load can't block alert intake.
+Ingest never waits for processing: the claim checks that no older event of the org is still being stored only at the moment it picks the next event (migration 0026).
+
+Ingest is meant to run as its own ECS service (same codebase, separate deployment and scaling) so a bad UI deploy or API load can't block alert intake. Today it has its own listener and load-balancer target group, but one ECS service runs every role; the separate service is planned.
 
 ### 3.3 Normalized alert schema
 
@@ -72,7 +74,7 @@ Every integration maps into one shape:
 | `source` | `cloudwatch`, `alertmanager`, `webhook`, … |
 | `labels` | Key/values used for routing, grouping and runbook parameters |
 | `annotations` | Key/values for display (links, runbook hints) |
-| `occurred_at` | From the source when available, else receive time |
+| `occurred_at` | From the source when available (CloudWatch `StateChangeTime`), else receive time; webhooks always use receive time |
 | `raw` | Original payload, kept for 30 days |
 
 **Severity mapping** is configured per integration, with sensible defaults (e.g. CloudWatch `ALARM` → `high`, Alertmanager `severity` label passed through, unknown → `high`). Defaulting unknown severity to `high` follows principle 5.
@@ -196,7 +198,7 @@ Paging is held for at most:
 ### 8.3 Hold conditions — page immediately instead if any are true
 
 - The incident severity is `critical` **and** the matched runbook has not earned critical hold on this service (8.6). By default, critical incidents page **in parallel** with remediation, not after.
-- No healthy agent matches the runbook's `target`.
+- No healthy agent matches the runbook's `target`, or none of the matching agents can run one of its step types (agents report the step types they support; one that reports none is offered anything).
 - The org or agent is frozen (kill switch).
 - The runbook's `cooldown` or `maxRunsPerHour` would be exceeded.
 - More than one `auto` + `beforePaging` runbook matches. Ambiguity pages a human; v1 never picks between competing auto-fixes.
