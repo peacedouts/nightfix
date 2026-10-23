@@ -126,7 +126,7 @@ If an org loses its owner key, or one leaks and nobody can rotate it through the
 
 Under GitHub → **Packages** → `nightfix-agent` → **Package settings**, set visibility to **Public** so customers can pull it. The repository itself stays private.
 
-Every push to `main` publishes `:sha-<commit>` and nothing else: no `:latest` and no `:main`. The agent runs under the customer's IAM role and decides what to execute, so anything that can change would let a new build reach every customer on their next restart. GHCR tags, `sha-` tags included, can be re-pushed by anyone with write access to the package, so the agent module accepts only a digest. Use the tag to find the digest, then check its signature:
+Every push to `main` publishes `:sha-<commit>` and nothing else: no `:latest` and no `:main`. The agent runs under the customer's IAM role and decides what to execute, so anything that can change would let a new build reach every customer on their next restart. GHCR tags, `sha-` tags included, can be re-pushed by anyone with write access to the package, so the agent module accepts only a digest. Use the tag to find the digest, then check its signature with cosign v3 or later. Images are signed with cosign v3, which stores signatures as OCI 1.1 referrers that older cosign releases don't look for:
 
 ```bash
 cosign verify ghcr.io/peacedouts/nightfix-agent@sha256:… \
