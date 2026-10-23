@@ -81,12 +81,6 @@
   }
   h1 em { font-style: italic; color: var(--muted); }
 
-  .lede {
-    margin: 36px 0 0;
-    font-size: 18px;
-    line-height: 1.6;
-    color: var(--muted);
-  }
 
   .horizon {
     position: relative;
@@ -108,7 +102,6 @@
   .rise { animation: rise 1.4s cubic-bezier(.2,.7,.2,1) both; }
   .rise.d1 { animation-delay: .15s; }
   .rise.d2 { animation-delay: .3s; }
-  .rise.d3 { animation-delay: .5s; }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   @media (prefers-reduced-motion: reduce) { .rise { animation: none; } }
 </style>
@@ -139,7 +132,6 @@
     <img class="mark rise" src="/favicon.svg" width="36" height="36" alt="">
     <p class="name rise d1">Nightfix</p>
     <h1 class="rise d2">Quieter nights<br><em>are coming.</em></h1>
-    <p class="lede rise d3">We're building something new, quietly.</p>
   </main>
 
   <div class="horizon" aria-hidden="true"></div>
