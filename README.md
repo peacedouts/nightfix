@@ -2,8 +2,6 @@
 
 Opensource incident response for teams on AWS. Alerts become incidents, and runbooks fix the problem before anyone is paged. It all runs in your own AWS account: the control plane, its database and keys, and an agent in your VPC or cluster that runs signed runbooks under an IAM role you scope. Nothing calls home.
 
-> A CloudWatch alarm fires → an incident opens → a restart runbook runs through the agent → the alarm clears → the incident resolves. **Nobody is paged.** If the fix doesn't work, your pager gets the incident with what was tried.
-
 ## Try it locally
 
 Needs Go 1.24+, PostgreSQL 15+ (`initdb`, `pg_ctl`, `psql`), `curl` and `python3`.
@@ -75,5 +73,6 @@ Nightfix is designed and driven by one engineer, using AI (Claude) as a pair pro
 - the security-sensitive parts (signing, enrollment, sign-in, tenancy, the agent's sandboxing and redaction) have had several independent adversarial reviews, with every finding fixed and covered by a regression test.
 
 ## License
+By Zachary Adams
 
-Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). Contributions are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
+Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). Contributions are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md). 
