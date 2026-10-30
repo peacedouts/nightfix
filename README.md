@@ -43,8 +43,6 @@ The full list of what's built, and what isn't yet, is in [docs/capabilities.md](
 - **Agents:** the `nightfix-agent` Terraform module (ECS Fargate) or the Helm chart in `deploy/helm` (EKS).
 - **Sign-in:** any OpenID Connect provider (Okta, Google Workspace, Entra ID, Keycloak), Auth0 Organizations, or API keys only.
 
-Nightfix Labs offers a fixed-scope installation if you'd rather not do it yourself (hello@nightfix.dev). The software is complete without it.
-
 ## Repository layout
 
 ```
@@ -71,4 +69,4 @@ Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). "Nightfix" is a trademark of Nightfix Labs ([TRADEMARKS.md](TRADEMARKS.md)). Contributions are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
+Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). Contributions are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).

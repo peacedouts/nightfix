@@ -4,9 +4,7 @@ Nightfix runs code in your AWS account, so we take reports seriously and would r
 
 ## Reporting a vulnerability
 
-Report privately, not in a public issue:
-- through GitHub: **Security → Report a vulnerability** on this repository, or
-- by email to **security@nightfix.dev**.
+Report privately, not in a public issue: on this repository, go to **Security → Report a vulnerability**.
 
 Include what you found, how to reproduce it, and the impact you think it has. We acknowledge reports within 3 business days and keep you updated until it's fixed. We'll credit you in the release notes unless you'd rather we didn't.
 
