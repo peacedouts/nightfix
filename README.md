@@ -2,9 +2,7 @@
 
 By [Zachary Adams](https://github.com/peacedouts)
 
-Opensource incident response for teams on AWS. Alerts become incidents, and runbooks fix the problem before anyone is paged. It all runs in your own AWS account: the control plane, its database and keys, and an agent in your VPC or cluster that runs signed runbooks under an IAM role you scope. Nothing calls home.
-
-> A CloudWatch alarm fires → an incident opens → a restart runbook runs through the agent → the alarm clears → the incident resolves. **Nobody is paged.** If the fix doesn't work, your pager gets the incident with what was tried.
+Opensource incident response for teams on AWS. Alerts become incidents, and runbooks fix the problem before anyone is paged. It all runs in your own AWS account: the control plane, its database and keys, and an agent in your VPC or cluster that runs signed runbooks under an IAM role you scope.
 
 ## Try it locally
 
