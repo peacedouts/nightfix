@@ -1,0 +1,31 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Security problem? Don't file it here; see SECURITY.md."
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Commands, runbook YAML or API calls. Remove secrets, account IDs and hostnames you don't want public.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag or commit, and where it runs (local demo, ECS, EKS).
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      render: text

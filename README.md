@@ -68,3 +68,7 @@ make test-race   # what CI runs: race detector, shuffled order, coverage floor o
 Run them as a non-superuser admin (`CREATEROLE CREATEDB`), as CI does: a superuser bypasses row-level security. CI also runs govulncheck, gitleaks over the full history, Terraform validate, Helm lint, and both demos with a check that their story happened.
 
 Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). "Nightfix" is a trademark of Nightfix Labs ([TRADEMARKS.md](TRADEMARKS.md)). Contributions are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
