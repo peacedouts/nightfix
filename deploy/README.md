@@ -286,6 +286,14 @@ The role is meant to be the agent's entire reach. With the chart's NetworkPolicy
 - **Rotate the app's database password:** bump `app_db_password_version`, `terraform apply`, then run **deploy** (or `rollout.sh` with the running release's image and commit). Migrate sets the new password and the rollout picks it up. Existing tasks keep their open connections, but new connections fail until they're replaced, so do it in a quiet moment.
 - **Never delete or change the sealing KMS key.** Without it, every stored customer credential and the agent CA are unrecoverable. It has a 30-day deletion window and automatic rotation, and the control plane refuses to start against a different key.
 
+**API-side checks:**
+
+- `GET /healthz` is liveness only and never touches the database (a database outage mustn't make the orchestrator restart every instance). `GET /readyz` checks the database.
+- Every listener sets header, read, write and idle timeouts; the agent gateway's write timeout outlasts a long poll.
+- `GET /v1/integrations` lists ingest URLs and, for CloudWatch, the pinned topic. It flags an integration with no topic (it accepts nothing) and shows the last correctly signed delivery it refused for its topic; fix either with `PUT /v1/integrations/{id}/topic`.
+- `GET /v1/runs/{id}` returns a 64 KiB tail of each attempt's output (1 MiB across the run, with `output_bytes` and `output_truncated`); the whole output of one attempt is at `GET /v1/runs/{id}/steps/{step}/attempts/{n}/output`. Incident timelines are paged with `?after=<id>&limit=`; a page also stops at about 1 MiB of messages, so read until a page comes back empty.
+- Background workers record a row that keeps failing (`worker_failures`, `worker_error`, `worker_retry_at`) and back off from it, rather than retrying it forever or stopping the loop.
+
 ## Releases and upgrades
 
 A release names a commit on `main` and the images `images.yml` built and signed from it. Run the **release** workflow (Actions → release) with a version and, optionally, the commit. It checks the commit is on `main`, verifies both images' signatures name that commit, pushes the agent Helm chart to `oci://ghcr.io/<owner>/charts/nightfix-agent` (signed, defaulting to that release's agent digest), tags the commit, and publishes release notes from `CHANGELOG.md`. Those notes list what to pin: the commit for the Terraform modules, and the image and chart digests. Pin those rather than the tag. Anyone with write access can move a tag unless a repository ruleset protects `v*` tags (Settings → Rules → New tag ruleset: restrict updates and deletions), so add that ruleset.
@@ -312,6 +320,50 @@ cosign verify ghcr.io/peacedouts/charts/nightfix-agent@sha256:… \
   --certificate-identity https://github.com/peacedouts/nightfix/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
+
+## Setting up Auth0 Organizations
+
+For a deployment that serves several orgs (one Auth0 Organization each). A single-tenant deployment can use `oidc` instead (see above).
+
+1. In Auth0, create an **API** whose identifier is your audience (e.g. `https://api.<domain>`), enable **Organizations**, and note the client ID of Nightfix's application.
+2. Add a post-login **Action** that puts the user's email and groups into the access token:
+   ```js
+   exports.onExecutePostLogin = async (event, api) => {
+     api.accessToken.setCustomClaim("https://nightfix.dev/email", event.user.email);
+     api.accessToken.setCustomClaim("https://nightfix.dev/email_verified", event.user.email_verified);
+     api.accessToken.setCustomClaim("https://nightfix.dev/groups", event.user.app_metadata.groups || []);
+   };
+   ```
+   (Source groups from wherever your IdP provides them; `app_metadata.groups` is just an example. The claim names are fixed identifiers, not URLs that are fetched.)
+3. Run the control plane with `NIGHTFIX_AUTH0_DOMAIN=<tenant>.us.auth0.com`, `NIGHTFIX_AUTH0_AUDIENCE` and `NIGHTFIX_AUTH0_CLIENT_IDS=<client id>`. Tokens issued to any other application in the tenant are refused.
+4. Link the Auth0 Organization to the Nightfix org. This is an operator step, done once the customer has shown they control it (an Auth0 org id isn't secret, so the API won't let an org's owner claim one): `nightfix org link-auth0 --org org_… --auth0-org org_…` (on AWS: `deploy/scripts/link-auth0.sh`, which runs it as a one-off admin task).
+
+## Granting roles
+
+Members start as viewers. With an owner key, create teams mapped to IdP groups (`POST /v1/teams {"slug":"payments","auth0_group":"payments-eng"}`) and grant roles:
+```json
+POST /v1/role-bindings
+{"subject_type":"team","subject":"payments","role":"responder",
+ "scope":{"tags":["payments"],"env":["staging","dev"]}}
+```
+That's the data model's example: Team Payments can run runbooks tagged `payments` outside prod; only admins run against `env=prod`. Publishing a runbook runs its code on every agent it matches, so keep Responder scopes away from production agents, or enforce the agent's allowlist.
+
+## Running it without Terraform
+
+1. Postgres: `NIGHTFIX_ADMIN_DATABASE_URL=… NIGHTFIX_APP_DB_PASSWORD=… nightfix migrate`, then run `nightfix serve` with `NIGHTFIX_DATABASE_URL` pointing at `nfx_app`. See `cmd/nightfix/main.go` for every setting. Expose `NIGHTFIX_INGEST_ADDR` for SNS (HTTPS in front of it) and `NIGHTFIX_AGENT_ADDR` for agents. Set `NIGHTFIX_PUBLIC_INGEST_URL` to the public ingest URL (integrations return it), `NIGHTFIX_AGENT_TLS_HOSTS` to the gateway's hostname (its certificate defaults to localhost), and `NIGHTFIX_KMS_KEY_ID` to keep the sealing key in KMS rather than the state dir; run `org create` with the same settings.
+2. `nightfix org create --name Acme --slug acme` prints an owner API key.
+3. Create a service, escalation targets and a `cloudwatch` integration via the API (the demo script shows each call). CloudWatch integrations require `topic_arn` (`arn:aws:sns:<region>:<account>:<topic>`); only that topic's notifications are accepted. Subscribe the integration's ingest URL to your SNS topic; the subscription is confirmed automatically after its signature is verified. Set the topic's signature version to 2 (SHA-256; `signature_version = 2` in Terraform); version 1 (SHA-1, AWS's default) is accepted too.
+4. Create an IAM enrollment rule for the agent's role, then run the agent in your VPC under that role. The role needs whatever your runbooks call — for the example, `ecs:DescribeServices` and `ecs:UpdateService` on the target service. `sts:GetCallerIdentity` needs no permission.
+   ```bash
+   curl -X POST $API/v1/enrollment-rules -H "Authorization: Bearer $KEY" \
+     -d '{"method":"iam","role_arn":"arn:aws:iam::<account>:role/nightfix-agent","labels":{"env":"prod"},"max_agents":4}'
+
+   nightfix-agent --endpoint https://<gateway>:8443 --ca-file ca.crt --org org_… \
+     --required-signers <key_id>=<base64 public key>
+   ```
+   `ca.crt` is the gateway's CA certificate, from `GET /v1/agent-ca.pem`.
+   Pin each signer as `key_id=base64-public-key` (`nightfix org create` prints it, and `GET /v1/signing-keys` returns it as `agent_pin`): with the key itself pinned, the control plane can't swap in a different key under the same id. A bare `key_id` only requires that some key with that id signed. Rules match on account + role name (STS's assumed-role ARN doesn't carry the role's path). For hosts without an IAM role, use `"method":"token"` and `--enroll-method token --enroll-token …`. In production also limit what the agent runs: `--allowlist-mode enforce` with the allowlist in `NIGHTFIX_ALLOWLIST` (YAML) or a file (`--allowlist`), and `--step-types aws,wait` to refuse shell steps.
+5. Publish `examples/runbooks/ecs-service-restart.yaml` with `PUT /v1/runbooks/ecs-service-restart`, editing `services:` and the CloudWatch alarm name in `match:` to fit. Name the alarm's dimensions `ClusterName` and `ServiceName` (aliased to `alert.labels.cluster` / `.service`).
 
 ## Supply-chain items to finish by hand
 
