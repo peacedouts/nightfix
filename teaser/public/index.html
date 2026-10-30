@@ -25,42 +25,50 @@
   @font-face { font-family: 'Instrument Sans'; font-style: normal; font-weight: 500; font-display: swap; src: url(/fonts/instrument-sans-latin-500-normal.woff2) format('woff2'); }
   :root {
     --ground: #0B0E17;
+    --ground-2: #10142A;
     --text: #ECEBF3;
     --muted: #9A9DB5;
     --dim: #7F829C;
     --line: rgba(236, 235, 243, 0.12);
+    --moon: #F4A52A;
+    --fixed: #86D3BC;
     --serif: 'Instrument Serif', 'Times New Roman', serif;
     --sans: 'Instrument Sans', system-ui, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    --measure: 34rem;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
   body {
-    min-height: 100vh;
+    margin: 0;
     background: var(--ground);
     color: var(--text);
     font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.6;
     -webkit-font-smoothing: antialiased;
-    display: flex;
-    flex-direction: column;
     position: relative;
     overflow-x: hidden;
   }
+  a { color: var(--text); text-underline-offset: 3px; text-decoration-color: rgba(236, 235, 243, 0.4); }
+  a:hover { text-decoration-color: var(--text); }
+  a:focus-visible, .button:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; border-radius: 4px; }
 
-  .sky { position: absolute; inset: 0 0 auto 0; width: 100%; height: 70vh; pointer-events: none; }
+  .sky { position: absolute; inset: 0 0 auto 0; width: 100%; height: 100vh; pointer-events: none; }
 
-  main {
+  /* Hero: the teaser, unchanged in spirit. */
+  .hero {
     position: relative;
-    flex: 1;
+    min-height: 92vh;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     text-align: center;
-    padding: 96px 24px 64px;
+    padding: 96px 24px 72px;
   }
-
   .mark { width: 36px; height: 36px; margin-bottom: 40px; }
-
   .name {
     margin: 0 0 28px;
     font-size: 13px;
@@ -68,9 +76,8 @@
     letter-spacing: 0.32em;
     text-transform: uppercase;
     color: var(--muted);
-    padding-left: 0.32em; /* balances the trailing letter-spacing */
+    padding-left: 0.32em;
   }
-
   h1 {
     margin: 0;
     font-family: var(--serif);
@@ -80,52 +87,107 @@
     letter-spacing: -0.02em;
   }
   h1 em { font-style: italic; color: var(--muted); }
-
-  .lede {
-    margin: 36px 0 0;
-    max-width: 36em;
-    text-wrap: balance;
-    font-size: 17px;
-    line-height: 1.5;
-    color: var(--muted);
-  }
-
-  .repo {
-    margin-top: 32px;
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    padding: 11px 20px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    color: var(--text);
-    font-size: 14px;
-    font-weight: 500;
-    letter-spacing: 0.02em;
-    text-decoration: none;
+  .lede { margin: 36px 0 0; max-width: 36em; font-size: 18px; color: var(--muted); text-wrap: balance; }
+  .actions { margin-top: 32px; display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .button {
+    display: inline-flex; align-items: center; gap: 10px;
+    min-height: 44px; padding: 10px 20px;
+    border: 1px solid var(--line); border-radius: 999px;
+    color: var(--text); font-size: 15px; font-weight: 500; text-decoration: none;
     transition: border-color .2s, background-color .2s;
   }
-  .repo:hover { border-color: rgba(236, 235, 243, 0.35); background: rgba(236, 235, 243, 0.04); }
-  .repo:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
-  .repo svg { width: 16px; height: 16px; flex: none; }
+  .button:hover { border-color: rgba(236, 235, 243, 0.35); background: rgba(236, 235, 243, 0.04); }
+  .button.primary { background: var(--text); color: var(--ground); border-color: var(--text); }
+  .button.primary:hover { background: #fff; }
+  .button svg { width: 16px; height: 16px; flex: none; }
 
-
-  .horizon {
-    position: relative;
-    width: min(560px, calc(100% - 48px));
-    height: 1px;
-    margin: 0 auto;
-    background: var(--line);
+  /* Sections */
+  .wrap { width: min(1040px, calc(100% - 48px)); margin: 0 auto; }
+  section { padding: 104px 0; border-top: 1px solid var(--line); }
+  h2 {
+    margin: 0 0 20px;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: clamp(36px, 5vw, 56px);
+    line-height: 1.05;
+    letter-spacing: -0.015em;
+    max-width: 16em;
   }
+  .intro { margin: 0 0 56px; max-width: var(--measure); color: var(--muted); font-size: 18px; }
+  h3 { margin: 0 0 6px; font-size: 17px; font-weight: 500; }
+  p { margin: 0; }
+
+  /* The night: a real incident timeline, the page's one big moment. */
+  .night { list-style: none; margin: 0; padding: 0; position: relative; }
+  .night::before {
+    content: ""; position: absolute; left: 10.5rem; top: 14px; bottom: 14px; width: 1px;
+    background: linear-gradient(to bottom, var(--moon) 0%, var(--line) 30%, var(--line) 75%, var(--fixed) 100%);
+  }
+  .night li { display: grid; grid-template-columns: 9.5rem 2rem 1fr; gap: 0 0; padding: 0 0 36px; }
+  .night time {
+    font-family: var(--serif); font-size: 30px; line-height: 1; color: var(--text);
+    font-variant-numeric: tabular-nums; letter-spacing: -0.01em; padding-top: 2px;
+  }
+  .night time small { font-size: 0.7em; color: var(--dim); margin-left: 1px; }
+  .night .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ground); border: 1px solid var(--muted); margin: 10px 0 0 calc(1rem - 4px); }
+  .night li:first-child .dot { background: var(--moon); border-color: var(--moon); }
+  .night .body { max-width: var(--measure); }
+  .night .body p { color: var(--muted); }
+  .night .end { padding-bottom: 0; }
+  .night .end .dot { background: var(--fixed); border-color: var(--fixed); }
+  .nobody {
+    display: flex; align-items: center; gap: 14px; margin: 0;
+    font-family: var(--serif); font-size: clamp(40px, 6vw, 64px); line-height: 1; letter-spacing: -0.015em;
+  }
+  .nobody .tick { width: 0.7em; height: 0.7em; color: var(--fixed); flex: none; }
+  .otherwise { margin: 40px 0 0 11.5rem; max-width: var(--measure); color: var(--muted); border-left: 2px solid var(--moon); padding-left: 16px; }
+
+  /* How it works: a real sequence, so it's numbered. */
+  .steps { list-style: none; margin: 40px 0 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px; counter-reset: step; }
+  .steps li { counter-increment: step; }
+  .steps li::before {
+    content: counter(step); display: block; margin-bottom: 14px;
+    font-family: var(--serif); font-size: 44px; line-height: 1; color: var(--moon);
+  }
+  .steps p { color: var(--muted); }
+
+  /* Your account */
+  .facts { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 0 64px; }
+  .facts li { padding: 20px 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1.25rem 1fr; gap: 14px; }
+  .facts .tick { width: 1rem; height: 1rem; color: var(--fixed); margin-top: 5px; }
+  .facts p { color: var(--muted); }
+  .facts strong { color: var(--text); font-weight: 500; }
+
+  /* Fits */
+  .fits { margin: 0; display: grid; grid-template-columns: 10rem 1fr; gap: 18px 32px; }
+  .fits dt { color: var(--dim); }
+  .fits dd { margin: 0; }
+
+  /* Status: Now, Next, Later is a sequence too. */
+  .status { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px; }
+  .status h3 { font-family: var(--serif); font-weight: 400; font-size: 30px; margin-bottom: 10px; }
+  .status li:first-child h3 { color: var(--fixed); }
+  .status p { color: var(--muted); }
+
+  /* Try it */
+  .try { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: start; }
+  pre {
+    margin: 0; padding: 22px 24px; overflow-x: auto;
+    background: var(--ground-2); border: 1px solid var(--line); border-radius: 10px;
+    font-family: var(--mono); font-size: 14px; line-height: 1.7; color: var(--text);
+  }
+  pre .c { color: var(--dim); }
+  .try p + p { margin-top: 16px; }
+  .try p { color: var(--muted); }
 
   footer {
-    position: relative;
-    padding: 28px 24px 36px;
-    text-align: center;
-    font-size: 13px;
-    letter-spacing: 0.04em;
-    color: var(--dim);
+    border-top: 1px solid var(--line);
+    padding: 32px 0 48px;
+    font-size: 14px; color: var(--dim);
   }
+  footer .wrap { display: flex; justify-content: space-between; gap: 16px 32px; flex-wrap: wrap; }
+  footer nav { display: flex; gap: 24px; flex-wrap: wrap; }
+  footer a { color: var(--muted); }
 
   .rise { animation: rise 1.4s cubic-bezier(.2,.7,.2,1) both; }
   .rise.d1 { animation-delay: .15s; }
@@ -134,6 +196,23 @@
   .rise.d4 { animation-delay: .6s; }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   @media (prefers-reduced-motion: reduce) { .rise { animation: none; } }
+
+  @media (max-width: 760px) {
+    body { font-size: 16px; }
+    section { padding: 72px 0; }
+    .night::before { left: 0.25rem; }
+    .night li { grid-template-columns: 1.5rem 1fr; }
+    .night time { grid-column: 2; font-size: 24px; margin-bottom: 6px; }
+    .night .dot { grid-column: 1; grid-row: 1; margin: 8px 0 0 calc(0.25rem - 4px); }
+    .night .body { grid-column: 2; }
+    .night .end > span:first-child { display: none; }
+    .night .end .nobody { grid-column: 2; grid-row: 1; }
+    .otherwise { margin-left: 1.5rem; }
+    .steps, .status, .facts, .try { grid-template-columns: 1fr; gap: 36px; }
+    .facts { gap: 0; }
+    .fits { grid-template-columns: 1fr; gap: 4px; }
+    .fits dd { margin-bottom: 14px; }
+  }
 </style>
 </head>
 <body>
@@ -158,18 +237,130 @@
     </g>
   </svg>
 
-  <main>
+  <header class="hero">
     <img class="mark rise" src="/favicon.svg" width="36" height="36" alt="">
     <p class="name rise d1">Nightfix</p>
     <h1 class="rise d2">Quieter nights<br><em>are coming.</em></h1>
-    <p class="lede rise d3">Opensource incident response that runs in your own AWS account.</p>
-    <a class="repo rise d4" href="https://github.com/peacedouts/nightfix">
-      <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-      View on GitHub
-    </a>
+    <p class="lede rise d3">Opensource incident response that runs in your own AWS account. It runs the fix you'd run at 3 a.m., and only wakes you up if that doesn't work.</p>
+    <div class="actions rise d4">
+      <a class="button primary" href="https://github.com/peacedouts/nightfix">
+        <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        View on GitHub
+      </a>
+      <a class="button" href="#night">See how a night goes</a>
+    </div>
+  </header>
+
+  <main>
+    <section id="night">
+      <div class="wrap">
+        <h2>3:07 a.m., and nobody wakes up</h2>
+        <p class="intro">Here's what an alert looks like with Nightfix, taken from the incident's timeline.</p>
+        <ol class="night">
+          <li>
+            <time>03:07<small>:12</small></time><span class="dot"></span>
+            <div class="body"><h3>The alarm fires</h3><p>checkout-api goes unhealthy and an incident opens.</p></div>
+          </li>
+          <li>
+            <time>03:07<small>:12</small></time><span class="dot"></span>
+            <div class="body"><h3>The fix starts</h3><p>Nightfix finds the restart runbook and holds the page while it runs.</p></div>
+          </li>
+          <li>
+            <time>03:07<small>:13</small></time><span class="dot"></span>
+            <div class="body"><h3>The agent checks first</h3><p>The agent in your account confirms the runbook is signed, then restarts the service.</p></div>
+          </li>
+          <li>
+            <time>03:08<small>:41</small></time><span class="dot"></span>
+            <div class="body"><h3>The service recovers</h3><p>It settles back to healthy.</p></div>
+          </li>
+          <li>
+            <time>03:09<small>:40</small></time><span class="dot"></span>
+            <div class="body"><h3>The alarm clears</h3><p>The incident closes itself, and there's a summary waiting in Slack in the morning.</p></div>
+          </li>
+          <li class="end">
+            <span></span><span class="dot"></span>
+            <p class="nobody"><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Nobody was paged.</p>
+          </li>
+        </ol>
+        <p class="otherwise">If the fix doesn't work, your pager goes off right away, with everything Nightfix already tried.</p>
+      </div>
+    </section>
+
+    <section id="how">
+      <div class="wrap">
+        <h2>How it works</h2>
+        <ol class="steps">
+          <li><h3>Alerts come in</h3><p>From CloudWatch, or anything that can send a webhook. Repeats become one incident.</p></li>
+          <li><h3>Runbooks run the fix</h3><p>Runbooks are files you review like code. Risky steps wait for a teammate's OK in Slack.</p></li>
+          <li><h3>You're paged when it matters</h3><p>If the fix fails, Nightfix pages you through PagerDuty and tells you what it tried.</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="account">
+      <div class="wrap">
+        <h2>Everything stays in your account</h2>
+        <p class="intro">It runs code in production, so it's careful about it.</p>
+        <ul class="facts">
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Nothing calls home.</strong> It all runs in your AWS account.</p></li>
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Outbound only.</strong> No inbound ports to open.</p></li>
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>No tokens to leak.</strong> Agents sign in with their IAM role.</p></li>
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Signed runbooks only.</strong> You can limit each agent to the ones you've approved.</p></li>
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Secrets stay put.</strong> They're read when needed and scrubbed from output.</p></li>
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Everything is on record</strong> in an audit log that can't be quietly edited.</p></li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="fits">
+      <div class="wrap">
+        <h2>Fits what you already run</h2>
+        <p class="intro">It can use the network, DNS, database and keys you already have.</p>
+        <dl class="fits">
+          <dt>Alerts</dt><dd>CloudWatch, signed webhooks</dd>
+          <dt>Paging and chat</dt><dd>PagerDuty, Slack</dd>
+          <dt>Sign-in</dt><dd>Okta, Google Workspace, Entra ID, Keycloak, Auth0, or API keys</dd>
+          <dt>Runs on</dt><dd>ECS Fargate or EKS, from Terraform modules and a Helm chart</dd>
+        </dl>
+      </div>
+    </section>
+
+    <section id="status">
+      <div class="wrap">
+        <h2>Where it is today</h2>
+        <p class="intro">An early project, built in the open.</p>
+        <ol class="status">
+          <li><h3>Now</h3><p>Works end to end on your machine, against stand-ins for AWS, Slack and PagerDuty.</p></li>
+          <li><h3>Next</h3><p>First run on real AWS, then v0.1.</p></li>
+          <li><h3>Later</h3><p>Built-in paging and a web dashboard.</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="try">
+      <div class="wrap try">
+        <div>
+          <h2>Try it in a minute</h2>
+          <p>The demo runs the whole thing on your machine. You'll need Go and PostgreSQL.</p>
+          <p>Ready for AWS? Start with the <a href="https://github.com/peacedouts/nightfix/blob/main/deploy/README.md">deployment guide</a>.</p>
+        </div>
+        <pre><code>git clone https://github.com/peacedouts/nightfix
+cd nightfix
+make demo        <span class="c"># fixed, nobody paged</span>
+make demo-fail   <span class="c"># fix fails, on-call paged</span></code></pre>
+      </div>
+    </section>
   </main>
 
-  <div class="horizon" aria-hidden="true"></div>
-  <footer>© 2026 Nightfix</footer>
+  <footer>
+    <div class="wrap">
+      <span>© 2026 Nightfix. Apache License 2.0.</span>
+      <nav aria-label="Project">
+        <a href="https://github.com/peacedouts/nightfix">GitHub</a>
+        <a href="https://github.com/peacedouts/nightfix/blob/main/docs/capabilities.md">What's built</a>
+        <a href="https://github.com/peacedouts/nightfix/blob/main/SECURITY.md">Security</a>
+      </nav>
+    </div>
+  </footer>
 </body>
 </html>
