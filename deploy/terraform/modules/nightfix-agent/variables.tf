@@ -10,15 +10,21 @@ variable "org_id" {
 }
 
 variable "nightfix_api_url" {
-  description = "Nightfix API, used to fetch the agent gateway's CA certificate."
+  description = "Nightfix API (https://api.<your domain>, the control plane's api_url), used to fetch the agent gateway's CA certificate when ca_pem is empty."
   type        = string
-  default     = "https://api.nightfix.dev"
+  validation {
+    condition     = can(regex("^https://[^/]+$", var.nightfix_api_url))
+    error_message = "nightfix_api_url is https://<host>, with no path."
+  }
 }
 
 variable "agent_endpoint" {
-  description = "Nightfix agent gateway."
+  description = "Nightfix agent gateway (https://agent.<your domain>, the control plane's agent_endpoint)."
   type        = string
-  default     = "https://agent.nightfix.dev"
+  validation {
+    condition     = can(regex("^https://[^/]+$", var.agent_endpoint))
+    error_message = "agent_endpoint is https://<host>, with no path."
+  }
 }
 
 variable "image" {
@@ -90,7 +96,7 @@ variable "extra_egress" {
 }
 
 variable "required_signers" {
-  description = "Signers every runbook must carry, pinned in the agent itself, each as \"key_id=base64-public-key\" (a bare key_id doesn't pin the key). With your own key here, even a compromised Nightfix can't get new code run in your account."
+  description = "Signers every runbook must carry, pinned in the agent itself, each as \"key_id=base64-public-key\" (a bare key_id doesn't pin the key). Pin the org's signing key (agent_pin from GET /v1/signing-keys) and the agent refuses runbooks signed by any other key, whatever the control plane's key list says later. Co-signing with a key you hold isn't built yet: a key the control plane can't sign with makes the agent refuse every runbook."
   type        = list(string)
   default     = []
   validation {
@@ -108,4 +114,61 @@ variable "ca_pem" {
 variable "log_retention_days" {
   type    = number
   default = 30
+}
+
+variable "iam_role_path" {
+  description = "Path for the agent's IAM roles. (Enrollment rules match the role by account and name; the path doesn't matter.)"
+  type        = string
+  default     = "/nightfix/"
+}
+
+variable "iam_permissions_boundary_arn" {
+  description = "Permissions boundary attached to the agent's IAM roles, where your account requires one. The boundary must allow what runbooks do (runbook_policy_json, managed_policy_arns)."
+  type        = string
+  default     = ""
+}
+
+variable "logs_kms_key_arn" {
+  description = "KMS key to encrypt the agent's log group. Its key policy must allow the CloudWatch Logs service in this region. Empty uses CloudWatch's default encryption."
+  type        = string
+  default     = ""
+}
+
+variable "allowlist_mode" {
+  description = "Local runbook allowlist: off, warn (log runbooks that aren't on it) or enforce (refuse them). Use enforce in production: publishing a runbook otherwise runs its code on every matching agent, so anyone who can publish can run code under this role."
+  type        = string
+  default     = "off"
+  validation {
+    condition     = contains(["off", "warn", "enforce"], var.allowlist_mode)
+    error_message = "allowlist_mode is off, warn or enforce."
+  }
+}
+
+variable "allowlist_yaml" {
+  description = <<-EOT
+    The allowlist (YAML) for allowlist_mode warn or enforce. Pin each runbook
+    by digest; version numbers aren't signed:
+
+      runbooks:
+        - name: restart-api
+          digest: sha256:…
+        - name: scale-workers
+          version: "*"   # every version, still signature-checked
+  EOT
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.allowlist_mode == "off" || trimspace(var.allowlist_yaml) != ""
+    error_message = "Set allowlist_yaml when allowlist_mode is warn or enforce."
+  }
+}
+
+variable "step_types" {
+  description = "Step types this agent may run (shell, aws, wait). Empty allows all. Leave out shell where runbooks only need AWS calls: shell steps run arbitrary commands under this role."
+  type        = list(string)
+  default     = []
+  validation {
+    condition     = alltrue([for t in var.step_types : contains(["shell", "aws", "wait"], t)])
+    error_message = "step_types are shell, aws or wait."
+  }
 }

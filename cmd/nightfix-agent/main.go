@@ -33,6 +33,7 @@ func main() {
 	signers := flag.String("required-signers", os.Getenv("NIGHTFIX_REQUIRED_SIGNERS"), "comma-separated signers to pin locally, each key_id or key_id=base64-public-key (overrides the control plane; include the key for the full guarantee)")
 	allowlist := flag.String("allowlist", os.Getenv("NIGHTFIX_ALLOWLIST_FILE"), "allowlist file")
 	allowMode := flag.String("allowlist-mode", env("NIGHTFIX_ALLOWLIST_MODE", "off"), "off | warn | enforce")
+	stepTypes := flag.String("step-types", os.Getenv("NIGHTFIX_AGENT_STEP_TYPES"), "comma-separated step types this agent may run (default all: shell,aws,wait)")
 	freezeDefault := false
 	if v := os.Getenv("NIGHTFIX_AGENT_FREEZE"); v != "" {
 		b, err := strconv.ParseBool(v)
@@ -81,6 +82,7 @@ func main() {
 	a, err := agent.New(agent.Config{
 		Endpoint: *endpoint, CAPEM: caPEM, EnrollMethod: *method, OrgID: *orgID, IAM: aws, EnrollToken: *token, StateDir: *stateDir,
 		RequiredSigners: pinned, PinnedKeys: pinnedKeys, AllowlistFile: *allowlist, AllowlistMode: *allowMode,
+		AllowlistYAML: os.Getenv("NIGHTFIX_ALLOWLIST"), StepTypes: splitList(*stepTypes),
 		Freeze: *freeze, Slots: *slots, AWS: aws, Log: log,
 	})
 	if err != nil {
@@ -104,4 +106,14 @@ func env(k, def string) string {
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, "error:", err)
 	os.Exit(1)
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

@@ -1,12 +1,12 @@
 # Nightfix — Agent Job Protocol (Draft v1alpha1)
 
-Status: draft for discussion. Defines how a customer-deployed agent enrolls, connects to the control plane, receives work, executes runbook steps, and reports results. Companion to `runbook-schema.md`.
+Status: draft for discussion. Defines how a customer-deployed agent enrolls, connects to the control plane, receives work, executes runbook steps, and reports results. Companion to `runbook-schema.md`. Since Oct 23, 2026 the control plane normally runs in the customer's own AWS account alongside the agents (plop.md, "Open source, consulting first"); hosts like `api.<domain>` are that deployment's.
 
 ---
 
 ## 1. Design principles
 
-1. **Outbound only.** The agent opens a single TLS connection to `agent.nightfix.dev:443`. Customers open no inbound ports, and the agent works through an HTTPS proxy.
+1. **Outbound only.** The agent opens a single TLS connection to the deployment's agent gateway (`agent.<domain>:443`). Customers open no inbound ports, and the agent works through an HTTPS proxy.
 2. **Mutual TLS identity.** Every agent has its own short-lived client certificate. The control plane always knows exactly which agent it's talking to, and the agent always verifies it's talking to us.
 3. **The control plane is not trusted blindly.** Signed runbooks aren't enough on their own: the agent also verifies a signed *dispatch envelope* that binds the run, step, parameters, target agent and expiry. A replayed, redirected or tampered job is rejected.
 4. **The agent is nearly stateless.** The control plane owns run state, pauses (`manual`, `approval`) and orchestration. The agent executes one step at a time and reports back. Restarting or replacing an agent is safe.
@@ -64,7 +64,7 @@ Decision confirmed Oct 20, 2026. Built into the agent from day one.
 
 - The agent's trust config has a **`required_signers` list of `key_id`s**. A runbook bundle is accepted only if it carries a valid signature from **every** required signer.
 - **v1 default:** one required signer, the org's control-plane key in KMS.
-- **Customer co-signing:** the customer adds a key they hold, e.g. one their CI pipeline uses to sign a runbook's digest when it merges to main. Co-signatures are uploaded through the API and attached to the published version.
+- **Customer co-signing (designed, not built):** the customer adds a key they hold, e.g. one their CI pipeline uses to sign a runbook's digest when it merges to main. Co-signatures would be uploaded through the API and attached to the published version. The agent already verifies several signatures, but there's no upload endpoint yet, so today the only signer is the control plane's key. Until it's built, the agent's local allowlist (pinned digests, mode `enforce`) is how a customer approves exactly what runs.
 - The required signer list **can be pinned in the agent's local config**, and the local list wins. That's what makes co-signing meaningful: if the control plane alone could remove the customer's key from the list, a compromised control plane could strip the requirement. With the list pinned locally, a compromised control plane can't get new code executed.
 - **What a compromised control plane can still do, with signers pinned.** It decides *when and where* steps run, so it can dispatch any step of a signed runbook directly, skipping `when:` conditions and approval gates (the agent never sees approval state), with parameter values that pass the runbook's declared patterns. It can also forge `steps.<id>.outputs` and the agent's labels, which reach the agent through it. It can't change what a step does, use a parameter value its pattern refuses, or feed alert data into step inputs (the agent doesn't render `alert` or `incident` there). Runbook authors should give every parameter that names something to act on a tight pattern or an enum.
 - Dispatch envelopes (section 6.2) are signed by the control-plane key only. They bind *when and where* to run a step, while the runbook bundle signatures decide *what* may run.
@@ -252,7 +252,7 @@ Continuing a running step during a disconnect is deliberate. Killing a failover 
 Configured via environment variables or a YAML file:
 
 ```yaml
-endpoint: agent.nightfix.dev:443
+endpoint: agent.<domain>:443
 org_id: org_7Hq2...
 enrollment:
   method: iam        # iam (default) | token
@@ -260,7 +260,7 @@ enrollment:
 signing:
   required_signers:  # pinned locally; overrides the control plane's list
     - nightfix-org-kms-1
-    # - acme-ci-signer-1   # add to require customer co-signing
+    # - acme-ci-signer-1   # customer co-signing: designed, not built yet (§3.3)
 slots: 4
 proxy: http://proxy.internal:3128      # optional
 allowlist:
@@ -366,7 +366,7 @@ message DispatchEnvelope {
 
 **Resolved (Oct 20, 2026)**
 - **Fargate enrollment:** IAM-based enrollment is the default; tokens are the fallback (section 3.1).
-- **Who signs:** multi-signature verification ships in the agent from day one, with one required signer in v1 and optional customer co-signing (section 3.3).
+- **Who signs:** multi-signature verification ships in the agent from day one, with one required signer in v1; customer co-signing (section 3.3) is designed but not built.
 - **Secret caching:** none in v1. Fetch per step, zero afterwards.
 - **Agent HA:** two agents per production label set is the documented recommendation. The UI warns when a label set matching `env=prod` has fewer than two healthy agents.
 

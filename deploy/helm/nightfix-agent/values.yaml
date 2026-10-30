@@ -1,0 +1,90 @@
+# Nightfix agent. Required: image.digest, nightfix.endpoint, nightfix.orgId,
+# and an IAM role for the service account (IRSA annotation or an EKS Pod
+# Identity association). The role is the agent's identity (it enrolls by
+# proving it) and its entire reach.
+
+image:
+  repository: ghcr.io/peacedouts/nightfix-agent
+  # Required: sha256:<64 hex>. Tags can be re-pushed; verify the digest with
+  # cosign (deploy/README.md) before pinning it here.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nightfix:
+  # Agent gateway, e.g. https://agent.ops.example.com (the control plane's
+  # agent_endpoint output).
+  endpoint: ""
+  # The org this agent enrolls into (org_…).
+  orgId: ""
+  # Pin the org's signing key (the agent_pin from GET /v1/signing-keys,
+  # key_id=base64-public-key). Empty trusts the control plane's list.
+  # Co-signing with a key you hold isn't built yet: a key the control plane
+  # can't sign with makes the agent refuse every runbook.
+  requiredSigners: []
+  # Required: the agent gateway's CA (PEM), from https://<api host>/v1/agent-ca.pem.
+  # The gateway's certificate comes from the control plane's own CA, which
+  # no system trust store has.
+  caPem: ""
+  # Local allowlist of runbook digests: off | warn | enforce. Use enforce in
+  # production: otherwise publishing a runbook runs its code on every
+  # matching agent, under this agent's IAM role.
+  allowlist:
+    mode: "off"
+    # Contents of the allowlist file (YAML), mounted read-only. Pin by digest:
+    #   runbooks:
+    #     - name: restart-api
+    #       digest: sha256:…
+    content: ""
+  # Step types this agent may run: shell, aws, wait. Empty allows all. Leave
+  # out shell where runbooks only call AWS.
+  stepTypes: []
+  # Customer-side kill switch: connect for visibility only and refuse all work.
+  freeze: false
+
+aws:
+  # AWS_REGION for the agent's calls (and its STS enrollment request).
+  region: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  # IRSA: eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/<role>.
+  # With EKS Pod Identity, leave this empty and create the association for
+  # the service account (deploy/terraform/examples/agent-eks).
+  annotations: {}
+
+# Two agents per production label set (decision #27); one may be down during
+# a rolling update or a node drain.
+replicaCount: 2
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+# Running steps finish before the agent exits (it drains for up to 40s).
+terminationGracePeriodSeconds: 60
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Egress only: DNS, and HTTPS to anywhere (the control plane and the AWS
+# APIs runbooks call). Needs a CNI that enforces NetworkPolicy.
+networkPolicy:
+  enabled: true
+  # Allow the EKS Pod Identity Agent's credential endpoint (port 80 on the
+  # node). Not needed with IRSA, which gets credentials from STS over 443.
+  podIdentityAgent: true
+  extraEgress: []
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

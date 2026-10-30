@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -47,7 +48,11 @@ const (
 )
 
 func (s *Server) slackRoutes(route routeFn, mux *http.ServeMux) {
-	route("POST /v1/slack-apps", "admin", s.apiCreateSlackApp)
+	// Owner only: a Slack app's signing secret authenticates approval clicks,
+	// so whoever holds it speaks for the people linked through that app.
+	route("POST /v1/slack-apps", "owner", s.apiCreateSlackApp)
+	route("GET /v1/slack-apps", "admin", s.apiListSlackApps)
+	route("POST /v1/slack-apps/{id}/archive", "owner", s.apiArchiveSlackApp)
 	route("POST /v1/me/slack-link-code", "viewer", s.apiSlackLinkCode)
 	// Authenticated by Slack's request signature, not a bearer token.
 	mux.HandleFunc("POST /v1/slack/interactions/{id}", s.handleSlackInteraction)
@@ -65,17 +70,16 @@ func (s *Server) apiCreateSlackApp(r *http.Request, p principal) (any, error) {
 	if len(req.SigningSecret) < 16 {
 		return nil, httpError{400, "signing_secret is required (Slack app → Basic Information → Signing Secret)"}
 	}
+	if !slackTeamRe.MatchString(req.TeamID) {
+		return nil, httpError{400, "team_id is required: your Slack workspace ID (T…), so requests from any other workspace are refused"}
+	}
 	id := ids.NewString()
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
 		sealed, err := s.seal([]byte(req.SigningSecret), p.OrgID, sealSlackSigning)
 		if err != nil {
 			return err
 		}
-		var team any
-		if req.TeamID != "" {
-			team = req.TeamID
-		}
-		if _, err := tx.Exec(`INSERT INTO slack_apps (id, org_id, team_id, signing_secret) VALUES ($1,$2,$3,$4)`, id, p.OrgID, team, sealed); err != nil {
+		if _, err := tx.Exec(`INSERT INTO slack_apps (id, org_id, team_id, signing_secret) VALUES ($1,$2,$3,$4)`, id, p.OrgID, req.TeamID, sealed); err != nil {
 			return err
 		}
 		return tx.Audit(r.Context(), p.actorType(), p.actor(), "slack_app.create", "slack_app", id, map[string]string{"team_id": req.TeamID})
@@ -89,6 +93,70 @@ func (s *Server) apiCreateSlackApp(r *http.Request, p principal) (any, error) {
 		"interactivity_url": base + "/v1/slack/interactions/" + ids.Encode("slk", id),
 		"commands_url":      base + "/v1/slack/commands/" + ids.Encode("slk", id),
 	}, nil
+}
+
+var slackTeamRe = regexp.MustCompile(`^[TE][A-Z0-9]{2,20}$`)
+
+// apiListSlackApps lists the org's Slack apps (never their secrets), so a
+// stray or leaked one can be found and archived.
+func (s *Server) apiListSlackApps(r *http.Request, p principal) (any, error) {
+	out := []map[string]any{}
+	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		rows, err := tx.Query(`SELECT a.id, coalesce(a.team_id, ''), a.created_at, a.archived_at,
+				(SELECT count(*) FROM slack_user_links l WHERE l.slack_app_id = a.id)
+			FROM slack_apps a ORDER BY a.created_at`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, team string
+			var created time.Time
+			var archived *time.Time
+			var links int
+			if err := rows.Scan(&id, &team, &created, &archived, &links); err != nil {
+				return err
+			}
+			a := map[string]any{"id": ids.Encode("slk", id), "team_id": team, "created_at": created, "linked_users": links}
+			if archived != nil {
+				a["archived_at"] = *archived
+			}
+			out = append(out, a)
+		}
+		return rows.Err()
+	})
+	return map[string]any{"slack_apps": out}, err
+}
+
+// apiArchiveSlackApp stops a Slack app's requests at once: clicks and
+// commands signed with its secret are refused, and links made through it
+// no longer count.
+func (s *Server) apiArchiveSlackApp(r *http.Request, p principal) (any, error) {
+	id, err := ids.Decode("slk", r.PathValue("id"))
+	if err != nil {
+		return nil, httpError{404, "no such Slack app"}
+	}
+	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
+		res, err := tx.Exec(`UPDATE slack_apps SET archived_at = now() WHERE id = $1 AND archived_at IS NULL`, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			var exists bool
+			if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM slack_apps WHERE id = $1)`, id).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				return httpError{404, "no such Slack app"}
+			}
+			return nil // already archived
+		}
+		return tx.Audit(r.Context(), p.actorType(), p.actor(), "slack_app.archive", "slack_app", id, nil)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"id": ids.Encode("slk", id), "archived": true}, nil
 }
 
 // apiSlackLinkCode issues a one-time code for the signed-in user to type into
@@ -151,7 +219,7 @@ func verifySlackSignature(secret string, body []byte, ts, sig string, now time.T
 // slackRequest authenticates a request from Slack: routes the app, verifies
 // the signature over the raw body before any transaction, and parses the
 // form. It writes the HTTP error itself and returns ok=false on failure.
-func (s *Server) slackRequest(w http.ResponseWriter, r *http.Request) (orgID string, team *string, form url.Values, ok bool) {
+func (s *Server) slackRequest(w http.ResponseWriter, r *http.Request) (orgID, appID string, team *string, form url.Values, ok bool) {
 	appID, err := ids.Decode("slk", r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "unknown app", http.StatusNotFound)
@@ -183,7 +251,7 @@ func (s *Server) slackRequest(w http.ResponseWriter, r *http.Request) (orgID str
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	return orgID, team, form, true
+	return orgID, appID, team, form, true
 }
 
 type slackInteraction struct {
@@ -203,7 +271,7 @@ type slackInteraction struct {
 }
 
 func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) {
-	orgID, team, form, ok := s.slackRequest(w, r)
+	orgID, appID, team, form, ok := s.slackRequest(w, r)
 	if !ok {
 		return
 	}
@@ -230,8 +298,10 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	var reply string
 	err := s.DB.WithOrg(r.Context(), orgID, func(tx *db.Tx) error {
 		var userID string
-		err := tx.QueryRow(`SELECT user_id FROM slack_user_links WHERE slack_team_id = $1 AND slack_user_id = $2`,
-			in.Team.ID, in.User.ID).Scan(&userID)
+		// Only a link made through this same app counts: another app's
+		// signing secret mustn't be able to speak for people linked elsewhere.
+		err := tx.QueryRow(`SELECT user_id FROM slack_user_links WHERE slack_app_id = $1 AND slack_team_id = $2 AND slack_user_id = $3`,
+			appID, in.Team.ID, in.User.ID).Scan(&userID)
 		if isNoRows(err) {
 			reply = ":link: Your Slack account isn't linked to Nightfix yet, so nothing was recorded. Link it once: " +
 				"signed in to Nightfix, get a code (`POST /v1/me/slack-link-code`), then type `/nightfix link <code>` here. Then click again."
@@ -274,7 +344,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 // handleSlackCommand serves the /nightfix slash command. Its reply is the
 // HTTP response, shown only to the person who typed it.
 func (s *Server) handleSlackCommand(w http.ResponseWriter, r *http.Request) {
-	orgID, team, form, ok := s.slackRequest(w, r)
+	orgID, appID, team, form, ok := s.slackRequest(w, r)
 	if !ok {
 		return
 	}
@@ -313,8 +383,8 @@ func (s *Server) handleSlackCommand(w http.ResponseWriter, r *http.Request) {
 			teamID, userID, slackUser); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO slack_user_links (org_id, slack_team_id, slack_user_id, user_id) VALUES ($1,$2,$3,$4)`,
-			orgID, teamID, slackUser, userID); err != nil {
+		if _, err := tx.Exec(`INSERT INTO slack_user_links (org_id, slack_team_id, slack_user_id, user_id, slack_app_id) VALUES ($1,$2,$3,$4,$5)`,
+			orgID, teamID, slackUser, userID, appID); err != nil {
 			return err
 		}
 		return tx.Audit(r.Context(), "user", p.actor(), "slack.linked", "user", userID,

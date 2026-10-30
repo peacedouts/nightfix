@@ -402,10 +402,37 @@ func TestAutoRemediationWaitsForSlackApproval(t *testing.T) {
 		t.Fatalf("usage: %s", out)
 	}
 
+	// A Slack app's signing secret speaks for everyone linked through it, so
+	// an admin can't register one, and a second app (even an owner's) can't
+	// use the links made through the first: a click signed with its secret
+	// as dave records nothing.
+	const rogueSecret = "rogue-signing-secret-chosen-by-the-registrar"
+	e.expect("admin registers a Slack app", who.alice, "POST", "/v1/slack-apps",
+		map[string]string{"signing_secret": rogueSecret, "team_id": "T0ACME"}, 403, "")
+	var rogue map[string]string
+	e.call("POST", "/v1/slack-apps", map[string]string{"signing_secret": rogueSecret, "team_id": "T0ACME"}, &rogue)
+	if c := e.slackClick(rogue["interactivity_url"], rogueSecret, "T0ACME", "U_DAVE", "dave", "nfx_approve", gate, time.Now()); c != 200 {
+		t.Fatalf("click through the second app: got %d", c)
+	}
+	if reply := e.waitReply(2); !strings.Contains(reply, "isn't linked") {
+		t.Fatalf("a second app used dave's link: %q", reply)
+	}
+	if run := e.run(fmt.Sprint(inc["remediation_run"])); run["status"] != "awaiting_approval" {
+		t.Fatalf("a click through another app decided the gate: %v", run["status"])
+	}
+	// Apps are listed, and archiving one stops its requests at once.
+	e.expect("list Slack apps", who.alice, "GET", "/v1/slack-apps", nil, 200, `"linked_users": 1`)
+	e.expect("admin archives", who.alice, "POST", "/v1/slack-apps/"+rogue["id"]+"/archive", nil, 403, "")
+	e.call("POST", "/v1/slack-apps/"+rogue["id"]+"/archive", nil, nil)
+	if c := e.slackClick(rogue["interactivity_url"], rogueSecret, "T0ACME", "U_DAVE", "dave", "nfx_approve", gate, time.Now()); c != 404 {
+		t.Fatalf("click through an archived app: got %d", c)
+	}
+	e.expect("register without a workspace", e.key, "POST", "/v1/slack-apps", map[string]string{"signing_secret": rogueSecret}, 400, "team_id")
+
 	// Group membership is refreshed at sign-in, so a stale sign-in can't approve.
 	e.ageLogin("dave@acme.dev", 8*24*time.Hour)
 	e.slackClick(appPath, slackSecret, "T0ACME", "U_DAVE", "dave", "nfx_approve", gate, time.Now())
-	if reply := e.waitReply(2); !strings.Contains(reply, "haven't signed in") {
+	if reply := e.waitReply(3); !strings.Contains(reply, "haven't signed in") {
 		t.Fatalf("unexpected reply %q", reply)
 	}
 	e.expect("dave signs in", who.dave, "GET", "/v1/me", nil, 200, "")
@@ -413,7 +440,7 @@ func TestAutoRemediationWaitsForSlackApproval(t *testing.T) {
 	if c := e.slackClick(appPath, slackSecret, "T0ACME", "U_DAVE", "dave", "nfx_approve", gate, time.Now()); c != 200 {
 		t.Fatalf("click: got %d", c)
 	}
-	if reply := e.waitReply(3); !strings.Contains(reply, "You approved") {
+	if reply := e.waitReply(4); !strings.Contains(reply, "You approved") {
 		t.Fatalf("unexpected reply %q", reply)
 	}
 	run := e.waitRun(fmt.Sprint(inc["remediation_run"]), "succeeded")
@@ -423,7 +450,7 @@ func TestAutoRemediationWaitsForSlackApproval(t *testing.T) {
 	}
 	// A second click after the decision gets a clear answer, not an error page.
 	e.slackClick(appPath, slackSecret, "T0ACME", "U_DAVE", "dave", "nfx_approve", gate, time.Now())
-	if reply := e.waitReply(4); !strings.Contains(reply, "already approved") {
+	if reply := e.waitReply(5); !strings.Contains(reply, "already approved") {
 		t.Fatalf("unexpected reply %q", reply)
 	}
 

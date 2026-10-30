@@ -346,7 +346,7 @@ func (s *Server) apiDeleteBinding(r *http.Request, p principal) (any, error) {
 			}
 		}
 		if role == "owner" {
-			if err := lastOwnerCheck(tx, "", id); err != nil {
+			if err := s.lastOwnerCheck(tx, "", id); err != nil {
 				return err
 			}
 		}

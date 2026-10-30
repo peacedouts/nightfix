@@ -6,7 +6,7 @@
 # Then register the output role ARN with Nightfix (see deploy/README.md).
 
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.9"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -54,15 +54,13 @@ variable "required_signers" {
 }
 
 variable "nightfix_api_url" {
-  description = "Nightfix API (for a sandbox control plane, its api_url output)"
+  description = "Nightfix API: the control plane's api_url output (https://api.<domain>)"
   type        = string
-  default     = "https://api.nightfix.dev"
 }
 
 variable "agent_endpoint" {
-  description = "Nightfix agent gateway (for a sandbox control plane, its agent_endpoint output)"
+  description = "Nightfix agent gateway: the control plane's agent_endpoint output (https://agent.<domain>)"
   type        = string
-  default     = "https://agent.nightfix.dev"
 }
 
 data "aws_caller_identity" "current" {}

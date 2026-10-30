@@ -45,7 +45,7 @@ Integration ──► Alert ──(routing rules)──► Service ──(groupi
 | **Generic webhook** | HMAC-SHA256 signature header with a per-integration secret, plus timestamp (5-minute replay window; a signature already seen inside the window is acknowledged and not stored, so a replayed "firing" can't re-fire a resolved alert) | `dedup_key` field if present, else configured label hash |
 | **PagerDuty / incident.io inbound** | Their webhook signature schemes | Their incident or alert ID |
 
-Each integration gets a unique URL: `https://ingest.nightfix.dev/v1/i/<integration_id>`. The integration ID identifies the org; the credential proves the sender.
+Each integration gets a unique URL: `https://ingest.<domain>/v1/i/<integration_id>`. The integration ID identifies the org; the credential proves the sender.
 
 ### 3.2 The ingest path
 

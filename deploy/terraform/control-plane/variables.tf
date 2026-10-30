@@ -17,21 +17,18 @@ variable "domain" {
 }
 
 variable "api_hostname" {
-  description = "Host for the REST API and Slack callbacks."
-  type        = string
-  default     = "api"
+  type    = string
+  default = "api"
 }
 
 variable "ingest_hostname" {
-  description = "Host customers point alert integrations at."
-  type        = string
-  default     = "ingest"
+  type    = string
+  default = "ingest"
 }
 
 variable "agent_hostname" {
-  description = "Host agents connect to (mutual TLS, passed straight through to the tasks)."
-  type        = string
-  default     = "agent"
+  type    = string
+  default = "agent"
 }
 
 variable "image_tag" {
@@ -46,9 +43,8 @@ variable "vpc_cidr" {
 }
 
 variable "single_nat_gateway" {
-  description = "One NAT gateway for all AZs (cheaper; an AZ outage then cuts outbound traffic). Set false for one per AZ."
-  type        = bool
-  default     = true
+  type    = bool
+  default = true
 }
 
 variable "db_instance_class" {
@@ -57,21 +53,23 @@ variable "db_instance_class" {
 }
 
 variable "db_multi_az" {
-  description = "Standby in a second AZ. Recommended once customers depend on it."
-  type        = bool
-  default     = false
+  type    = bool
+  default = false
 }
 
 variable "db_allocated_storage" {
-  description = "Initial storage in GiB; autoscales up to 5x."
-  type        = number
-  default     = 20
+  type    = number
+  default = 20
+}
+
+variable "db_performance_insights" {
+  type    = bool
+  default = false
 }
 
 variable "desired_count" {
-  description = "Control-plane tasks. Two or more: workers coordinate through Postgres, so any number can run."
-  type        = number
-  default     = 2
+  type    = number
+  default = 2
 }
 
 variable "task_cpu" {
@@ -85,39 +83,37 @@ variable "task_memory" {
 }
 
 variable "auth0_domain" {
-  description = "Auth0 tenant domain (e.g. nightfix.us.auth0.com). Empty disables user login (API keys only)."
+  description = "Auth0 tenant domain. Empty disables user login (API keys only)."
   type        = string
   default     = ""
 }
 
+variable "auth0_client_ids" {
+  description = "With auth0_domain: the client IDs of Nightfix's applications in the Auth0 tenant."
+  type        = list(string)
+  default     = []
+}
+
 variable "auth0_audience" {
-  description = "Auth0 API identifier."
-  type        = string
-  default     = "https://api.nightfix.dev"
+  type    = string
+  default = "https://api.nightfix.dev"
+}
+
+variable "alarm_email" {
+  type    = string
+  default = ""
+}
+
+variable "deletion_protection" {
+  description = "Set false only for a sandbox you will tear down."
+  type        = bool
+  default     = true
 }
 
 variable "github_repository" {
   description = "owner/repo allowed to push images and deploy through GitHub OIDC."
   type        = string
   default     = "peacedouts/nightfix"
-}
-
-variable "alarm_email" {
-  description = "Where CloudWatch alarms go. Empty creates the SNS topic without a subscription."
-  type        = string
-  default     = ""
-}
-
-variable "db_performance_insights" {
-  description = "Performance Insights. Not available on every instance class (check before enabling on db.t4g.small)."
-  type        = bool
-  default     = false
-}
-
-variable "deletion_protection" {
-  description = "Protect the database, load balancers, image repository and secrets from deletion. Set false only for a sandbox you will tear down: it also skips the final DB snapshot and lets destroy empty the image repository."
-  type        = bool
-  default     = true
 }
 
 variable "github_oidc_provider_arn" {

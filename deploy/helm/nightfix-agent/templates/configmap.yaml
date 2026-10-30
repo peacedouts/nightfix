@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nightfix-agent.fullname" . }}
+  labels:
+    {{- include "nightfix-agent.labels" . | nindent 4 }}
+data:
+  ca.pem: |
+    {{- required "nightfix.caPem is required (from https://<api host>/v1/agent-ca.pem)" .Values.nightfix.caPem | nindent 4 }}
+  {{- with .Values.nightfix.allowlist.content }}
+  allowlist.yaml: |
+    {{- . | nindent 4 }}
+  {{- end }}

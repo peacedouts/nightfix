@@ -2,36 +2,53 @@ locals {
   api_host    = "${var.api_hostname}.${var.domain}"
   ingest_host = "${var.ingest_hostname}.${var.domain}"
   agent_host  = "${var.agent_hostname}.${var.domain}"
-  image       = "${aws_ecr_repository.controlplane.repository_url}:${var.image_tag}"
+  image       = var.image != "" ? var.image : "${aws_ecr_repository.controlplane.repository_url}:${var.image_tag}"
+  region      = data.aws_region.current.name
 
   common_env = [
-    { name = "AWS_REGION", value = var.region },
-    { name = "NIGHTFIX_DB_HOST", value = aws_db_instance.main.address },
-    { name = "NIGHTFIX_DB_NAME", value = aws_db_instance.main.db_name },
-    { name = "NIGHTFIX_KMS_KEY_ID", value = aws_kms_alias.sealing.name },
+    { name = "AWS_REGION", value = local.region },
+    { name = "NIGHTFIX_DB_HOST", value = local.db_host },
+    { name = "NIGHTFIX_DB_PORT", value = tostring(local.db_port) },
+    { name = "NIGHTFIX_DB_NAME", value = local.db_name },
+    { name = "NIGHTFIX_KMS_KEY_ID", value = local.sealing_key_ref },
+  ]
+  oidc_env = var.oidc == null ? [] : [
+    { name = "NIGHTFIX_OIDC_ISSUER", value = var.oidc.issuer },
+    { name = "NIGHTFIX_OIDC_AUDIENCE", value = var.oidc.audience },
+    { name = "NIGHTFIX_OIDC_ORG", value = var.oidc.org_id },
+    { name = "NIGHTFIX_OIDC_CLIENT_IDS", value = join(",", var.oidc.client_ids) },
+    { name = "NIGHTFIX_OIDC_ALLOWED_GROUPS", value = join(",", var.oidc.allowed_groups) },
+    { name = "NIGHTFIX_OIDC_EMAIL_DOMAINS", value = join(",", var.oidc.email_domains) },
+    { name = "NIGHTFIX_OIDC_REQUIRED_CLAIMS", value = join(",", [for k, v in var.oidc.required_claims : "${k}=${v}"]) },
+    { name = "NIGHTFIX_OIDC_EMAIL_CLAIM", value = var.oidc.email_claim },
+    { name = "NIGHTFIX_OIDC_GROUPS_CLAIM", value = var.oidc.groups_claim },
+    { name = "NIGHTFIX_OIDC_EMAIL_VERIFIED_CLAIM", value = var.oidc.email_verified_claim },
+    { name = "NIGHTFIX_OIDC_TRUST_EMAIL", value = tostring(var.oidc.trust_email) },
   ]
   app_password_secret = { name = "NIGHTFIX_APP_DB_PASSWORD", valueFrom = aws_secretsmanager_secret.app_db.arn }
   log_config = {
     logDriver = "awslogs"
     options = {
       "awslogs-group"         = aws_cloudwatch_log_group.controlplane.name
-      "awslogs-region"        = var.region
+      "awslogs-region"        = local.region
       "awslogs-stream-prefix" = "controlplane"
     }
   }
 }
 
 resource "aws_ecs_cluster" "main" {
-  name = local.name
+  count = local.create_cluster ? 1 : 0
+  name  = local.name
   setting {
     name  = "containerInsights"
-    value = "enabled"
+    value = var.container_insights ? "enabled" : "disabled"
   }
 }
 
 resource "aws_cloudwatch_log_group" "controlplane" {
-  name              = "/nightfix/${var.environment}/controlplane"
-  retention_in_days = 90
+  name              = "/${var.name_prefix}/${var.environment}/controlplane"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = local.logs_kms_key_arn
 }
 
 resource "aws_ecs_task_definition" "controlplane" {
@@ -62,12 +79,13 @@ resource "aws_ecs_task_definition" "controlplane" {
       { containerPort = 8081, protocol = "tcp" },
       { containerPort = 8443, protocol = "tcp" },
     ]
-    environment = concat(local.common_env, [
+    environment = concat(local.common_env, local.oidc_env, [
       { name = "NIGHTFIX_PUBLIC_API_URL", value = "https://${local.api_host}" },
       { name = "NIGHTFIX_PUBLIC_INGEST_URL", value = "https://${local.ingest_host}" },
       { name = "NIGHTFIX_AGENT_TLS_HOSTS", value = local.agent_host },
       { name = "NIGHTFIX_AUTH0_DOMAIN", value = var.auth0_domain },
-      { name = "NIGHTFIX_AUTH0_AUDIENCE", value = var.auth0_audience },
+      { name = "NIGHTFIX_AUTH0_CLIENT_IDS", value = join(",", var.auth0_client_ids) },
+      { name = "NIGHTFIX_AUTH0_AUDIENCE", value = var.auth0_audience != "" ? var.auth0_audience : "https://${local.api_host}" },
     ])
     secrets          = [local.app_password_secret]
     logConfiguration = local.log_config
@@ -96,13 +114,14 @@ resource "aws_ecs_task_definition" "migrate" {
     command                = ["migrate"]
     readonlyRootFilesystem = true
     environment = [
-      { name = "NIGHTFIX_DB_HOST", value = aws_db_instance.main.address },
-      { name = "NIGHTFIX_DB_NAME", value = aws_db_instance.main.db_name },
-      { name = "NIGHTFIX_DB_ADMIN_USER", value = aws_db_instance.main.username },
+      { name = "NIGHTFIX_DB_HOST", value = local.db_host },
+      { name = "NIGHTFIX_DB_PORT", value = tostring(local.db_port) },
+      { name = "NIGHTFIX_DB_NAME", value = local.db_name },
+      { name = "NIGHTFIX_DB_ADMIN_USER", value = local.db_admin_user },
     ]
     secrets = [
       local.app_password_secret,
-      { name = "NIGHTFIX_DB_ADMIN_PASSWORD", valueFrom = "${aws_db_instance.main.master_user_secret[0].secret_arn}:password::" },
+      { name = "NIGHTFIX_DB_ADMIN_PASSWORD", valueFrom = "${local.db_admin_secret_arn}:password::" },
     ]
     logConfiguration = local.log_config
   }])
@@ -139,7 +158,7 @@ resource "aws_ecs_task_definition" "admin" {
 
 resource "aws_ecs_service" "controlplane" {
   name                   = "controlplane"
-  cluster                = aws_ecs_cluster.main.id
+  cluster                = local.cluster_arn
   task_definition        = aws_ecs_task_definition.controlplane.arn
   desired_count          = var.desired_count
   launch_type            = "FARGATE"
@@ -155,7 +174,7 @@ resource "aws_ecs_service" "controlplane" {
   }
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    subnets          = local.private_subnet_ids
     security_groups  = [aws_security_group.tasks.id]
     assign_public_ip = false
   }

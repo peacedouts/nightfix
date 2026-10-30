@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nightfix-agent.fullname" . }}
+  labels:
+    {{- include "nightfix-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "nightfix-agent.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "nightfix-agent.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "nightfix-agent.serviceAccountName" . }}
+      # The agent never calls the Kubernetes API. IRSA and Pod Identity inject
+      # their own AWS token volume, which this doesn't affect.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: {{ include "nightfix-agent.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: NIGHTFIX_ENDPOINT
+              value: {{ required "nightfix.endpoint is required (the agent gateway, e.g. https://agent.ops.example.com)" .Values.nightfix.endpoint | quote }}
+            - name: NIGHTFIX_ORG_ID
+              value: {{ required "nightfix.orgId is required (org_…)" .Values.nightfix.orgId | quote }}
+            - name: NIGHTFIX_ENROLL_METHOD
+              value: iam
+            - name: NIGHTFIX_CA_FILE
+              value: /etc/nightfix/ca.pem
+            {{- with .Values.nightfix.requiredSigners }}
+            - name: NIGHTFIX_REQUIRED_SIGNERS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            - name: NIGHTFIX_ALLOWLIST_MODE
+              value: {{ .Values.nightfix.allowlist.mode | quote }}
+            {{- if .Values.nightfix.allowlist.content }}
+            - name: NIGHTFIX_ALLOWLIST_FILE
+              value: /etc/nightfix/allowlist.yaml
+            {{- end }}
+            {{- with .Values.nightfix.stepTypes }}
+            - name: NIGHTFIX_AGENT_STEP_TYPES
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.nightfix.freeze }}
+            - name: NIGHTFIX_AGENT_FREEZE
+              value: "true"
+            {{- end }}
+            - name: AWS_REGION
+              value: {{ required "aws.region is required" .Values.aws.region | quote }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nightfix
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "nightfix-agent.fullname" . }}
+        # Scratch space for shell steps; the root filesystem is read-only.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "nightfix-agent.selectorLabels" . | nindent 14 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

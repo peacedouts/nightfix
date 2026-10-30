@@ -26,6 +26,7 @@ resource "aws_ecs_cluster" "agent" {
 resource "aws_cloudwatch_log_group" "agent" {
   name              = "/nightfix/${var.name}"
   retention_in_days = var.log_retention_days
+  kms_key_id        = var.logs_kms_key_arn != "" ? var.logs_kms_key_arn : null
 }
 
 data "aws_iam_policy_document" "assume" {
@@ -57,9 +58,10 @@ data "aws_iam_policy_document" "assume" {
 # role (no tokens), and every runbook step runs with exactly these
 # permissions, nothing more.
 resource "aws_iam_role" "agent" {
-  name               = var.name
-  path               = "/nightfix/"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
+  name                 = var.name
+  path                 = var.iam_role_path
+  permissions_boundary = var.iam_permissions_boundary_arn != "" ? var.iam_permissions_boundary_arn : null
+  assume_role_policy   = data.aws_iam_policy_document.assume.json
 }
 
 resource "aws_iam_role_policy" "runbooks" {
@@ -76,9 +78,10 @@ resource "aws_iam_role_policy_attachment" "extra" {
 }
 
 resource "aws_iam_role" "execution" {
-  name               = "${var.name}-execution"
-  path               = "/nightfix/"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
+  name                 = "${var.name}-execution"
+  path                 = var.iam_role_path
+  permissions_boundary = var.iam_permissions_boundary_arn != "" ? var.iam_permissions_boundary_arn : null
+  assume_role_policy   = data.aws_iam_policy_document.assume.json
 }
 
 resource "aws_iam_role_policy_attachment" "execution" {
@@ -143,6 +146,9 @@ resource "aws_ecs_task_definition" "agent" {
       { name = "NIGHTFIX_ENROLL_METHOD", value = "iam" },
       { name = "NIGHTFIX_CA_PEM", value = local.ca_pem },
       { name = "NIGHTFIX_REQUIRED_SIGNERS", value = join(",", var.required_signers) },
+      { name = "NIGHTFIX_ALLOWLIST_MODE", value = var.allowlist_mode },
+      { name = "NIGHTFIX_ALLOWLIST", value = var.allowlist_mode == "off" ? "" : var.allowlist_yaml },
+      { name = "NIGHTFIX_AGENT_STEP_TYPES", value = join(",", var.step_types) },
       { name = "AWS_REGION", value = data.aws_region.current.name },
     ]
     logConfiguration = {

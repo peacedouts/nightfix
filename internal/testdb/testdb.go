@@ -19,6 +19,9 @@ import (
 
 const appPassword = "nfx_app_test"
 
+// A database per test, all on one server.
+func init() { db.AllowSharedServer = true }
+
 // New returns a pool connected as nfx_app to a new database, dropped at test end.
 func New(t testing.TB) *db.DB {
 	t.Helper()

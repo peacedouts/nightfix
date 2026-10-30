@@ -87,6 +87,72 @@ jobs:
       - run: make demo
       - run: make demo-fail
 
+  commit-identity:
+    # Personal email addresses must never reach the (public) history: every
+    # new commit's author and committer is a no-reply address. Set
+    # git config user.email to your <id>+<login>@users.noreply.github.com.
+    # Merge commits on main take the merger's GitHub email: turn on "Keep my
+    # email addresses private" in GitHub's email settings so they don't.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check commit identities
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            BASE=$(git rev-list --max-parents=0 HEAD | tail -1)
+          fi
+          allowed='^([0-9]+\+[A-Za-z0-9-]+(\[bot\])?@users\.noreply\.github\.com|noreply@github\.com|noreply@anthropic\.com)'
+          bad=$(git log --format='%h %ae%n%h %ce' "$BASE..$HEAD" | awk '{print $2" "$1}' | grep -Ev "$allowed " | sort -u || true)
+          if [ -n "$bad" ]; then
+            echo "::error::commits with a non-no-reply author or committer address:"
+            echo "$bad" | sed 's/^[^ ]*@[^ ]* /<redacted address> /'
+            echo "Rewrite them with your GitHub no-reply address (git commit --amend --reset-author, or git rebase -r --exec 'git commit --amend --no-edit --reset-author')."
+            exit 1
+          fi
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # every commit: once public, history is public too
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+      - name: Scan the history for secrets
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.21.2
+          # Reviewed findings (test fixtures) are listed in .gitleaksignore.
+          "$(go env GOPATH)/bin/gitleaks" git . --redact --log-opts="--all"
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Helm comes with the runner image.
+      - name: Lint and render the agent chart
+        run: |
+          chart=deploy/helm/nightfix-agent
+          set -- --set image.digest=sha256:$(printf '0%.0s' {1..64}) --set nightfix.endpoint=https://agent.example.com \
+            --set nightfix.orgId=org_0123456789abcdef0123456789abcdef --set aws.region=us-east-1 --set nightfix.caPem=test
+          helm lint --strict "$chart" "$@"
+          helm template test "$chart" "$@" > rendered.yaml
+          grep -q 'image: "ghcr.io/peacedouts/nightfix-agent@sha256:' rendered.yaml
+          grep -q 'readOnlyRootFilesystem: true' rendered.yaml
+          # Refused without a digest, or with a tag in its place.
+          if helm template test "$chart" --set nightfix.endpoint=x --set nightfix.orgId=x --set aws.region=x --set nightfix.caPem=x > /dev/null 2>&1; then
+            echo "::error::the chart rendered without image.digest"; exit 1
+          fi
+          if helm template test "$chart" "$@" --set image.digest=latest > /dev/null 2>&1; then
+            echo "::error::the chart accepted a tag as the digest"; exit 1
+          fi
+
   terraform:
     runs-on: ubuntu-latest
     steps:
@@ -97,7 +163,7 @@ jobs:
       - run: terraform fmt -check -recursive deploy/terraform
       - name: Validate
         run: |
-          for dir in deploy/terraform/control-plane deploy/terraform/examples/agent deploy/terraform/examples/demo-target; do
+          for dir in deploy/terraform/control-plane deploy/terraform/examples/self-hosted deploy/terraform/examples/agent deploy/terraform/examples/agent-eks deploy/terraform/examples/demo-target; do
             echo "::group::$dir"
             terraform -chdir=$dir init -backend=false -input=false
             terraform -chdir=$dir validate

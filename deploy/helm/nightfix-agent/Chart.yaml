@@ -1,0 +1,10 @@
+apiVersion: v2
+name: nightfix-agent
+description: The Nightfix agent for Kubernetes (EKS). It runs signed runbook steps under an IAM role you control, with outbound HTTPS only.
+type: application
+version: 0.1.0
+# The agent image is pinned by digest in values (image.digest); appVersion is informational.
+appVersion: "0.1.0"
+home: https://github.com/peacedouts/nightfix
+sources:
+  - https://github.com/peacedouts/nightfix

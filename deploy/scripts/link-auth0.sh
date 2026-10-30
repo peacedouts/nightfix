@@ -6,12 +6,13 @@
 #
 #   deploy/scripts/link-auth0.sh org_… org_abc123
 #
-# Run from deploy/terraform/control-plane's state (reads `terraform output`),
+# Reads `terraform output` from deploy/terraform/control-plane, or from
+# NIGHTFIX_TF_DIR (a self-hosted root such as examples/self-hosted),
 # with AWS credentials that can run the admin task.
 set -euo pipefail
 org="${1:?usage: link-auth0.sh <nightfix org id org_…> <auth0 organization id org_…>}"
 auth0="${2:?usage: link-auth0.sh <nightfix org id org_…> <auth0 organization id org_…>}"
-cd "$(dirname "$0")/../terraform/control-plane"
+cd "${NIGHTFIX_TF_DIR:-$(dirname "$0")/../terraform/control-plane}"
 out=$(terraform output -json admin_task)
 get() { jq -r ".$1" <<<"$out"; }
 export AWS_REGION="$(get region)"

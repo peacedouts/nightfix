@@ -125,7 +125,7 @@ func (s *Server) apiRevokeAPIKey(r *http.Request, p principal) (any, error) {
 			}
 		}
 		if role == "owner" {
-			if err := lastOwnerCheck(tx, id, ""); err != nil {
+			if err := s.lastOwnerCheck(tx, id, ""); err != nil {
 				return err
 			}
 		}
@@ -151,24 +151,29 @@ func lockOwners(tx *db.Tx) error {
 // lastOwnerCheck refuses to remove the org's last usable owner credential
 // (without one, only an operator could recover the org). It counts what
 // someone can actually use, leaving out the key or binding being removed:
-// unrevoked keys that are owners by role or binding, and, when the org signs
-// in with Auth0, owner bindings of active members or of teams with an
-// active member. An owner binding to an empty team doesn't count.
-func lastOwnerCheck(tx *db.Tx, exceptKey, exceptBinding string) error {
+// unrevoked keys that are owners by role or binding, and, when the org's
+// members can sign in (Auth0 linked, or the org generic OIDC maps to),
+// owner bindings of active members or of teams with an active member. An
+// owner binding to an empty team doesn't count.
+func (s *Server) lastOwnerCheck(tx *db.Tx, exceptKey, exceptBinding string) error {
+	users, err := s.usersCanSignIn(tx)
+	if err != nil {
+		return err
+	}
 	var n int
 	if err := tx.QueryRow(`
 		SELECT (SELECT count(*) FROM api_keys k
 		        WHERE k.revoked_at IS NULL AND k.id IS DISTINCT FROM $1::uuid
 		          AND (k.role = 'owner' OR EXISTS (SELECT 1 FROM role_bindings b WHERE b.subject_type = 'api_key'
 		               AND b.subject_id = k.id AND b.role = 'owner' AND b.id IS DISTINCT FROM $2::uuid)))
-		     + CASE WHEN (SELECT auth0_org_id IS NOT NULL FROM orgs) THEN
+		     + CASE WHEN $3::boolean THEN
 		         (SELECT count(*) FROM role_bindings b JOIN org_members m ON m.user_id = b.subject_id AND m.status = 'active'
 		          WHERE b.subject_type = 'user' AND b.role = 'owner' AND b.id IS DISTINCT FROM $2::uuid)
 		       + (SELECT count(*) FROM role_bindings b
 		          WHERE b.subject_type = 'team' AND b.role = 'owner' AND b.id IS DISTINCT FROM $2::uuid
 		            AND EXISTS (SELECT 1 FROM team_members tm JOIN org_members m ON m.user_id = tm.user_id AND m.status = 'active'
 		                        WHERE tm.team_id = b.subject_id))
-		       ELSE 0 END`, nullable(exceptKey), nullable(exceptBinding)).Scan(&n); err != nil {
+		       ELSE 0 END`, nullable(exceptKey), nullable(exceptBinding), users).Scan(&n); err != nil {
 		return err
 	}
 	if n == 0 {

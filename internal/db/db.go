@@ -149,6 +149,13 @@ func (t *Tx) NextCounter(ctx context.Context, name string) (int64, error) {
 
 var identRe = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
+// AllowSharedServer lets more than one database on a Postgres server use the
+// nfx_owner and nfx_app roles. Only tests set it: the roles are server-wide,
+// so two Nightfix deployments on one server would share the app's login
+// (whoever holds it can reach both databases) and reset each other's
+// password on every migration.
+var AllowSharedServer bool
+
 // Migrate applies pending migrations using an administrative connection
 // (one that can create roles). It creates the nfx_owner and nfx_app roles if
 // needed and sets nfx_app's password.
@@ -207,6 +214,33 @@ func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 		if err != nil {
 			return fmt.Errorf("migration setup: %w", err)
 		}
+	}
+	// One Nightfix database per server: the roles record which database they
+	// belong to (a comment on a role is server-wide), and a second database
+	// is refused. Only the app may connect to this one.
+	var owner sql.NullString
+	if err := conn.QueryRowContext(ctx, `SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = 'nfx_app'`).Scan(&owner); err != nil {
+		return fmt.Errorf("migration setup: %w", err)
+	}
+	var dbName string
+	if err := conn.QueryRowContext(ctx, `SELECT current_database()`).Scan(&dbName); err != nil {
+		return err
+	}
+	marker := "nightfix database: " + dbName
+	switch {
+	case owner.Valid && owner.String != "" && owner.String != marker && !AllowSharedServer:
+		return fmt.Errorf("the nfx_app role on this Postgres server already belongs to another Nightfix database (%q); "+
+			"each deployment needs its own server, because the roles are server-wide", strings.TrimPrefix(owner.String, "nightfix database: "))
+	case (!owner.Valid || owner.String == "") && !AllowSharedServer:
+		if _, err := conn.ExecContext(ctx, `COMMENT ON ROLE nfx_app IS `+quoteLiteral(marker)); err != nil {
+			return fmt.Errorf("migration setup: %w", err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `DO $$ BEGIN
+		  EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', current_database());
+		  EXECUTE format('GRANT CONNECT ON DATABASE %I TO nfx_app', current_database());
+		END $$`); err != nil {
+		return fmt.Errorf("migration setup (the admin login must own the database): %w", err)
 	}
 	if appPassword != "" {
 		// Send a SCRAM verifier, not the password: if the statement ever

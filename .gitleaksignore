@@ -1,0 +1,20 @@
+# Findings reviewed Oct 23, 2026: all are test fixtures (truncated or generated keys,
+# migration hashes, made-up tokens). New findings fail CI until reviewed.
+0f80b7c5e524fff8a6798eba0b1dfa612ed9746e:migrations/frozen_test.go:generic-api-key:32
+24510df6e3152f314e2b25312b8717172b975db3:internal/e2e/approval_test.go:generic-api-key:206
+260969a4892923ea2ed9a1115a81d9e7208237da:internal/agent/review_v3_redact_test.go:stripe-access-token:58
+2acb1df068fac693e66d790445cbefa057ae226c:internal/agent/secretmaterial_test.go:generic-api-key:132
+2acb1df068fac693e66d790445cbefa057ae226c:internal/agent/secretmaterial_test.go:generic-api-key:134
+2acb1df068fac693e66d790445cbefa057ae226c:internal/agent/secretmaterial_test.go:private-key:41
+2acb1df068fac693e66d790445cbefa057ae226c:internal/agent/secretmaterial_test.go:private-key:80
+2acb1df068fac693e66d790445cbefa057ae226c:migrations/frozen_test.go:generic-api-key:32
+450c91ef9b4d7e32ed729d65b61b8b2935e3fe1d:migrations/frozen_test.go:generic-api-key:32
+4ac1692c916c2229212fb12f9e0e1cd6dfb42c82:internal/agent/review_v3_redact_test.go:stripe-access-token:58
+4ac1692c916c2229212fb12f9e0e1cd6dfb42c82:internal/agent/review_v4_perf_test.go:private-key:67
+cd141d88149ee66fe4b545ac659c4eec960409d3:internal/agent/secretmaterial_test.go:generic-api-key:132
+cd141d88149ee66fe4b545ac659c4eec960409d3:internal/agent/secretmaterial_test.go:generic-api-key:134
+cd141d88149ee66fe4b545ac659c4eec960409d3:internal/agent/secretmaterial_test.go:private-key:41
+cd141d88149ee66fe4b545ac659c4eec960409d3:internal/agent/secretmaterial_test.go:private-key:80
+e1bdd45e78f839b06085f1f9910113b3bf41d239:migrations/frozen_test.go:generic-api-key:32
+fc4e1ae9d078e136d85d7915539e5015006b2b3d:internal/agent/review_v4_perf_test.go:private-key:67
+953a74f7c2f968055bb4e4177868246e29d00204:internal/agent/review_v3_redact_test.go:stripe-access-token:58

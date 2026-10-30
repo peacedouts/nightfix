@@ -1,6 +1,8 @@
-// Package auth0 verifies Auth0 access tokens (RS256 JWTs) against the
-// tenant's JWKS. Auth0 handles authentication only; authorization is
-// evaluated in the control plane (decision: plop.md, Identity and RBAC).
+// Package auth0 verifies sign-in tokens (RS256 JWTs) from Auth0 or any
+// OpenID Connect provider (Okta, Google, Entra ID, Keycloak…) against the
+// issuer's JWKS. The identity provider handles authentication only;
+// authorization is evaluated in the control plane (decision: plop.md,
+// Identity and RBAC). The package keeps its first provider's name.
 package auth0
 
 import (
@@ -20,13 +22,19 @@ import (
 	"time"
 )
 
-// Verifier checks tokens for one Auth0 API (audience) on one tenant (issuer).
+// Verifier checks tokens for one audience from one issuer.
 type Verifier struct {
-	Issuer   string // https://<tenant>.us.auth0.com/
-	Audience string // the API identifier, e.g. https://api.nightfix.dev
-	JWKSURL  string // defaults to <issuer>.well-known/jwks.json
+	Issuer   string // exactly as tokens carry it, e.g. https://<tenant>.us.auth0.com/
+	Audience string // the API identifier or OIDC client ID
+	JWKSURL  string // Auth0: defaults to <issuer>.well-known/jwks.json
+	// Discover finds the JWKS through the issuer's OpenID Connect discovery
+	// document (<issuer>/.well-known/openid-configuration), whose issuer
+	// must match Issuer exactly. JWKSURL, if set, takes precedence.
+	Discover bool
 	Client   *http.Client
 	Leeway   time.Duration
+
+	discovered string // jwks_uri from discovery, once fetched
 
 	mu        sync.Mutex
 	keys      map[string]*rsa.PublicKey
@@ -49,6 +57,14 @@ const (
 func New(domain, audience string) *Verifier {
 	iss := "https://" + strings.TrimSuffix(strings.TrimPrefix(domain, "https://"), "/") + "/"
 	return &Verifier{Issuer: iss, Audience: audience}
+}
+
+// NewOIDC builds a verifier for an OpenID Connect issuer, given exactly as
+// its tokens' iss claim (e.g. https://accounts.google.com,
+// https://acme.okta.com/oauth2/default,
+// https://login.microsoftonline.com/<tenant>/v2.0).
+func NewOIDC(issuer, audience string) *Verifier {
+	return &Verifier{Issuer: issuer, Audience: audience, Discover: true}
 }
 
 // Claims are the verified token's claims.
@@ -177,17 +193,20 @@ func numClaim(c Claims, k string) (int64, bool) {
 	return i, true
 }
 
-// key returns the signing key for kid, refreshing the JWKS when an unknown
-// kid appears (key rotation) — at most every 30 seconds.
+// key returns the signing key for kid. The JWKS is fetched again when an
+// unknown kid appears (key rotation), and at least hourly, so a key the
+// provider has withdrawn stops being trusted; both at most every 30 seconds.
+// If a scheduled refresh fails, the keys already loaded keep working.
 func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
-	if k, ok, err := v.cached(kid); ok || err != nil {
+	if k, ok, stale, err := v.cached(kid); (ok && !stale) || err != nil {
 		return k, err
 	}
 	// Serialize fetches: concurrent requests with unknown kids share one.
 	v.fetchMu.Lock()
 	defer v.fetchMu.Unlock()
-	if k, ok, err := v.cached(kid); ok || err != nil {
-		return k, err
+	old, ok, stale, err := v.cached(kid)
+	if (ok && !stale) || err != nil {
+		return old, err
 	}
 	v.mu.Lock()
 	v.lastTry = time.Now()
@@ -197,6 +216,9 @@ func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) 
 	defer v.mu.Unlock()
 	if err != nil {
 		v.lastErr = err
+		if ok {
+			return old, nil // a scheduled refresh failed: keep the keys we have
+		}
 		return nil, err
 	}
 	v.keys, v.fetchedAt, v.lastErr = keys, time.Now(), nil
@@ -206,13 +228,18 @@ func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) 
 	return nil, errors.New("token signed with an unknown key")
 }
 
-// cached returns the key for kid if known. ok=false with a nil error means
-// a fetch is due; a non-nil error means one was tried too recently.
-func (v *Verifier) cached(kid string) (*rsa.PublicKey, bool, error) {
+// jwksMaxAge is how long a fetched JWKS is used before it's fetched again.
+const jwksMaxAge = time.Hour
+
+// cached returns the key for kid if known, and whether the key set is due a
+// refresh. ok=false with a nil error means a fetch is due; a non-nil error
+// means one was tried too recently.
+func (v *Verifier) cached(kid string) (key *rsa.PublicKey, ok, stale bool, err error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if k, ok := v.keys[kid]; ok {
-		return k, true, nil
+	recent := !v.lastTry.IsZero() && time.Since(v.lastTry) < jwksRefetchInterval
+	if k, found := v.keys[kid]; found {
+		return k, true, time.Since(v.fetchedAt) > jwksMaxAge && !recent, nil
 	}
 	wait := jwksRefetchInterval
 	if v.keys == nil {
@@ -220,22 +247,83 @@ func (v *Verifier) cached(kid string) (*rsa.PublicKey, bool, error) {
 	}
 	if !v.lastTry.IsZero() && time.Since(v.lastTry) < wait {
 		if v.lastErr != nil && v.keys == nil {
-			return nil, false, v.lastErr
+			return nil, false, false, v.lastErr
 		}
-		return nil, false, errors.New("token signed with an unknown key")
+		return nil, false, false, errors.New("token signed with an unknown key")
 	}
-	return nil, false, nil
+	return nil, false, false, nil
+}
+
+func (v *Verifier) client() *http.Client {
+	if v.Client != nil {
+		return v.Client
+	}
+	return &http.Client{Timeout: 10 * time.Second, CheckRedirect: httpsOnly}
+}
+
+// httpsOnly refuses redirects off HTTPS (discovery and keys are fetched
+// over HTTPS only).
+func httpsOnly(req *http.Request, via []*http.Request) error {
+	if req.URL.Scheme != "https" {
+		return errors.New("refusing a redirect to a non-https URL")
+	}
+	if len(via) >= 5 {
+		return errors.New("too many redirects")
+	}
+	return nil
+}
+
+// jwksURL returns where the keys are: JWKSURL, or the discovery document's
+// jwks_uri (fetched once, under fetchMu), or Auth0's fixed path.
+func (v *Verifier) jwksURL(ctx context.Context) (string, error) {
+	switch {
+	case v.JWKSURL != "":
+		return v.JWKSURL, nil
+	case !v.Discover:
+		return v.Issuer + ".well-known/jwks.json", nil
+	}
+	v.mu.Lock()
+	u := v.discovered
+	v.mu.Unlock()
+	if u != "" {
+		return u, nil
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(v.Issuer, "/")+"/.well-known/openid-configuration", nil)
+	resp, err := v.client().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch OIDC discovery document: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("fetch OIDC discovery document: status %d", resp.StatusCode)
+	}
+	var doc struct {
+		Issuer  string `json:"issuer"`
+		JWKSURI string `json:"jwks_uri"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&doc); err != nil {
+		return "", fmt.Errorf("decode OIDC discovery document: %w", err)
+	}
+	// The document must be the issuer's own (OpenID Connect Discovery §4.3),
+	// and keys only come over HTTPS.
+	if doc.Issuer != v.Issuer {
+		return "", fmt.Errorf("OIDC discovery document is for issuer %q, not %q", doc.Issuer, v.Issuer)
+	}
+	if !strings.HasPrefix(doc.JWKSURI, "https://") {
+		return "", fmt.Errorf("OIDC discovery document's jwks_uri %q is not an https URL", doc.JWKSURI)
+	}
+	v.mu.Lock()
+	v.discovered = doc.JWKSURI
+	v.mu.Unlock()
+	return doc.JWKSURI, nil
 }
 
 func (v *Verifier) fetch(ctx context.Context) (map[string]*rsa.PublicKey, error) {
-	u := v.JWKSURL
-	if u == "" {
-		u = v.Issuer + ".well-known/jwks.json"
+	u, err := v.jwksURL(ctx)
+	if err != nil {
+		return nil, err
 	}
-	c := v.Client
-	if c == nil {
-		c = &http.Client{Timeout: 10 * time.Second}
-	}
+	c := v.client()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	resp, err := c.Do(req)
 	if err != nil {

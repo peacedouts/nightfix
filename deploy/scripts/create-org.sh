@@ -5,12 +5,13 @@
 #
 #   deploy/scripts/create-org.sh "Acme Inc" acme
 #
-# Run from deploy/terraform/control-plane's state (reads `terraform output`),
+# Reads `terraform output` from deploy/terraform/control-plane, or from
+# NIGHTFIX_TF_DIR (a self-hosted root such as examples/self-hosted),
 # with AWS credentials that can run the admin task and read the secret.
 set -euo pipefail
 name="${1:?usage: create-org.sh <name> <slug>}"
 slug="${2:?usage: create-org.sh <name> <slug>}"
-cd "$(dirname "$0")/../terraform/control-plane"
+cd "${NIGHTFIX_TF_DIR:-$(dirname "$0")/../terraform/control-plane}"
 out=$(terraform output -json admin_task)
 get() { jq -r ".$1" <<<"$out"; }
 export AWS_REGION="$(get region)"
@@ -27,7 +28,7 @@ if [ "$code" != "0" ]; then
   exit 1
 fi
 
-secret="$(get cluster)/org-api-keys/$slug"
+secret="$(get org_secret_prefix)$slug"
 echo "Owner API key for $slug (shown once; store it in your password manager):"
 aws secretsmanager get-secret-value --secret-id "$secret" --query SecretString --output text
 read -r -p "Delete the secret now that you've saved the key? [y/N] " yn

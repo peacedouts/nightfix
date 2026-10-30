@@ -66,3 +66,39 @@ func TestStepOutputsDontSeeAlertData(t *testing.T) {
 		t.Fatal("outputs and inputs can read alert data")
 	}
 }
+
+// An agent set to run only some step types advertises just those, and
+// refuses the others even if a control plane sends one anyway.
+func TestStepTypesLimitWhatAnAgentRuns(t *testing.T) {
+	f := newVerifyFixture(t, Config{StepTypes: []string{"aws", "wait"}})
+	if got := f.agent.capabilities(); contains(got, "shell") || !contains(got, "aws") {
+		t.Fatalf("capabilities %v", got)
+	}
+	f.bundle = f.signedBundle(shellRunbook("echo hi"), f.cp)
+	ack := f.deliver(f.dispatch(func(e *signing.Envelope) { e.StepID = "script"; e.StepIndex = 0 }))
+	if ack.Accepted || !strings.Contains(ack.Reason, "not supported") {
+		t.Fatalf("a shell step was accepted by an agent without shell: %+v", ack)
+	}
+	if _, err := New(Config{Endpoint: "https://x", StepTypes: []string{"python"}}); err == nil {
+		t.Fatal("an unknown step type was accepted")
+	}
+}
+
+// The allowlist can be given inline (NIGHTFIX_ALLOWLIST, for ECS), and an
+// empty one in warn or enforce mode is refused at start rather than
+// silently refusing (or allowing) everything.
+func TestInlineAllowlist(t *testing.T) {
+	f := newVerifyFixture(t, Config{AllowlistMode: "enforce", AllowlistYAML: "runbooks:\n  - name: ecs-restart\n    version: \"*\"\n"})
+	if f.agent.allowlist == nil || len(f.agent.allowlist.Runbooks) != 1 {
+		t.Fatalf("inline allowlist not loaded: %+v", f.agent.allowlist)
+	}
+	for _, c := range []Config{
+		{Endpoint: "https://x", AllowlistMode: "enforce"},
+		{Endpoint: "https://x", AllowlistMode: "warn", AllowlistYAML: "  \n"},
+		{Endpoint: "https://x", AllowlistMode: "strict"},
+	} {
+		if _, err := New(c); err == nil {
+			t.Errorf("accepted %+v", c)
+		}
+	}
+}

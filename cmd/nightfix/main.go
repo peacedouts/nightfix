@@ -30,10 +30,19 @@
 //	NIGHTFIX_STS_DEV_ENDPOINT    STS URL for IAM enrollment instead of sts.<region>.amazonaws.com — local development only
 //	NIGHTFIX_AUTH0_DOMAIN        Auth0 tenant domain (e.g. acme.us.auth0.com); enables user login
 //	NIGHTFIX_AUTH0_AUDIENCE      Auth0 API identifier (e.g. https://api.nightfix.dev)
+//	NIGHTFIX_AUTH0_CLIENT_IDS    Nightfix's application(s) in the tenant (azp); tokens issued to others are refused
 //	NIGHTFIX_AUTH0_EMAIL_CLAIM   custom claim carrying the user's email (default https://nightfix.dev/email)
 //	NIGHTFIX_AUTH0_GROUPS_CLAIM  custom claim carrying IdP groups (default https://nightfix.dev/groups)
 //	NIGHTFIX_AUTH0_EMAIL_VERIFIED_CLAIM  claim saying the email is verified (default email_verified;
 //	                             https://nightfix.dev/email_verified is read too). Unverified emails can't sign in.
+//	NIGHTFIX_OIDC_ISSUER         any OpenID Connect issuer, exactly as its tokens carry it (instead of Auth0)
+//	NIGHTFIX_OIDC_AUDIENCE       the audience its tokens are issued for (API identifier or client ID)
+//	NIGHTFIX_OIDC_CLIENT_IDS     Nightfix's client application(s); tokens issued to others are refused
+//	NIGHTFIX_OIDC_ORG            the org (org_…) every user of the issuer belongs to
+//	NIGHTFIX_OIDC_ALLOWED_GROUPS / NIGHTFIX_OIDC_EMAIL_DOMAINS / NIGHTFIX_OIDC_REQUIRED_CLAIMS
+//	                             who may sign in (at least one): a group, an email domain, claim=value pairs
+//	NIGHTFIX_OIDC_EMAIL_CLAIM / _GROUPS_CLAIM / _EMAIL_VERIFIED_CLAIM   claim names (email, groups, email_verified)
+//	NIGHTFIX_OIDC_TRUST_EMAIL    true: a token without an email-verified claim counts as verified
 package main
 
 import (
@@ -215,14 +224,11 @@ func newServer(ctx context.Context) (*controlplane.Server, error) {
 		}
 		cfg.SNSMaxMessageAge = d
 	}
-	if d := os.Getenv("NIGHTFIX_AUTH0_DOMAIN"); d != "" {
-		cfg.Auth0 = controlplane.Auth0Config{
-			Verifier:           auth0.New(d, mustEnv("NIGHTFIX_AUTH0_AUDIENCE")),
-			EmailClaim:         os.Getenv("NIGHTFIX_AUTH0_EMAIL_CLAIM"),
-			GroupsClaim:        os.Getenv("NIGHTFIX_AUTH0_GROUPS_CLAIM"),
-			EmailVerifiedClaim: os.Getenv("NIGHTFIX_AUTH0_EMAIL_VERIFIED_CLAIM"),
-		}
+	login, err := loginConfig(os.Getenv)
+	if err != nil {
+		return nil, err
 	}
+	cfg.Auth0 = login
 	if cfg.AllowPrivateTargets {
 		log.Warn("NIGHTFIX_DEV_ALLOW_PRIVATE_TARGETS is set: notification targets may point at any host, including internal addresses. Local development only.")
 	}
@@ -453,3 +459,115 @@ func serve(ctx context.Context) error {
 
 // notifyShutdownWait covers one notification request and recording it.
 const notifyShutdownWait = 20 * time.Second
+
+// loginConfig reads user sign-in settings: Auth0 Organizations
+// (NIGHTFIX_AUTH0_DOMAIN), or any OpenID Connect provider mapped to one org
+// (NIGHTFIX_OIDC_ISSUER), or neither (API keys only).
+func loginConfig(getenv func(string) string) (controlplane.Auth0Config, error) {
+	domain, issuer := getenv("NIGHTFIX_AUTH0_DOMAIN"), getenv("NIGHTFIX_OIDC_ISSUER")
+	if domain == "" && issuer == "" {
+		return controlplane.Auth0Config{}, nil
+	}
+	required, err := parseClaims(getenv("NIGHTFIX_OIDC_REQUIRED_CLAIMS"))
+	if err != nil {
+		return controlplane.Auth0Config{}, err
+	}
+	switch {
+	case domain != "" && issuer != "":
+		return controlplane.Auth0Config{}, errors.New("set NIGHTFIX_AUTH0_DOMAIN or NIGHTFIX_OIDC_ISSUER, not both")
+	case domain != "":
+		aud := getenv("NIGHTFIX_AUTH0_AUDIENCE")
+		if aud == "" {
+			return controlplane.Auth0Config{}, errors.New("NIGHTFIX_AUTH0_AUDIENCE is required with NIGHTFIX_AUTH0_DOMAIN")
+		}
+		clients := list(getenv("NIGHTFIX_AUTH0_CLIENT_IDS"))
+		if len(clients) == 0 {
+			return controlplane.Auth0Config{}, errors.New("NIGHTFIX_AUTH0_CLIENT_IDS is required with NIGHTFIX_AUTH0_DOMAIN: the client ID(s) of Nightfix's applications in the tenant (tokens issued to any other application are refused)")
+		}
+		return controlplane.Auth0Config{
+			ClientIDs:          clients,
+			Verifier:           auth0.New(domain, aud),
+			EmailClaim:         getenv("NIGHTFIX_AUTH0_EMAIL_CLAIM"),
+			GroupsClaim:        getenv("NIGHTFIX_AUTH0_GROUPS_CLAIM"),
+			EmailVerifiedClaim: getenv("NIGHTFIX_AUTH0_EMAIL_VERIFIED_CLAIM"),
+			RequiredClaims:     required,
+		}, nil
+	}
+	u, err := url.Parse(issuer)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
+		return controlplane.Auth0Config{}, fmt.Errorf("NIGHTFIX_OIDC_ISSUER %q must be an https URL, exactly as the provider's tokens carry it", issuer)
+	}
+	aud := getenv("NIGHTFIX_OIDC_AUDIENCE")
+	if aud == "" {
+		return controlplane.Auth0Config{}, errors.New("NIGHTFIX_OIDC_AUDIENCE is required with NIGHTFIX_OIDC_ISSUER (the API identifier or client ID tokens are issued for)")
+	}
+	org, err := ids.Decode("org", strings.ToLower(getenv("NIGHTFIX_OIDC_ORG")))
+	if err != nil {
+		return controlplane.Auth0Config{}, errors.New("NIGHTFIX_OIDC_ORG must be the org_… id every user of this identity provider belongs to")
+	}
+	clients := list(getenv("NIGHTFIX_OIDC_CLIENT_IDS"))
+	if len(clients) == 0 {
+		return controlplane.Auth0Config{}, errors.New("NIGHTFIX_OIDC_CLIENT_IDS is required: the client ID(s) of Nightfix's application in your identity provider (tokens issued to any other application are refused)")
+	}
+	groups, domains := list(getenv("NIGHTFIX_OIDC_ALLOWED_GROUPS")), list(getenv("NIGHTFIX_OIDC_EMAIL_DOMAINS"))
+	if len(required) == 0 && len(groups) == 0 && len(domains) == 0 {
+		return controlplane.Auth0Config{}, errors.New("say who may sign in: set NIGHTFIX_OIDC_ALLOWED_GROUPS, NIGHTFIX_OIDC_EMAIL_DOMAINS or NIGHTFIX_OIDC_REQUIRED_CLAIMS (otherwise anyone your identity provider lets sign up becomes a member)")
+	}
+	// Google issues tokens to anyone with a Google account: without the
+	// Workspace domain pinned, that would be anyone at all.
+	if u.Host == "accounts.google.com" && required["hd"] == "" {
+		return controlplane.Auth0Config{}, errors.New("with Google as the issuer, NIGHTFIX_OIDC_REQUIRED_CLAIMS must pin your Workspace domain (hd=example.com)")
+	}
+	trust := getenv("NIGHTFIX_OIDC_TRUST_EMAIL")
+	if trust != "" && trust != "true" && trust != "false" {
+		return controlplane.Auth0Config{}, errors.New("NIGHTFIX_OIDC_TRUST_EMAIL must be true or false")
+	}
+	return controlplane.Auth0Config{
+		Verifier:           auth0.NewOIDC(issuer, aud),
+		EmailClaim:         or(getenv("NIGHTFIX_OIDC_EMAIL_CLAIM"), "email"),
+		GroupsClaim:        or(getenv("NIGHTFIX_OIDC_GROUPS_CLAIM"), "groups"),
+		EmailVerifiedClaim: getenv("NIGHTFIX_OIDC_EMAIL_VERIFIED_CLAIM"),
+		OIDCOrgID:          org,
+		RequiredClaims:     required,
+		SubjectPrefix:      issuer,
+		TrustEmail:         trust == "true",
+		ClientIDs:          clients,
+		AllowedGroups:      groups,
+		EmailDomains:       domains,
+	}, nil
+}
+
+// list reads a comma-separated list, dropping empty entries.
+func list(s string) []string {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// parseClaims reads "k=v,k2=v2".
+func parseClaims(s string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, kv := range strings.Split(s, ",") {
+		kv = strings.TrimSpace(kv)
+		if kv == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			return nil, fmt.Errorf("NIGHTFIX_OIDC_REQUIRED_CLAIMS: %q isn't claim=value", kv)
+		}
+		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return out, nil
+}
+
+func or(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}

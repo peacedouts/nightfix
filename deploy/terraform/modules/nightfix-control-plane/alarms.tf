@@ -1,25 +1,29 @@
 # Nightfix pages its customers, so it has to know first when it's sick.
 resource "aws_sns_topic" "alarms" {
-  name = "${local.name}-alarms"
+  count = local.create_alarm_topic ? 1 : 0
+  name  = "${local.name}-alarms"
 }
 
 resource "aws_sns_topic_subscription" "email" {
   count     = var.alarm_email == "" ? 0 : 1
-  topic_arn = aws_sns_topic.alarms.arn
+  topic_arn = local.alarm_topic_arn
   protocol  = "email"
   endpoint  = var.alarm_email
 }
 
 locals {
-  alarm_actions = [aws_sns_topic.alarms.arn]
+  alarm_actions    = [local.alarm_topic_arn]
+  metric_namespace = "Nightfix/${local.name}"
 }
 
+# Needs Container Insights (on the module's cluster, or yours).
 resource "aws_cloudwatch_metric_alarm" "running_tasks" {
+  count               = !local.create_cluster || var.container_insights ? 1 : 0
   alarm_name          = "${local.name}-running-tasks-low"
   alarm_description   = "Fewer control-plane tasks running than desired"
   namespace           = "ECS/ContainerInsights"
   metric_name         = "RunningTaskCount"
-  dimensions          = { ClusterName = aws_ecs_cluster.main.name, ServiceName = aws_ecs_service.controlplane.name }
+  dimensions          = { ClusterName = local.cluster_name, ServiceName = aws_ecs_service.controlplane.name }
   statistic           = "Minimum"
   period              = 60
   evaluation_periods  = 3
@@ -63,10 +67,11 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_ingest" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "db_cpu" {
+  count               = local.db_alarm_identifier != "" ? 1 : 0
   alarm_name          = "${local.name}-db-cpu"
   namespace           = "AWS/RDS"
   metric_name         = "CPUUtilization"
-  dimensions          = { DBInstanceIdentifier = aws_db_instance.main.identifier }
+  dimensions          = { DBInstanceIdentifier = local.db_alarm_identifier }
   statistic           = "Average"
   period              = 300
   evaluation_periods  = 3
@@ -77,10 +82,11 @@ resource "aws_cloudwatch_metric_alarm" "db_cpu" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "db_storage" {
+  count               = local.db_alarm_identifier != "" ? 1 : 0
   alarm_name          = "${local.name}-db-free-storage"
   namespace           = "AWS/RDS"
   metric_name         = "FreeStorageSpace"
-  dimensions          = { DBInstanceIdentifier = aws_db_instance.main.identifier }
+  dimensions          = { DBInstanceIdentifier = local.db_alarm_identifier }
   statistic           = "Minimum"
   period              = 300
   evaluation_periods  = 1
@@ -100,7 +106,7 @@ resource "aws_cloudwatch_log_metric_filter" "errors" {
   log_group_name = aws_cloudwatch_log_group.controlplane.name
   pattern        = "\"level=ERROR\""
   metric_transformation {
-    namespace     = "Nightfix/${var.environment}"
+    namespace     = local.metric_namespace
     name          = "ErrorLogLines"
     value         = "1"
     default_value = "0"
@@ -110,7 +116,7 @@ resource "aws_cloudwatch_log_metric_filter" "errors" {
 resource "aws_cloudwatch_metric_alarm" "errors" {
   alarm_name          = "${local.name}-error-logs"
   alarm_description   = "The control plane logged an error (CloudWatch Logs: filter level=ERROR). Failed alert events: GET /v1/alert-events/failed."
-  namespace           = "Nightfix/${var.environment}"
+  namespace           = local.metric_namespace
   metric_name         = "ErrorLogLines"
   statistic           = "Sum"
   period              = 300
@@ -127,7 +133,7 @@ resource "aws_cloudwatch_log_metric_filter" "pages_failing" {
   log_group_name = aws_cloudwatch_log_group.controlplane.name
   pattern        = "?\"page delivery failing\" ?\"notification abandoned\""
   metric_transformation {
-    namespace     = "Nightfix/${var.environment}"
+    namespace     = local.metric_namespace
     name          = "PagesFailing"
     value         = "1"
     default_value = "0"
@@ -137,7 +143,7 @@ resource "aws_cloudwatch_log_metric_filter" "pages_failing" {
 resource "aws_cloudwatch_metric_alarm" "pages_failing" {
   alarm_name          = "${local.name}-pages-failing"
   alarm_description   = "A customer's page or resolve keeps failing or was abandoned (its incident timeline says why: often a revoked PagerDuty routing key or Slack webhook)."
-  namespace           = "Nightfix/${var.environment}"
+  namespace           = local.metric_namespace
   metric_name         = "PagesFailing"
   statistic           = "Sum"
   period              = 300

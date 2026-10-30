@@ -10,7 +10,9 @@ package agentapi
 
 import "github.com/peacedouts/nightfix/internal/signing"
 
-// ProtocolVersion is sent in Hello.
+// ProtocolVersion is sent in Hello. A control plane accepts agents of the
+// previous minor release (deploy/README.md, "Releases and upgrades"): when
+// this changes, keep accepting the previous version for a minor release.
 const ProtocolVersion = 1
 
 // EnrollRequest is sent once, before the agent has a certificate.

@@ -56,9 +56,16 @@ type Config struct {
 	// pinned id with a key of its own.
 	PinnedKeys    map[string]string
 	AllowlistFile string
+	// AllowlistYAML is the allowlist itself, for platforms where a file is
+	// awkward (ECS); it's used when AllowlistFile is empty.
+	AllowlistYAML string
 	AllowlistMode string // off | warn | enforce
-	Freeze        bool   // local kill switch: connect for visibility, run nothing
-	Slots         int
+	// StepTypes limits what this agent runs (e.g. aws and wait, no shell).
+	// Empty means every type it supports. Set locally, so the control plane
+	// can't widen it.
+	StepTypes []string
+	Freeze    bool // local kill switch: connect for visibility, run nothing
+	Slots     int
 
 	AWS AWSCaller
 	Log *slog.Logger
@@ -119,12 +126,29 @@ func New(cfg Config) (*Agent, error) {
 		return nil, err
 	}
 	a := &Agent{cfg: cfg, c: c, inflight: map[string]context.CancelFunc{}, seen: map[string]time.Time{}, renewEvery: renewCheckInterval}
-	if cfg.AllowlistMode != "off" {
-		al, err := loadAllowlist(cfg.AllowlistFile)
+	for _, t := range cfg.StepTypes {
+		if !contains(supportedStepTypes, t) {
+			return nil, fmt.Errorf("step type %q isn't one this agent can run (%s)", t, strings.Join(supportedStepTypes, ", "))
+		}
+	}
+	switch cfg.AllowlistMode {
+	case "off", "":
+	case "warn", "enforce":
+		var b []byte
+		if cfg.AllowlistFile != "" {
+			if b, err = os.ReadFile(cfg.AllowlistFile); err != nil {
+				return nil, fmt.Errorf("allowlist: %w", err)
+			}
+		} else {
+			b = []byte(cfg.AllowlistYAML)
+		}
+		al, err := parseAllowlist(b)
 		if err != nil {
 			return nil, err
 		}
 		a.allowlist = al
+	default:
+		return nil, fmt.Errorf("allowlist mode %q: use off, warn or enforce", cfg.AllowlistMode)
 	}
 	return a, nil
 }
@@ -330,7 +354,24 @@ func (a *Agent) cancelAll() {
 	}
 }
 
-func (a *Agent) capabilities() []string { return []string{"shell", "aws", "wait"} }
+// supportedStepTypes are the step types this build can run.
+var supportedStepTypes = []string{"shell", "aws", "wait"}
+
+// capabilities are the step types this agent runs: what it supports, less
+// anything the local configuration leaves out. They're both advertised and
+// enforced, so a control plane that ignores the advertisement is refused.
+func (a *Agent) capabilities() []string {
+	if len(a.cfg.StepTypes) == 0 {
+		return supportedStepTypes
+	}
+	var out []string
+	for _, t := range supportedStepTypes {
+		if contains(a.cfg.StepTypes, t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 func (a *Agent) inFlight() []string {
 	a.mu.Lock()
@@ -712,6 +753,13 @@ func loadAllowlist(path string) (*allowlist, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("allowlist: %w", err)
+	}
+	return parseAllowlist(b)
+}
+
+func parseAllowlist(b []byte) (*allowlist, error) {
+	if strings.TrimSpace(string(b)) == "" {
+		return nil, errors.New("allowlist: the allowlist is empty (set NIGHTFIX_ALLOWLIST_FILE or NIGHTFIX_ALLOWLIST); with mode enforce an empty list would refuse everything, so write the runbooks out")
 	}
 	var al allowlist
 	if err := yaml.UnmarshalWithOptions(b, &al, yaml.Strict()); err != nil {

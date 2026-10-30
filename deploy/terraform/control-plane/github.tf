@@ -62,6 +62,14 @@ data "aws_iam_policy_document" "github_deploy_assume" {
   }
 }
 
+locals {
+  name   = "nightfix-${var.environment}"
+  deploy = module.control_plane.deploy_permissions
+}
+
+data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
+
 resource "aws_iam_role" "github_push" {
   name                 = "${local.name}-github-push"
   assume_role_policy   = data.aws_iam_policy_document.github_push_assume.json
@@ -86,7 +94,7 @@ resource "aws_iam_role_policy" "github_push" {
           "ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:CompleteLayerUpload", "ecr:DescribeImages",
           "ecr:GetDownloadUrlForLayer", "ecr:InitiateLayerUpload", "ecr:PutImage", "ecr:UploadLayerPart",
         ]
-        Resource = aws_ecr_repository.controlplane.arn
+        Resource = local.deploy.ecr_repository_arn
       },
     ]
   })
@@ -114,7 +122,7 @@ resource "aws_iam_role_policy" "github_deploy" {
         Sid      = "ReadImages"
         Effect   = "Allow"
         Action   = ["ecr:DescribeImages", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
-        Resource = aws_ecr_repository.controlplane.arn
+        Resource = local.deploy.ecr_repository_arn
       },
       {
         Sid      = "TaskDefinitions"
@@ -126,15 +134,15 @@ resource "aws_iam_role_policy" "github_deploy" {
         Sid      = "Rollout"
         Effect   = "Allow"
         Action   = ["ecs:UpdateService", "ecs:DescribeServices"]
-        Resource = aws_ecs_service.controlplane.id
+        Resource = local.deploy.service_id
       },
       {
         Sid      = "Migrate"
         Effect   = "Allow"
         Action   = ["ecs:RunTask"]
-        Resource = "arn:${data.aws_partition.current.partition}:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:task-definition/${local.name}-migrate:*"
+        Resource = "arn:${data.aws_partition.current.partition}:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:task-definition/${local.deploy.migrate_family}:*"
         Condition = {
-          ArnEquals = { "ecs:cluster" = aws_ecs_cluster.main.arn }
+          ArnEquals = { "ecs:cluster" = local.deploy.cluster_arn }
         }
       },
       {
@@ -143,14 +151,14 @@ resource "aws_iam_role_policy" "github_deploy" {
         Action   = ["ecs:DescribeTasks"]
         Resource = "*"
         Condition = {
-          ArnEquals = { "ecs:cluster" = aws_ecs_cluster.main.arn }
+          ArnEquals = { "ecs:cluster" = local.deploy.cluster_arn }
         }
       },
       {
         Sid      = "PassTaskRoles"
         Effect   = "Allow"
         Action   = ["iam:PassRole"]
-        Resource = [aws_iam_role.execution.arn, aws_iam_role.migrate_execution.arn, aws_iam_role.task.arn, aws_iam_role.admin.arn]
+        Resource = local.deploy.pass_role_arns
         Condition = {
           StringEquals = { "iam:PassedToService" = "ecs-tasks.amazonaws.com" }
         }

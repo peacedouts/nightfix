@@ -1,0 +1,12 @@
+The Nightfix agent is starting ({{ .Values.replicaCount }} replicas). It enrolls by proving its IAM role, so
+the control plane needs an enrollment rule for that role:
+
+  curl -X POST <api>/v1/enrollment-rules -H "Authorization: Bearer $NIGHTFIX_API_KEY" \
+    -d '{"method": "iam", "role_arn": "<role ARN of the service account>", "labels": {"env": "prod"}, "max_agents": {{ mul .Values.replicaCount 2 }}}'
+
+Then check: curl <api>/v1/agents -H "Authorization: Bearer $NIGHTFIX_API_KEY"
+{{- if not .Values.nightfix.requiredSigners }}
+
+The agent trusts the control plane's list of signers. To pin the org's signing key (recommended), set
+nightfix.requiredSigners to the agent_pin from GET /v1/signing-keys.
+{{- end }}

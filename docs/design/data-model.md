@@ -1,6 +1,6 @@
 # Nightfix — Core Data Model & API Surface (Draft v1alpha1)
 
-Status: draft for discussion. Unifies the tables sketched in `runbook-schema.md`, `agent-protocol.md` and `alert-incident-model.md` into one Postgres model, defines how tenancy, RBAC and audit work, and outlines the v1 REST API.
+Status: draft for discussion. Unifies the tables sketched in `runbook-schema.md`, `agent-protocol.md` and `alert-incident-model.md` into one Postgres model, defines how tenancy, RBAC and audit work, and outlines the v1 REST API. Since Oct 23, 2026 the control plane normally runs in the customer's own AWS account alongside the agents (plop.md, "Open source, consulting first"); hosts like `api.<domain>` are that deployment's.
 
 ---
 
@@ -31,7 +31,7 @@ Status: draft for discussion. Unifies the tables sketched in `runbook-schema.md`
 
 The core principle says the control plane never holds customer secrets. That stays true for **infrastructure secrets and credentials used during execution**, which live only in the customer's account.
 
-The control plane does have to hold a small set of **notification and integration credentials**: a PagerDuty routing key, a Slack bot token, our own HMAC secrets for webhook ingest. These are narrowly scoped (a PagerDuty routing key can only create events), encrypted per org with KMS envelope encryption, never returned by the API after creation, and listed explicitly in security documentation. The core principle in plop.md was reworded on Oct 20, 2026 to say exactly this.
+The control plane does have to hold a small set of **notification and integration credentials**: a PagerDuty routing key, a Slack bot token, our own HMAC secrets for webhook ingest. These are narrowly scoped (a PagerDuty routing key can only create events), encrypted per org with KMS envelope encryption, never returned by the API after creation, and listed explicitly in security documentation. In a self-hosted deployment they stay in the customer's account too, with the control plane. The core principle in plop.md was reworded on Oct 20, 2026 to say exactly this.
 
 ---
 
@@ -74,7 +74,7 @@ Columns are the important ones, not exhaustive. Every tenant table also has `org
 | Table | Key columns | Notes |
 |---|---|---|
 | `orgs` | `id`, `name`, `slug`, `auth0_org_id`, `plan`, `frozen_at`, `frozen_by` | `frozen_at` is the org kill switch |
-| `users` | `id`, `auth0_sub` (unique), `email`, `name` | **Global**, not tenant-scoped; a user can belong to several orgs. No RLS; only readable via joins through `org_members` |
+| `users` | `id`, `auth0_sub` (unique), `email`, `name` | **Global**, not tenant-scoped; a user can belong to several orgs. No RLS; only readable via joins through `org_members`. With a generic OIDC provider, `auth0_sub` holds `<issuer>|<sub>`, so identities from different providers never collide |
 | `org_members` | `org_id`, `user_id`, `status`, `joined_at` | Membership only; permissions come from role bindings |
 | `teams` | `id`, `name`, `slug`, `auth0_group` | `auth0_group` maps an IdP group claim to this team |
 | `team_members` | `team_id`, `user_id`, `source` (`manual` \| `idp`) | `idp` rows are synced from Auth0 claims on login; SCIM later |
@@ -125,8 +125,8 @@ Columns are the important ones, not exhaustive. Every tenant table also has `org
 | `incident_alerts` | `incident_id`, `alert_id`, `attached_at`, `detached_at` | Join table so an alert's history across incidents is kept |
 | `incident_timeline` | `id`, `incident_id`, `at`, `type`, `actor_type`, `actor_id`, `data` | Append-only |
 | `notifications` | `id`, `incident_id`, `target_id`, `channel_id`, `kind` (`page` \| `resolve` \| `acknowledge` \| `update` \| `approval`), `payload`, `status` (`pending` \| `sent` \| `failed`), `attempts`, `next_attempt_at`, `lease_until`, `lease_id`, `last_error`, `sent_at` | Outbox for upstream pages and Slack posts (built). Workers claim a row on a short lease and send outside any transaction; the result is recorded only under the same `lease_id`. Rows for one incident+target, or one approval channel, go out in order. Pages and resolves retry for up to 24h |
-| `slack_apps` | `id`, `team_id` (Slack workspace; when set, requests from others are refused), `signing_secret` (sealed), `archived_at` | The org's Slack app, used to verify button clicks and slash commands (built) |
-| `slack_user_links` | `slack_team_id`, `slack_user_id`, `user_id`, `linked_at` | Links a Slack user to a Nightfix member; created only by a one-time code (built) |
+| `slack_apps` | `id`, `team_id` (Slack workspace, required; requests from others are refused), `signing_secret` (sealed), `archived_at` | The org's Slack apps, used to verify button clicks and slash commands. Registering or archiving one is owner-only (built) |
+| `slack_user_links` | `slack_app_id`, `slack_team_id`, `slack_user_id`, `user_id`, `linked_at` | Links a Slack user to a Nightfix member, through one app: a click is matched to a link only when it arrives through the app the link was made with, so a second app (whose signing secret someone else holds) can't act as linked users. Created only by a one-time code (built; per-app since migration 0030) |
 | `slack_link_codes` | `code_hash`, `user_id`, `expires_at` | One-time codes Nightfix issues to a signed-in user for `/nightfix link <code>` (built) |
 | `approval_channels` | `id`, `team_id` (null = org default), `type` (`slack`), `credential` (sealed webhook URL), `created_by` | Where approval requests go for runs outside an incident (built) |
 
@@ -251,8 +251,8 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 
 | Topic | Convention |
 |---|---|
-| Base | `https://api.nightfix.dev/v1` |
-| Auth | Auth0 access token (users) or `Authorization: Bearer nfx_<key>` (API keys) |
+| Base | `https://api.<domain>/v1` (the deployment's API host) |
+| Auth | An access or ID token from the deployment's identity provider (Auth0 Organizations, or one generic OIDC issuer mapped to a single org, with client, group, domain and claim checks), or `Authorization: Bearer nfx_<key>` (API keys) |
 | Org | Inferred from the token; API keys belong to one org. Users in several orgs pass `Nightfix-Org: org_…` |
 | Pagination | Cursor-based: `?limit=50&cursor=…` |
 | Idempotency | `Idempotency-Key` header on every `POST`, stored 24h |
@@ -304,7 +304,7 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 | GET | `/runbooks/{name}` | Header + latest version |
 | GET | `/runbooks/{name}/versions` | Version history |
 | GET | `/runbooks/{name}/versions/{v}` | One version, with digest and signatures |
-| POST | `/runbooks/{name}/versions/{v}/signatures` | Add a customer co-signature |
+| POST | `/runbooks/{name}/versions/{v}/signatures` | Add a customer co-signature (not built yet) |
 | POST | `/runbooks/{name}/archive` | Archive |
 | GET, POST | `/runbooks/{name}/critical-hold-grants` | Track record + grant (Admin) |
 | DELETE | `/critical-hold-grants/{id}` | Revoke |
@@ -330,7 +330,8 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 | GET, POST | `/services/{id}/maintenance-windows` | List / create |
 | DELETE | `/maintenance-windows/{id}` | Remove |
 | GET, POST | `/services/{id}/escalation-targets` | List / configure upstream pager or Slack |
-| POST | `/slack-apps` | Register the org's Slack app (signing secret); returns the interactivity and command URLs (built) |
+| GET, POST | `/slack-apps` | List (admin) / register (owner) a Slack app: signing secret and workspace `team_id`; returns the interactivity and command URLs (built) |
+| POST | `/slack-apps/{id}/archive` | Archive an app; its links stop working (owner, built) |
 | POST | `/slack/interactions/{id}`, `/slack/commands/{id}` | Called by Slack; authenticated by Slack's request signature, not a token (built) |
 | GET | `/alerts` | List (filters: status, service, severity) |
 | GET | `/alerts/{id}` | Detail with recent events |
@@ -345,7 +346,7 @@ The ingest endpoint resolves the org from the integration ID before setting `app
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `https://ingest.nightfix.dev/v1/i/{integration_id}` | Receive alerts; returns `202` |
+| POST | `https://ingest.<domain>/v1/i/{integration_id}` | Receive alerts; returns `202` |
 
 **Audit**
 

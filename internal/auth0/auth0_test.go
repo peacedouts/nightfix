@@ -121,3 +121,51 @@ func TestJWKSFetchesAreBounded(t *testing.T) {
 		t.Fatalf("%d JWKS fetches during an outage, want 1", n)
 	}
 }
+
+// OIDC discovery: keys come from the issuer's own discovery document, which
+// must name the issuer exactly and point at HTTPS keys.
+func TestOIDCDiscovery(t *testing.T) {
+	idp := auth0test.New(t)
+	var doc map[string]string
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			json.NewEncoder(w).Encode(doc)
+		case "/keys":
+			resp, err := http.Get(idp.Srv.URL)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer resp.Body.Close()
+			io.Copy(w, resp.Body)
+		}
+	}))
+	defer srv.Close()
+	token := func() string {
+		return idp.Mint("RS256", map[string]any{"iss": srv.URL, "aud": "client", "sub": "u1", "exp": time.Now().Add(time.Hour).Unix()})
+	}
+	verify := func() error {
+		v := auth0.NewOIDC(srv.URL, "client")
+		v.Client = srv.Client()
+		_, err := v.Verify(context.Background(), token())
+		return err
+	}
+
+	doc = map[string]string{"issuer": srv.URL, "jwks_uri": srv.URL + "/keys"}
+	if err := verify(); err != nil {
+		t.Fatalf("valid discovery: %v", err)
+	}
+	for name, d := range map[string]map[string]string{
+		"another issuer's document":    {"issuer": "https://evil.example", "jwks_uri": srv.URL + "/keys"},
+		"issuer with a trailing slash": {"issuer": srv.URL + "/", "jwks_uri": srv.URL + "/keys"},
+		"keys over plain http":         {"issuer": srv.URL, "jwks_uri": idp.Srv.URL},
+		"no jwks_uri":                  {"issuer": srv.URL},
+	} {
+		doc = d
+		if err := verify(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

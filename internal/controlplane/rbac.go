@@ -169,7 +169,9 @@ func (p principal) can(role string, r resource) error {
 // Authentication
 // ---------------------------------------------------------------------------
 
-// Auth0Config configures user login. Leave Verifier nil to accept API keys only.
+// Auth0Config configures user login, through Auth0 Organizations (the
+// hosted, multi-org model) or any OpenID Connect provider mapped to one org
+// (a self-hosted deployment). Leave Verifier nil to accept API keys only.
 type Auth0Config struct {
 	Verifier    *auth0.Verifier
 	OrgClaim    string // Auth0 Organizations: "org_id"
@@ -179,6 +181,74 @@ type Auth0Config struct {
 	// "email_verified"). The namespaced claim an Auth0 Action sets,
 	// https://nightfix.dev/email_verified, is read as well.
 	EmailVerifiedClaim string
+
+	// OIDCOrgID, when set, is the one org every user of the issuer belongs
+	// to (generic OIDC); the org claim isn't used.
+	OIDCOrgID string
+	// RequiredClaims must all be present with exactly these string values
+	// before anyone signs in: e.g. hd (Google Workspace domain) or tid (Entra
+	// tenant). An issuer that serves many organizations (Google) issues
+	// tokens to anyone who has an account, and these are what keep them out.
+	RequiredClaims map[string]string
+	// SubjectPrefix namespaces user subjects (the issuer, for generic
+	// OIDC), so a sub from one identity provider can never be taken for
+	// another's after a move: subs are unique only per issuer.
+	SubjectPrefix string
+	// TrustEmail treats the email claim as verified when the token has no
+	// verification claim, for providers that only issue emails they manage.
+	// A false claim is still refused.
+	TrustEmail bool
+	// ClientIDs are the identity provider's client applications for
+	// Nightfix. A token must name one of them as its client (azp, cid,
+	// appid or client_id): every application on an authorization server can
+	// get tokens with the same audience, and without this any of them could
+	// replay a user's token here. Required at startup for both Auth0 and
+	// generic OIDC.
+	ClientIDs []string
+	// AllowedGroups and EmailDomains say who may sign in at all (any one
+	// group; an email in one of the domains), on top of RequiredClaims.
+	// Generic OIDC requires at least one of the three, so an identity
+	// provider that lets anyone sign up can't hand out memberships.
+	AllowedGroups []string
+	EmailDomains  []string
+}
+
+// clientMatches reports whether the token was issued to one of the
+// configured client applications. With several audiences, azp must be one.
+func (c Auth0Config) clientMatches(claims auth0.Claims) bool {
+	if len(c.ClientIDs) == 0 {
+		return true
+	}
+	if len(claims.Strings("aud")) > 1 {
+		return contains(c.ClientIDs, claims.String("azp"))
+	}
+	for _, k := range []string{"azp", "cid", "appid", "client_id"} {
+		if v := claims.String(k); v != "" {
+			return contains(c.ClientIDs, v)
+		}
+	}
+	return false
+}
+
+// signInAllowed applies AllowedGroups and EmailDomains.
+func (c Auth0Config) signInAllowed(email string, groups []string) bool {
+	if len(c.AllowedGroups) == 0 && len(c.EmailDomains) == 0 {
+		return true
+	}
+	for _, g := range groups {
+		if contains(c.AllowedGroups, g) {
+			return true
+		}
+	}
+	if at := strings.LastIndexByte(email, '@'); at >= 0 {
+		domain := strings.ToLower(email[at+1:])
+		for _, d := range c.EmailDomains {
+			if strings.EqualFold(d, domain) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c Auth0Config) orgClaim() string    { return or(c.OrgClaim, "org_id") }
@@ -189,7 +259,7 @@ func (c Auth0Config) groupsClaim() string { return or(c.GroupsClaim, "https://ni
 // at least one verification claim is true and none is false. Missing or
 // malformed means unverified.
 func (c Auth0Config) emailVerified(claims auth0.Claims) bool {
-	verified := false
+	verified, seen := false, false
 	for _, k := range []string{or(c.EmailVerifiedClaim, "email_verified"), "https://nightfix.dev/email_verified"} {
 		switch v := claims[k].(type) {
 		case nil:
@@ -197,12 +267,37 @@ func (c Auth0Config) emailVerified(claims auth0.Claims) bool {
 			if !v {
 				return false
 			}
-			verified = true
+			verified, seen = true, true
 		default:
 			return false
 		}
 	}
-	return verified
+	return verified || (c.TrustEmail && !seen)
+}
+
+// requiredClaimsMatch reports whether every required claim has its value.
+func (c Auth0Config) requiredClaimsMatch(claims auth0.Claims) (string, bool) {
+	for k, want := range c.RequiredClaims {
+		if got, ok := claims[k].(string); !ok || got != want {
+			return k, false
+		}
+	}
+	return "", true
+}
+
+// usersCanSignIn reports whether the org's members can sign in, so an owner
+// binding to a user (or a team) is a usable owner credential.
+func (s *Server) usersCanSignIn(tx *db.Tx) (bool, error) {
+	cfg := s.Cfg.Auth0
+	switch {
+	case cfg.Verifier == nil:
+		return false, nil
+	case cfg.OIDCOrgID != "":
+		return tx.OrgID == cfg.OIDCOrgID, nil
+	}
+	var linked bool
+	err := tx.QueryRow(`SELECT auth0_org_id IS NOT NULL FROM orgs`).Scan(&linked)
+	return linked, err
 }
 
 func or(s, def string) string {
@@ -260,16 +355,30 @@ func (s *Server) authUser(ctx context.Context, tok string) (principal, error) {
 	if err != nil {
 		return principal{}, authError("invalid token: " + err.Error())
 	}
-	authOrg := claims.String(cfg.orgClaim())
-	if authOrg == "" {
-		return principal{}, authError(fmt.Sprintf("token has no %s claim; log in through your organization", cfg.orgClaim()))
+	if k, ok := cfg.requiredClaimsMatch(claims); !ok {
+		return principal{}, authError(fmt.Sprintf("this sign-in isn't allowed here (the %s claim doesn't match)", k))
+	}
+	if !cfg.clientMatches(claims) {
+		return principal{}, authError("this token was issued to another application")
 	}
 	p := principal{Kind: "user"}
-	if err := s.DB.QueryRowContext(ctx, `SELECT org_id FROM nfx_route_auth0_org($1)`, authOrg).Scan(&p.OrgID); err != nil {
-		if isNoRows(err) {
-			return p, authError("this Auth0 organization is not linked to a Nightfix org")
+	if cfg.OIDCOrgID != "" {
+		p.OrgID = cfg.OIDCOrgID
+	} else {
+		authOrg := claims.String(cfg.orgClaim())
+		if authOrg == "" {
+			return principal{}, authError(fmt.Sprintf("token has no %s claim; log in through your organization", cfg.orgClaim()))
 		}
-		return p, err
+		if err := s.DB.QueryRowContext(ctx, `SELECT org_id FROM nfx_route_auth0_org($1)`, authOrg).Scan(&p.OrgID); err != nil {
+			if isNoRows(err) {
+				return p, authError("this Auth0 organization is not linked to a Nightfix org")
+			}
+			return p, err
+		}
+	}
+	subject := claims.String("sub")
+	if cfg.SubjectPrefix != "" {
+		subject = cfg.SubjectPrefix + "|" + subject
 	}
 	email := claims.String(cfg.emailClaim())
 	if email == "" {
@@ -286,9 +395,19 @@ func (s *Server) authUser(ctx context.Context, tok string) (principal, error) {
 	}
 	p.Email = email
 	groups := claims.Strings(cfg.groupsClaim())
+	if !cfg.signInAllowed(email, groups) {
+		return p, authError("you're not in a group or email domain that may sign in here; ask an admin")
+	}
 
 	err = s.DB.WithOrg(ctx, p.OrgID, func(tx *db.Tx) error {
-		if err := tx.QueryRow(`SELECT nfx_upsert_user($1,$2,$3,true)`, claims.String("sub"), email, claims.String("name")).Scan(&p.UserID); err != nil {
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM orgs)`).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return authError("sign-in is configured for an org that doesn't exist")
+		}
+		if err := tx.QueryRow(`SELECT nfx_upsert_user($1,$2,$3,true)`, subject, email, claims.String("name")).Scan(&p.UserID); err != nil {
 			return err
 		}
 		var status string

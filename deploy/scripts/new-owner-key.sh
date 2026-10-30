@@ -9,13 +9,14 @@
 # Customers who still hold an owner key can rotate on their own instead:
 # POST /v1/api-keys, then POST /v1/api-keys/{id}/revoke on the old one.
 #
-# Run from deploy/terraform/control-plane's state (reads `terraform output`),
+# Reads `terraform output` from deploy/terraform/control-plane, or from
+# NIGHTFIX_TF_DIR (a self-hosted root such as examples/self-hosted),
 # with AWS credentials that can run the admin task and read the secret.
 set -euo pipefail
 org="${1:?usage: new-owner-key.sh <org id org_…> [--revoke-others]}"
 revoke=false
 if [ "${2:-}" = "--revoke-others" ]; then revoke=true; fi
-cd "$(dirname "$0")/../terraform/control-plane"
+cd "${NIGHTFIX_TF_DIR:-$(dirname "$0")/../terraform/control-plane}"
 out=$(terraform output -json admin_task)
 get() { jq -r ".$1" <<<"$out"; }
 export AWS_REGION="$(get region)"
@@ -34,7 +35,7 @@ if [ "$code" != "0" ]; then
 fi
 
 # The task names the secret <prefix><org>-<unix time>; take the newest.
-secret=$(aws secretsmanager list-secrets --filters "Key=name,Values=$(get cluster)/org-api-keys/$org-" \
+secret=$(aws secretsmanager list-secrets --filters "Key=name,Values=$(get org_secret_prefix)$org-" \
   --query 'reverse(sort_by(SecretList, &CreatedDate))[0].Name' --output text)
 echo "New owner API key for $org (shown once; store it in your password manager):"
 aws secretsmanager get-secret-value --secret-id "$secret" --query SecretString --output text
