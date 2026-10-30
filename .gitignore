@@ -4,7 +4,7 @@
 coverage.out
 .wrangler/
 
-# Leftovers from the archived full site (see archive/full-site)
+# Leftovers from the archived full site (in the private archive repository)
 website/
 
 # Claude Code session state

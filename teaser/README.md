@@ -1,6 +1,6 @@
 # Nightfix teaser
 
-The public page for nightfix.dev until launch: the name and one line, nothing more. It says nothing about what Nightfix does or how it works. The full marketing site and docs are kept on the `archive/full-site` branch until launch.
+The public page for nightfix.dev until launch: the name and one line, nothing more. It says nothing about what Nightfix does or how it works. The full marketing site and docs are kept in the private archive repository (`archive/full-site` branch) until launch.
 
 Plain static files, no build step.
 
