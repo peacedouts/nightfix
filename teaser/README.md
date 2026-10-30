@@ -1,6 +1,6 @@
 # Nightfix teaser
 
-The public page for nightfix.dev until launch: the name, the headline, one line on what Nightfix is, and a link to the GitHub repository. The full marketing site and docs are kept in the private archive repository (`archive/full-site` branch) until launch.
+The public page for nightfix.dev: what Nightfix is, a night with it (an incident timeline), how it works, what stays in your account, where it is today, and how to try it. One static page, no third-party assets. The full marketing site and docs are kept in the private archive repository (`archive/full-site` branch) until launch.
 
 Plain static files, no build step.
 
