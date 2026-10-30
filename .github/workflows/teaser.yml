@@ -31,7 +31,8 @@ jobs:
 
       - name: Page loads nothing from third parties
         run: |
-          if grep -nE '(src|href)="https?://' teaser/public/*.html | grep -v 'https://nightfix.dev'; then
+          # Links out (an <a> to the repository) are fine; loading anything isn't.
+          if grep -nE '(src|href)="https?://' teaser/public/*.html | grep -v 'https://nightfix.dev' | grep -v '<a class="repo[^"]*" href="https://github.com/peacedouts/nightfix"'; then
             echo "::error::teaser pages must be self-contained; the CSP in _headers blocks third-party assets"; exit 1
           fi
 
