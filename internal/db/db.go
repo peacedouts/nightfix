@@ -201,17 +201,21 @@ func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 		`CREATE TABLE IF NOT EXISTS schema_migrations (
 		   name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
 	}
-	for _, s := range setup {
+	// Roles are server-wide, and the advisory lock above is per database, so
+	// another database's migrator can update the same role row at the same
+	// moment ("tuple concurrently updated"): retry those statements.
+	execRole := func(q string) error {
 		var err error
-		for attempt := 0; attempt < 5; attempt++ {
-			// "tuple concurrently updated" when another database's migrator
-			// grants the same role at the same moment: retry.
-			if _, err = conn.ExecContext(ctx, s); err == nil || !strings.Contains(err.Error(), "concurrently") {
-				break
+		for attempt := 0; attempt < 8; attempt++ {
+			if _, err = conn.ExecContext(ctx, q); err == nil || !strings.Contains(err.Error(), "concurrently") {
+				return err
 			}
 			time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
 		}
-		if err != nil {
+		return err
+	}
+	for _, s := range setup {
+		if err := execRole(s); err != nil {
 			return fmt.Errorf("migration setup: %w", err)
 		}
 	}
@@ -232,7 +236,7 @@ func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 		return fmt.Errorf("the nfx_app role on this Postgres server already belongs to another Nightfix database (%q); "+
 			"each deployment needs its own server, because the roles are server-wide", strings.TrimPrefix(owner.String, "nightfix database: "))
 	case (!owner.Valid || owner.String == "") && !AllowSharedServer:
-		if _, err := conn.ExecContext(ctx, `COMMENT ON ROLE nfx_app IS `+quoteLiteral(marker)); err != nil {
+		if err := execRole(`COMMENT ON ROLE nfx_app IS ` + quoteLiteral(marker)); err != nil {
 			return fmt.Errorf("migration setup: %w", err)
 		}
 	}
@@ -249,7 +253,7 @@ func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := conn.ExecContext(ctx, "ALTER ROLE nfx_app PASSWORD "+quoteLiteral(v)); err != nil {
+		if err := execRole("ALTER ROLE nfx_app PASSWORD " + quoteLiteral(v)); err != nil {
 			return errors.New("set nfx_app password: " + strings.SplitN(err.Error(), "PASSWORD", 2)[0])
 		}
 	}
