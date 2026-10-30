@@ -1,6 +1,6 @@
 # Nightfix — Agent Job Protocol (Draft v1alpha1)
 
-Status: draft for discussion. Defines how a customer-deployed agent enrolls, connects to the control plane, receives work, executes runbook steps, and reports results. Companion to `runbook-schema.md`. Since Oct 23, 2026 the control plane normally runs in the customer's own AWS account alongside the agents (plop.md, "Open source, consulting first"); hosts like `api.<domain>` are that deployment's.
+Status: draft for discussion. Defines how a customer-deployed agent enrolls, connects to the control plane, receives work, executes runbook steps, and reports results. Companion to `runbook-schema.md`. Since Oct 23, 2026 the control plane normally runs in the customer's own AWS account alongside the agents; hosts like `api.<domain>` are that deployment's.
 
 ---
 

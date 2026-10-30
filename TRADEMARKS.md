@@ -1,6 +1,6 @@
 # Trademark policy
 
-The code is open source under the [Apache License 2.0](LICENSE). The name **Nightfix** and the Nightfix logo are trademarks of the project's maintainer and aren't covered by that license (Apache-2.0 §6). This policy says how you can use them.
+The code is opensource under the [Apache License 2.0](LICENSE). The name **Nightfix** and the Nightfix logo are trademarks of the project's maintainer and aren't covered by that license (Apache-2.0 §6). This policy says how you can use them.
 
 ## Fine without asking
 

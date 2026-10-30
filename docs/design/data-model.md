@@ -1,6 +1,6 @@
 # Nightfix — Core Data Model & API Surface (Draft v1alpha1)
 
-Status: draft for discussion. Unifies the tables sketched in `runbook-schema.md`, `agent-protocol.md` and `alert-incident-model.md` into one Postgres model, defines how tenancy, RBAC and audit work, and outlines the v1 REST API. Since Oct 23, 2026 the control plane normally runs in the customer's own AWS account alongside the agents (plop.md, "Open source, consulting first"); hosts like `api.<domain>` are that deployment's.
+Status: draft for discussion. Unifies the tables sketched in `runbook-schema.md`, `agent-protocol.md` and `alert-incident-model.md` into one Postgres model, defines how tenancy, RBAC and audit work, and outlines the v1 REST API. Since Oct 23, 2026 the control plane normally runs in the customer's own AWS account alongside the agents; hosts like `api.<domain>` are that deployment's.
 
 ---
 
@@ -31,7 +31,7 @@ Status: draft for discussion. Unifies the tables sketched in `runbook-schema.md`
 
 The core principle says the control plane never holds customer secrets. That stays true for **infrastructure secrets and credentials used during execution**, which live only in the customer's account.
 
-The control plane does have to hold a small set of **notification and integration credentials**: a PagerDuty routing key, a Slack bot token, our own HMAC secrets for webhook ingest. These are narrowly scoped (a PagerDuty routing key can only create events), encrypted per org with KMS envelope encryption, never returned by the API after creation, and listed explicitly in security documentation. In a self-hosted deployment they stay in the customer's account too, with the control plane. The core principle in plop.md was reworded on Oct 20, 2026 to say exactly this.
+The control plane does have to hold a small set of **notification and integration credentials**: a PagerDuty routing key, a Slack bot token, our own HMAC secrets for webhook ingest. These are narrowly scoped (a PagerDuty routing key can only create events), encrypted per org with KMS envelope encryption, never returned by the API after creation, and listed explicitly in security documentation. In a self-hosted deployment they stay in the customer's account too, with the control plane.
 
 ---
 
