@@ -1,13 +1,10 @@
 package e2e_test
 
-// Security review: PUT /v1/org/auth0 lets any org's owner claim any Auth0
-// Organization id that no other Nightfix org has linked yet, with no proof
-// that the org controls it. Auth0 Organization ids aren't secret (they are in
-// every member's access token and in login/invitation links), so the owner
-// of org B can link org A's Auth0 Organization before A does (or after A
-// changes its link). From then on A's people signing in land in B: B is told
-// their names and emails, sees which IdP groups they're in (by mapping teams
-// to guessed group names), and A's own link attempt is refused as a duplicate.
+// Linking an Auth0 Organization is an operator step, not an owner's API
+// call. Auth0 Organization ids aren't secret (they're in every member's
+// access token and in login links), so if an org's owner could claim any
+// unlinked id, org B could link org A's Auth0 Organization first and A's
+// people would sign in to B.
 
 import (
 	"bytes"
@@ -29,7 +26,7 @@ import (
 	"github.com/peacedouts/nightfix/internal/testdb"
 )
 
-func TestSecAuth0OrganizationCannotBeClaimedByAnotherOrg(t *testing.T) {
+func TestAuth0OrganizationCannotBeClaimedByAnotherOrg(t *testing.T) {
 	pool := testdb.New(t)
 	mk := make([]byte, 32)
 	rand.Read(mk)

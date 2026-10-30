@@ -11,7 +11,7 @@ import (
 // Result's new outputs cap ("hold the control plane to the same bound
 // whatever an agent sends") applies only when the status is "succeeded". The
 // same 3 MiB of outputs reported with status "failed" is stored as is.
-func TestV3BOutputsCapBypassedByNonSuccessStatus(t *testing.T) {
+func TestOutputsCapBypassedByNonSuccessStatus(t *testing.T) {
 	e := setupRunHarness(t)
 	ctx := context.Background()
 	e.startNamed("one")

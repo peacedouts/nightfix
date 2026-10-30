@@ -1,7 +1,7 @@
 package e2e_test
 
-// Independent review of fix/review-leftovers (PR #25). Each test fails on
-// that branch and shows one bug.
+// Last-owner protection for API keys and bindings, and per-org ordering of
+// alert-event claims under concurrent ingest.
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ import (
 // can never be members). So the org's only owner key can be revoked, after
 // which nobody can mint owner/admin keys or revoke admin keys: exactly the
 // lockout the check is meant to prevent.
-func TestReviewEmptyTeamOwnerBindingLetsLastOwnerKeyBeRevoked(t *testing.T) {
+func TestEmptyTeamOwnerBindingLetsLastOwnerKeyBeRevoked(t *testing.T) {
 	do, owner := newKeyAPI(t)
 	code, out := do(owner, "POST", "/v1/api-keys", map[string]string{"name": "ci", "role": "admin"})
 	admin, _ := out["key"].(string)
@@ -64,7 +64,7 @@ func TestReviewEmptyTeamOwnerBindingLetsLastOwnerKeyBeRevoked(t *testing.T) {
 // owner powers come from a role binding (POST /v1/role-bindings with an
 // api_key subject, which the README documents) is treated as a viewer: an
 // admin can revoke it, and lastOwnerCheck isn't run for it.
-func TestReviewAdminCanRevokeKeyThatIsOwnerThroughBinding(t *testing.T) {
+func TestAdminCanRevokeKeyThatIsOwnerThroughBinding(t *testing.T) {
 	do, owner := newKeyAPI(t)
 	code, out := do(owner, "POST", "/v1/api-keys", map[string]string{"name": "ci", "role": "admin"})
 	admin, _ := out["key"].(string)
@@ -172,7 +172,7 @@ func newKeyAPI(t *testing.T) (func(tok, method, path string, body any) (int, map
 // transaction rolls back. Every other connection's ingest for that org then
 // waits 5s on pg_advisory_xact_lock_shared and fails, and every other claim
 // skips the org, until that connection is closed.
-func TestReviewCancelledClaimLeaksIngestLock(t *testing.T) {
+func TestCancelledClaimLeaksIngestLock(t *testing.T) {
 	x := setupIngest(t, nil)
 	ctx := context.Background()
 	if code := x.send(map[string]any{"dedup_key": "A", "summary": "A down"}); code != 202 {
@@ -254,7 +254,7 @@ func TestReviewCancelledClaimLeaksIngestLock(t *testing.T) {
 
 // Not a bug (passes): with 0026, several claimers and concurrent ingest never
 // process one org's events concurrently or out of (received_at, id) order.
-func TestReviewClaimKeepsPerOrgOrderUnderConcurrentIngest(t *testing.T) {
+func TestClaimKeepsPerOrgOrderUnderConcurrentIngest(t *testing.T) {
 	x := setupIngest(t, nil)
 	ctx := context.Background()
 	app := appConn(t, x.srv.DB)
@@ -344,7 +344,7 @@ func TestReviewClaimKeepsPerOrgOrderUnderConcurrentIngest(t *testing.T) {
 
 // Measurement: how often the claim's try-lock finds no ingest of the org in
 // progress while that org is being ingested continuously.
-func TestReviewClaimUnderSustainedIngest(t *testing.T) {
+func TestClaimUnderSustainedIngest(t *testing.T) {
 	x := setupIngest(t, nil)
 	ctx := context.Background()
 	app := appConn(t, x.srv.DB)

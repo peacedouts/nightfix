@@ -1,6 +1,6 @@
 package controlplane
 
-// Regression tests for the QA follow-ups: webhook dedup keys scoped to their
+// Regression tests: webhook dedup keys scoped to their
 // integration (and the migration that rewrote stored fingerprints),
 // CloudWatch state ordering, and the email_verified claim.
 

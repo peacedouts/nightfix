@@ -1,6 +1,7 @@
 package e2e_test
 
-// Independent review (round 5): failing ingest tests.
+// Out-of-order delivery: SNS and webhooks can deliver or commit events out
+// of order, and the latest state must still win.
 
 import (
 	"context"
@@ -19,7 +20,7 @@ import (
 // nothing, so the older ALARM then opens an alert (and pages) that stays
 // firing forever: CloudWatch won't send another OK for an alarm that is
 // already OK.
-func TestReviewCloudWatchOKDeliveredBeforeItsAlarm(t *testing.T) {
+func TestCloudWatchOKDeliveredBeforeItsAlarm(t *testing.T) {
 	x := setupIngest(t, nil)
 	cw, _ := x.cloudwatch()
 	t0 := time.Now().Add(-2 * time.Minute)
@@ -44,7 +45,7 @@ func TestReviewCloudWatchOKDeliveredBeforeItsAlarm(t *testing.T) {
 // applied last, so the alert ends up firing forever. The open transaction
 // below stands in for a slow ingest request (it inserts exactly what
 // handleIngest inserts).
-func TestReviewWebhookEventCommittedLateIsAppliedOutOfOrder(t *testing.T) {
+func TestWebhookEventCommittedLateIsAppliedOutOfOrder(t *testing.T) {
 	x := setupIngest(t, nil)
 	ctx := context.Background()
 	var integID string

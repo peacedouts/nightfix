@@ -1,13 +1,12 @@
 package e2e_test
 
-// Security review: SNS signing-certificate host pinning.
+// SNS signing-certificate host pinning.
 //
-// allowedSNSURL accepts any host matching ^sns\.[a-z0-9-]+\.amazonaws\.com$.
-// That shape is not reserved for SNS: S3 serves a bucket named "sns" at
-// https://sns.s3.amazonaws.com/ (and sns.s3-<region>.amazonaws.com,
-// sns.s3-accelerate.amazonaws.com, ...). Whoever owns that bucket can host a
-// PEM at the path SNS uses and sign arbitrary "SNS" notifications that every
-// CloudWatch integration then accepts as genuine.
+// A host pattern like ^sns\.[a-z0-9-]+\.amazonaws\.com$ isn't reserved for
+// SNS: S3 serves a bucket named "sns" at https://sns.s3.amazonaws.com/ (and
+// sns.s3-<region>.amazonaws.com, sns.s3-accelerate.amazonaws.com, ...).
+// Whoever owned that bucket could host a PEM at the path SNS uses and sign
+// "SNS" notifications, so only real SNS endpoints are accepted.
 
 import (
 	"bytes"
@@ -41,7 +40,7 @@ type rtFunc func(*http.Request) (*http.Response, error)
 
 func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestSecSNSCertFromS3BucketNamedSNSIsRefused(t *testing.T) {
+func TestSNSCertFromS3BucketNamedSNSIsRefused(t *testing.T) {
 	// The attacker's key and self-signed certificate.
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "sns.amazonaws.com"},

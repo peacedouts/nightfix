@@ -1,6 +1,6 @@
 package e2e_test
 
-// Regression tests for the QA follow-ups on ingest: SNS replay and ordering,
+// Regression tests for ingest: SNS replay and ordering,
 // and webhook dedup keys scoped to their integration.
 
 import (

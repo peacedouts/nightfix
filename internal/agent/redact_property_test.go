@@ -336,7 +336,7 @@ func v4stream(r *redactor, s string, rng *rand.Rand) string {
 // Property test
 // ---------------------------------------------------------------------------
 
-func TestVerify4RedactProperty(t *testing.T) {
+func TestRedactProperty(t *testing.T) {
 	seed := time.Now().UnixNano()
 	if s := os.Getenv("V4_SEED"); s != "" {
 		seed, _ = strconv.ParseInt(s, 10, 64)
@@ -388,7 +388,7 @@ func TestVerify4RedactProperty(t *testing.T) {
 
 // The decoders find every generated form when nothing is redacted (so a pass
 // above means something).
-func TestVerify4DetectorSanity(t *testing.T) {
+func TestDetectorSanity(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	none := newRedactor(nil)
 	missed := 0
@@ -412,7 +412,7 @@ func TestVerify4DetectorSanity(t *testing.T) {
 // Scope-dependent: line-break-tolerant matching applies only to needles made
 // entirely of base64-alphabet characters, so a secret with punctuation (and
 // its URL/JSON-escaped forms) folded by a single LF is not matched.
-func TestVerify4WrappedNonBase64Forms(t *testing.T) {
+func TestWrappedNonBase64Forms(t *testing.T) {
 	// Out of scope, by decision: tools wrap encoded output (base64, hex), not
 	// a plain secret, and matching plain text across line breaks would hide
 	// ordinary lines that happen to join into a secret. Kept to document it.
@@ -461,7 +461,7 @@ func jsEncodeURIComponent(s string) string {
 	return b.String()
 }
 
-func TestVerify4URLEscapedByCommonTools(t *testing.T) {
+func TestURLEscapedByCommonTools(t *testing.T) {
 	for _, c := range []struct{ tool, secret, printed string }{
 		// An AWS secret access key (40 chars of [A-Za-z0-9+/]) through
 		// python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))'

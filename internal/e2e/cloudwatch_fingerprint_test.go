@@ -1,10 +1,9 @@
 package e2e_test
 
-// Security review: CloudWatch fingerprints are not scoped to their
-// integration. Migration 0015 scoped webhook dedup keys per integration
-// because "two integrations ... updated and resolved each other's alert";
-// CloudWatch kept 'cw:<AlarmArn>', where AlarmArn is message content that
-// anyone able to publish to the *other* pinned topic chooses freely.
+// CloudWatch fingerprints are scoped to their integration, like webhook
+// dedup keys (migration 0015): AlarmArn is message content, so anyone who can
+// publish to one integration's topic could otherwise update or resolve
+// another integration's alerts.
 
 import (
 	"bytes"
@@ -15,7 +14,7 @@ import (
 	"github.com/peacedouts/nightfix/internal/devstub"
 )
 
-func TestSecCloudWatchAlarmCannotBeResolvedFromAnotherIntegration(t *testing.T) {
+func TestCloudWatchAlarmCannotBeResolvedFromAnotherIntegration(t *testing.T) {
 	x := setupIngest(t, nil)
 	const topicA = "arn:aws:sns:us-east-1:111111111111:team-a-alarms"
 	const topicB = "arn:aws:sns:us-east-1:222222222222:team-b-alarms"

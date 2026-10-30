@@ -55,7 +55,7 @@ serviceAccount:
   # the service account (deploy/terraform/examples/agent-eks).
   annotations: {}
 
-# Two agents per production label set (decision #27); one may be down during
+# Two agents per production label set, so one may be down during
 # a rolling update or a node drain.
 replicaCount: 2
 

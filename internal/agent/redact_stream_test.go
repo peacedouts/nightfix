@@ -53,7 +53,7 @@ func recoverable(out, secret string) bool {
 // the API key as the username ("sk_live_...:" as Stripe uses), or
 // base64("secret:x"). len(secret)%3 != 0, so the last char of RawStd(secret)
 // differs and no needle matches at all.
-func TestV3BBase64Offset0FollowedByData(t *testing.T) {
+func TestBase64Offset0FollowedByData(t *testing.T) {
 	for _, c := range []struct{ secret, suffix string }{
 		{"xk_live_4eC39HqLyjWDarjtT1zdp7dc", ":"},      // 32 bytes, %3 = 2
 		{"hunter2-Secret!", ":"},                       // 15 bytes, %3 = 0 (control)
@@ -72,7 +72,7 @@ func TestV3BBase64Offset0FollowedByData(t *testing.T) {
 // Property: streaming in random chunks must equal apply (the doc comment on
 // redactor promises it), and the secret mustn't be recoverable, for secret
 // encodings wrapped with a line break at random places.
-func TestV3BStreamEqualsApplyWrapped(t *testing.T) {
+func TestStreamEqualsApplyWrapped(t *testing.T) {
 	seed := time.Now().UnixNano()
 	rng := rand.New(rand.NewSource(seed))
 	secret := "hunter2-Secret!xyz"
@@ -110,7 +110,7 @@ func TestV3BStreamEqualsApplyWrapped(t *testing.T) {
 
 // A match spanning more than r.max bytes (dense line breaks) diverges between
 // apply and streaming.
-func TestV3BHoldBackTooSmallForDenseBreaks(t *testing.T) {
+func TestHoldBackTooSmallForDenseBreaks(t *testing.T) {
 	secret := "hunter2-Secret!xyz"
 	r := newRedactor([]string{secret})
 	enc := base64.RawStdEncoding.EncodeToString([]byte(secret))
@@ -130,7 +130,7 @@ func TestV3BHoldBackTooSmallForDenseBreaks(t *testing.T) {
 }
 
 // Performance: many secrets sharing a prefix, output dense with that prefix.
-func TestV3BPerfManySecrets(t *testing.T) {
+func TestPerfManySecrets(t *testing.T) {
 	var secrets []string
 	for i := 0; i < 200; i++ {
 		secrets = append(secrets, fmt.Sprintf("sk_live_%040d", i*7919))
@@ -152,7 +152,7 @@ func TestV3BPerfManySecrets(t *testing.T) {
 // Realistic wrapping (one LF or CRLF at most every 8 chars, including right
 // after the first char), std and url alphabets, prefixes giving offsets 0-2,
 // trailing newline: streaming must equal apply and nothing decodable remains.
-func TestV3BStreamEqualsApplyRealisticWrap(t *testing.T) {
+func TestStreamEqualsApplyRealisticWrap(t *testing.T) {
 	seed := time.Now().UnixNano()
 	rng := rand.New(rand.NewSource(seed))
 	secrets := []string{"hunter2-Secret!xyz", "p4ssw0rd!", "a-much-longer-secret-value-for-wrapping-tests-0123456789-abcdefghijklmnop"}
@@ -192,7 +192,7 @@ func TestV3BStreamEqualsApplyRealisticWrap(t *testing.T) {
 }
 
 // False positives: ordinary text across line breaks.
-func TestV3BWrapFalsePositives(t *testing.T) {
+func TestWrapFalsePositives(t *testing.T) {
 	r := newRedactor([]string{"password", "12345678"})
 	for _, in := range []string{
 		"enter your pass\nword below\n",

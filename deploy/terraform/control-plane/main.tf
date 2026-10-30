@@ -1,5 +1,5 @@
-# Nightfix's own deployment of the control plane: the shared module, with DNS
-# in Cloudflare and rollouts from this repository's GitHub workflows. A client
+# A reference deployment of the control plane: the shared module, with DNS in
+# Cloudflare and rollouts from this repository's GitHub workflows. Your own
 # deployment uses the same module (see ../examples/self-hosted).
 
 module "control_plane" {

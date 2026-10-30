@@ -1,8 +1,8 @@
 package agent
 
-// Resilience review: how the agent behaves when things go wrong in a
-// customer's account (shutdown mid-step, lost acks, a control plane that is
-// briefly unreachable, AWS errors inside wait loops, orphaned processes).
+// How the agent behaves when things go wrong in a customer's account:
+// shutdown mid-step, lost acks, a control plane that is briefly unreachable,
+// AWS errors inside wait loops, orphaned processes.
 
 import (
 	"context"
@@ -170,7 +170,7 @@ func shellDispatch(f *verifyFixture) agentapi.Dispatch {
 // Result handler expects a "cancelled" report from an agent shutting down
 // mid-step (it maps it to lost). main exits as soon as Run returns, so
 // anything Run hasn't finished by then never happens.
-func TestReviewShutdownMidStepReportsAndLetsScriptCleanUp(t *testing.T) {
+func TestShutdownMidStepReportsAndLetsScriptCleanUp(t *testing.T) {
 	dir := t.TempDir()
 	pidf, mark := filepath.Join(dir, "pid"), filepath.Join(dir, "cleaned-up")
 	script := fmt.Sprintf("echo $$ > %s\ntrap 'sleep 1; echo ok > %s; exit 143' TERM\nsleep 60 &\nwait", pidf, mark)
@@ -220,7 +220,7 @@ func TestReviewShutdownMidStepReportsAndLetsScriptCleanUp(t *testing.T) {
 // drops the attempt without running it, never lists it as in flight and
 // never reports it, so the control plane later marks it lost: a non-idempotent
 // step that never started pages a human with "may or may not have completed".
-func TestReviewLostAckResponseIsNeitherRunNorReported(t *testing.T) {
+func TestLostAckResponseIsNeitherRunNorReported(t *testing.T) {
 	f, gw := newResFixture(t, verifyRunbook, Config{})
 	d := f.dispatch(nil)
 	attempt := attemptIDOf(d)
@@ -263,7 +263,7 @@ func TestReviewLostAckResponseIsNeitherRunNorReported(t *testing.T) {
 // The control plane is unreachable for a moment just as a step finishes. The
 // result is retried and arrives; the output, which §7.1 says is resent from a
 // bounded buffer on reconnect, is dropped after one failed flush.
-func TestReviewOutputSurvivesBriefOutageAtStepEnd(t *testing.T) {
+func TestOutputSurvivesBriefOutageAtStepEnd(t *testing.T) {
 	f, gw := newResFixture(t, shellRunbook("sleep 1\necho important-diagnostic-line"), Config{})
 	d := shellDispatch(f)
 	attempt := attemptIDOf(d)
@@ -302,7 +302,7 @@ func (f failingAWS) Call(context.Context, string, string, map[string]any) (map[s
 // cluster doesn't exist) polls until the step timeout and reports timed_out
 // with "step exceeded its timeout": the run (and a held page) waits the full
 // timeout, and the result hides the real cause.
-func TestReviewWaitWithPermanentAWSErrorIsNotATimeout(t *testing.T) {
+func TestWaitWithPermanentAWSErrorIsNotATimeout(t *testing.T) {
 	a := newTestAgent(t, &sink{})
 	a.cfg.AWS = failingAWS{&awscall.Error{Service: "ecs", Action: "DescribeServices", Code: "AccessDeniedException",
 		Message: "User: arn:aws:sts::1:assumed-role/nightfix-agent/x is not authorized to perform: ecs:DescribeServices", Status: 400}}

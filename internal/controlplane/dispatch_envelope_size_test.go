@@ -1,6 +1,6 @@
 package controlplane
 
-// Independent review (round 5): failing control-plane tests.
+// Dispatch envelopes stay within what the agent will read.
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 // 17th such step on the dispatch can't be decoded: the agent treats the poll
 // as failed, the attempt sits dispatched until its lease expires, is
 // re-queued, and is handed out again the same way until the run times out.
-func TestReviewDispatchEnvelopeStaysReadableByTheAgent(t *testing.T) {
+func TestDispatchEnvelopeStaysReadableByTheAgent(t *testing.T) {
 	e := setupRunHarness(t)
 	ctx := context.Background()
 	var steps strings.Builder
