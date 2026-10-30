@@ -327,7 +327,7 @@ variable "existing_ecs_cluster_arn" {
 }
 
 variable "container_insights" {
-  description = "Container Insights on the cluster the module creates (more metrics, extra CloudWatch cost). The running-tasks alarm needs it."
+  description = "Container Insights on the cluster the module creates (more metrics, extra CloudWatch cost). With existing_ecs_cluster_arn, say whether that cluster has it instead. The running-tasks alarm is created only when this is true, because without Insights its metric never arrives and the alarm would always fire."
   type        = bool
   default     = true
 }

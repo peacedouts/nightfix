@@ -122,7 +122,10 @@ jobs:
           git worktree add ../at-release "$COMMIT"
           chart=../at-release/deploy/helm/nightfix-agent
           # The released chart defaults to the released agent.
-          sed -i "s|^  digest: \"\"|  digest: \"$AGENT_DIGEST\"|" "$chart/values.yaml"
+          # Its image is this repository's (a fork's release points at the fork's).
+          sed -i -e "s|^  repository: ghcr.io/[^/]*/nightfix-agent$|  repository: ghcr.io/$OWNER/nightfix-agent|" \
+                 -e "s|^  digest: \"\"|  digest: \"$AGENT_DIGEST\"|" "$chart/values.yaml"
+          grep -q "repository: ghcr.io/$OWNER/nightfix-agent" "$chart/values.yaml"
           grep -q "digest: \"$AGENT_DIGEST\"" "$chart/values.yaml"
           helm package "$chart" --version "${VERSION#v}" --app-version "${VERSION#v}" -d out
           helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN"

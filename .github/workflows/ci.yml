@@ -152,6 +152,17 @@ jobs:
           if helm template test "$chart" "$@" --set image.digest=latest > /dev/null 2>&1; then
             echo "::error::the chart accepted a tag as the digest"; exit 1
           fi
+          # An allowlist mode needs a list, and an unknown mode is refused (the
+          # agent would crash-loop on either).
+          if helm template test "$chart" "$@" --set nightfix.allowlist.mode=enforce > /dev/null 2>&1; then
+            echo "::error::the chart rendered allowlist mode enforce with no allowlist"; exit 1
+          fi
+          if helm template test "$chart" "$@" --set nightfix.allowlist.mode=strict > /dev/null 2>&1; then
+            echo "::error::the chart accepted an unknown allowlist mode"; exit 1
+          fi
+          helm template test "$chart" "$@" --set nightfix.allowlist.mode=enforce \
+            --set-string nightfix.allowlist.content="runbooks: []" --set 'nightfix.stepTypes={aws,wait}' > rendered.yaml
+          grep -q 'value: "aws,wait"' rendered.yaml
 
   terraform:
     runs-on: ubuntu-latest

@@ -17,7 +17,7 @@
 # NIGHTFIX_TF_DIR=<this directory>.
 
 terraform {
-  required_version = ">= 1.11"
+  required_version = ">= 1.12"
   required_providers {
     aws = {
       source  = "hashicorp/aws"

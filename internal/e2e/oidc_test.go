@@ -178,14 +178,41 @@ func TestOIDCSignInMapsToOneOrg(t *testing.T) {
 		t.Errorf("email_verified false with TrustEmail: %d %v, want 401", code, out)
 	}
 
+	// With email domains instead of groups, the domain decides: a member of
+	// the domain with no groups signs in; another domain doesn't, even with
+	// the right hd claim.
+	byDomain := login
+	byDomain.AllowedGroups, byDomain.EmailDomains = nil, []string{"acme.example"}
+	srv3 := controlplane.New(pool, sealer, ca, controlplane.Config{Auth0: byDomain}, log)
+	api3 := httptest.NewServer(srv3.APIHandler())
+	defer api3.Close()
+	api = api3
+	code, me = do(mint(claims("4001", "ellen@ACME.example", map[string]any{"groups": nil})), "GET", "/v1/me", nil)
+	wantOrg(code, me, org.OrgID)
+	if code, out := do(mint(claims("4002", "ellen@contractor.example", map[string]any{"groups": nil})), "GET", "/v1/me", nil); code != 401 {
+		t.Errorf("email outside the allowed domains: %d %v, want 401", code, out)
+	}
+	if code, out := do(mint(claims("4003", "ellen@notacme.example", map[string]any{"groups": nil})), "GET", "/v1/me", nil); code != 401 {
+		t.Errorf("domain that only ends with an allowed one: %d %v, want 401", code, out)
+	}
+	api = api2
+
 	// Members of the OIDC org can sign in, so an owner binding to one is a
 	// usable owner credential: the bootstrap owner key can then be revoked.
-	// In an org they can't sign in to, it isn't.
+	// In an org they can't sign in to, it isn't, and neither is it on a
+	// control plane with no sign-in configured.
 	if code, out := do(org.APIKey, "POST", "/v1/role-bindings", map[string]any{"subject_type": "user", "subject": "alice@acme.example", "role": "owner"}); code != 200 {
 		t.Fatalf("binding alice as owner: %d %v", code, out)
 	}
 	_, keys := do(org.APIKey, "GET", "/v1/api-keys", nil)
 	keyID := keys["keys"].([]any)[0].(map[string]any)["id"].(string)
+	noLogin := httptest.NewServer(controlplane.New(pool, sealer, ca, controlplane.Config{}, log).APIHandler())
+	defer noLogin.Close()
+	api = noLogin
+	if code, out := do(org.APIKey, "POST", "/v1/api-keys/"+keyID+"/revoke", nil); code != 409 {
+		t.Fatalf("revoking the last owner key where nobody can sign in: %d %v, want 409", code, out)
+	}
+	api = api2
 	if code, out := do(org.APIKey, "POST", "/v1/api-keys/"+keyID+"/revoke", nil); code != 200 {
 		t.Fatalf("revoking the owner key with a signed-in owner in place: %d %v", code, out)
 	}

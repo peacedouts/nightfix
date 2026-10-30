@@ -16,9 +16,10 @@ locals {
   metric_namespace = "Nightfix/${local.name}"
 }
 
-# Needs Container Insights (on the module's cluster, or yours).
+# Needs Container Insights (on the module's cluster, or yours): without it the
+# metric is missing, which this alarm treats as breaching.
 resource "aws_cloudwatch_metric_alarm" "running_tasks" {
-  count               = !local.create_cluster || var.container_insights ? 1 : 0
+  count               = var.container_insights ? 1 : 0
   alarm_name          = "${local.name}-running-tasks-low"
   alarm_description   = "Fewer control-plane tasks running than desired"
   namespace           = "ECS/ContainerInsights"

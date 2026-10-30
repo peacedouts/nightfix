@@ -2,6 +2,7 @@ package auth0
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -30,9 +31,7 @@ func TestJWKSRefreshesHourly(t *testing.T) {
 			}
 			defer resp.Body.Close()
 			w.Header().Set("Content-Type", "application/json")
-			buf := make([]byte, 1<<16)
-			n, _ := resp.Body.Read(buf)
-			w.Write(buf[:n])
+			io.Copy(w, resp.Body)
 		}
 	}))
 	defer srv.Close()

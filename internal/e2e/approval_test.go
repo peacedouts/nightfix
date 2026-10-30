@@ -403,15 +403,22 @@ func TestAutoRemediationWaitsForSlackApproval(t *testing.T) {
 	}
 
 	// A Slack app's signing secret speaks for everyone linked through it, so
-	// an admin can't register one, and a second app (even an owner's) can't
-	// use the links made through the first: a click signed with its secret
-	// as dave records nothing.
+	// an admin can't register one, a workspace has one active app, and a
+	// second app (even an owner's) can't use the links made through the
+	// first: a click through it, as dave, records nothing.
 	const rogueSecret = "rogue-signing-secret-chosen-by-the-registrar"
 	e.expect("admin registers a Slack app", who.alice, "POST", "/v1/slack-apps",
 		map[string]string{"signing_secret": rogueSecret, "team_id": "T0ACME"}, 403, "")
+	e.expect("second app for the workspace", e.key, "POST", "/v1/slack-apps",
+		map[string]string{"signing_secret": rogueSecret, "team_id": "T0ACME"}, 409, "archive it first")
+	e.expect("Enterprise Grid ID", e.key, "POST", "/v1/slack-apps",
+		map[string]string{"signing_secret": rogueSecret, "team_id": "E0ACME"}, 400, "team_id")
 	var rogue map[string]string
-	e.call("POST", "/v1/slack-apps", map[string]string{"signing_secret": rogueSecret, "team_id": "T0ACME"}, &rogue)
-	if c := e.slackClick(rogue["interactivity_url"], rogueSecret, "T0ACME", "U_DAVE", "dave", "nfx_approve", gate, time.Now()); c != 200 {
+	e.call("POST", "/v1/slack-apps", map[string]string{"signing_secret": rogueSecret, "team_id": "T0ROGUE"}, &rogue)
+	if c := e.slackClick(rogue["interactivity_url"], rogueSecret, "T0ACME", "U_DAVE", "dave", "nfx_approve", gate, time.Now()); c != 403 {
+		t.Fatalf("click claiming another workspace through the second app: got %d, want 403", c)
+	}
+	if c := e.slackClick(rogue["interactivity_url"], rogueSecret, "T0ROGUE", "U_DAVE", "dave", "nfx_approve", gate, time.Now()); c != 200 {
 		t.Fatalf("click through the second app: got %d", c)
 	}
 	if reply := e.waitReply(2); !strings.Contains(reply, "isn't linked") {

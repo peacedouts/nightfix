@@ -45,6 +45,7 @@ var shipped = map[string]string{
 	"0028_partitions_attach_and_indexes.sql":  "726a70fb533ef69dec7a3463a02883075b4aab40651003c03c84a9cf3933b0e0",
 	"0029_audit_insert_via_function_only.sql": "454a54ddb9bd1e9d8eeec7a516d15a6f172456f85d3296ab9a0fbbdd3dfaf411",
 	"0030_slack_links_per_app.sql":            "9b2f66a3f46c0089bb0bebeb654a64ca5403b677aa281ec6bd9ae70fca12ca11",
+	"0031_one_slack_app_per_workspace.sql":    "5b0e3285ae6a370b2452789fe3accbb845731b4d75b5e9266e83ebb95f4ec66d",
 }
 
 func TestShippedMigrationsAreUnchanged(t *testing.T) {

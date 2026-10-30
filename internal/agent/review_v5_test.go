@@ -92,6 +92,12 @@ func TestInlineAllowlist(t *testing.T) {
 	if f.agent.allowlist == nil || len(f.agent.allowlist.Runbooks) != 1 {
 		t.Fatalf("inline allowlist not loaded: %+v", f.agent.allowlist)
 	}
+	// With both, the file wins: the inline list allows ecs-restart, the file
+	// doesn't, so it's refused.
+	both := newVerifyFixture(t, Config{AllowlistMode: "enforce",
+		AllowlistFile: writeAllowlist(t, "runbooks:\n  - name: aurora-failover\n    version: \"*\"\n"),
+		AllowlistYAML: "runbooks:\n  - name: ecs-restart\n    version: \"*\"\n"})
+	both.assertRefused(both.dispatch(nil), "not on the local allowlist")
 	for _, c := range []Config{
 		{Endpoint: "https://x", AllowlistMode: "enforce"},
 		{Endpoint: "https://x", AllowlistMode: "warn", AllowlistYAML: "  \n"},

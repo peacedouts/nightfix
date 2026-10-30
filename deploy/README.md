@@ -35,7 +35,7 @@ The usual engagement: the whole thing runs in the client's account, under their 
 | `logs_kms_key_arn`, `log_retention_days` | CloudWatch's default log encryption and 90-day retention (the agent module takes `logs_kms_key_arn` too) |
 | `agent_ingress_cidrs`, `ingest_ingress_cidrs` | Agent gateway and API/ingest reachable from anywhere (agents use mutual TLS; SNS and Slack call from their own ranges) |
 | `image` | The module's ECR repository at `image_tag` for the first apply |
-| `existing_ecs_cluster_arn`, `container_insights` | A new ECS cluster with Container Insights (the running-tasks alarm needs Insights) |
+| `existing_ecs_cluster_arn`, `container_insights` | A new ECS cluster with Container Insights. With your own cluster, set `container_insights` to whether it has Insights: the running-tasks alarm needs it and is left out otherwise |
 | `vpc_endpoints` | AWS calls through NAT: interface endpoints for KMS, STS, Secrets Manager, ECR and Logs, plus S3. Slack, PagerDuty, SNS certificates and the IdP still need outbound HTTPS. Only with the VPC the module creates: in an existing VPC their private DNS would affect every other workload |
 | `waf_web_acl_arn` | No WAF (its rules must let SNS deliveries and Slack callbacks through) |
 | `log_subscription` | Logs only in CloudWatch: a subscription filter to their SIEM's Kinesis stream, Firehose or Lambda |
@@ -106,7 +106,7 @@ Nothing on the tasks' disks matters, and nothing secret is in Terraform state.
 
 You need:
 - An AWS account (a dedicated one is best).
-- Terraform 1.11 or newer.
+- Terraform 1.12 or newer.
 - The AWS CLI and `jq`.
 - A Cloudflare API token with **Zone → DNS → Edit** and **Zone → Zone → Read** on `nightfix.dev` only.
 

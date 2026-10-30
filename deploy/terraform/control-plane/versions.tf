@@ -1,6 +1,6 @@
 terraform {
   # 1.11+ for write-only arguments: the app's database password never enters state.
-  required_version = ">= 1.11"
+  required_version = ">= 1.12"
 
   required_providers {
     aws = {

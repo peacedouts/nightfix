@@ -10,6 +10,7 @@ import (
 
 	"github.com/peacedouts/nightfix/internal/db"
 	"github.com/peacedouts/nightfix/internal/ids"
+	"github.com/peacedouts/nightfix/internal/testdb"
 )
 
 // A second Nightfix database on the same Postgres server is refused: the
@@ -38,19 +39,21 @@ func TestOneNightfixDatabasePerServer(t *testing.T) {
 	}
 	// Other tests share this server under db.AllowSharedServer; start this
 	// one from a clean slate and leave it that way.
+	// Migrate sets the server-wide nfx_app password, and other packages' tests
+	// connect with testdb's, so use the same one.
 	clear := func() { admin.ExecContext(context.Background(), `COMMENT ON ROLE nfx_app IS NULL`) }
 	db.AllowSharedServer = false
 	defer func() { db.AllowSharedServer = true; clear() }()
 	clear()
 
 	first, second := newDB(), newDB()
-	if err := db.Migrate(ctx, first, "pw-1"); err != nil {
+	if err := db.Migrate(ctx, first, testdb.AppPassword); err != nil {
 		t.Fatalf("first database: %v", err)
 	}
-	if err := db.Migrate(ctx, first, "pw-1"); err != nil {
+	if err := db.Migrate(ctx, first, testdb.AppPassword); err != nil {
 		t.Fatalf("migrating the same database again: %v", err)
 	}
-	if err := db.Migrate(ctx, second, "pw-2"); err == nil || !strings.Contains(err.Error(), "another Nightfix database") {
+	if err := db.Migrate(ctx, second, testdb.AppPassword); err == nil || !strings.Contains(err.Error(), "another Nightfix database") {
 		t.Fatalf("second database on the server: %v", err)
 	}
 

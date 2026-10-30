@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
+
 	"github.com/peacedouts/nightfix/internal/db"
 	"github.com/peacedouts/nightfix/internal/ids"
 )
@@ -71,7 +73,7 @@ func (s *Server) apiCreateSlackApp(r *http.Request, p principal) (any, error) {
 		return nil, httpError{400, "signing_secret is required (Slack app → Basic Information → Signing Secret)"}
 	}
 	if !slackTeamRe.MatchString(req.TeamID) {
-		return nil, httpError{400, "team_id is required: your Slack workspace ID (T…), so requests from any other workspace are refused"}
+		return nil, httpError{400, "team_id is required: your Slack workspace ID (T…, not an Enterprise Grid E… ID), so requests from any other workspace are refused"}
 	}
 	id := ids.NewString()
 	err := s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
@@ -79,8 +81,18 @@ func (s *Server) apiCreateSlackApp(r *http.Request, p principal) (any, error) {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO slack_apps (id, org_id, team_id, signing_secret) VALUES ($1,$2,$3,$4)`, id, p.OrgID, req.TeamID, sealed); err != nil {
+		res, err := tx.Exec(`INSERT INTO slack_apps (id, org_id, team_id, signing_secret)
+			SELECT $1,$2,$3,$4 WHERE NOT EXISTS (SELECT 1 FROM slack_apps WHERE team_id = $3 AND archived_at IS NULL)`,
+			id, p.OrgID, req.TeamID, sealed)
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" { // a concurrent registration won
+			return httpError{409, "this workspace already has an active Slack app; archive it first (POST /v1/slack-apps/{id}/archive)"}
+		}
+		if err != nil {
 			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return httpError{409, "this workspace already has an active Slack app; archive it first (POST /v1/slack-apps/{id}/archive)"}
 		}
 		return tx.Audit(r.Context(), p.actorType(), p.actor(), "slack_app.create", "slack_app", id, map[string]string{"team_id": req.TeamID})
 	})
@@ -95,7 +107,9 @@ func (s *Server) apiCreateSlackApp(r *http.Request, p principal) (any, error) {
 	}, nil
 }
 
-var slackTeamRe = regexp.MustCompile(`^[TE][A-Z0-9]{2,20}$`)
+// Workspace IDs start with T. Requests carry the workspace's ID even on
+// Enterprise Grid, so an organization's E… ID would never match.
+var slackTeamRe = regexp.MustCompile(`^T[A-Z0-9]{2,20}$`)
 
 // apiListSlackApps lists the org's Slack apps (never their secrets), so a
 // stray or leaked one can be found and archived.
@@ -138,6 +152,10 @@ func (s *Server) apiArchiveSlackApp(r *http.Request, p principal) (any, error) {
 	}
 	err = s.DB.WithOrg(r.Context(), p.OrgID, func(tx *db.Tx) error {
 		res, err := tx.Exec(`UPDATE slack_apps SET archived_at = now() WHERE id = $1 AND archived_at IS NULL`, id)
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" { // a concurrent registration won
+			return httpError{409, "this workspace already has an active Slack app; archive it first (POST /v1/slack-apps/{id}/archive)"}
+		}
 		if err != nil {
 			return err
 		}

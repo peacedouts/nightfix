@@ -68,8 +68,15 @@ spec:
             - name: NIGHTFIX_REQUIRED_SIGNERS
               value: {{ join "," . | quote }}
             {{- end }}
+            {{- $mode := .Values.nightfix.allowlist.mode | toString }}
+            {{- if not (has $mode (list "off" "warn" "enforce")) }}
+            {{- fail "nightfix.allowlist.mode must be off, warn or enforce" }}
+            {{- end }}
+            {{- if and (ne $mode "off") (not .Values.nightfix.allowlist.content) }}
+            {{- fail "nightfix.allowlist.content is required when nightfix.allowlist.mode is warn or enforce (the agent refuses to start without it)" }}
+            {{- end }}
             - name: NIGHTFIX_ALLOWLIST_MODE
-              value: {{ .Values.nightfix.allowlist.mode | quote }}
+              value: {{ $mode | quote }}
             {{- if .Values.nightfix.allowlist.content }}
             - name: NIGHTFIX_ALLOWLIST_FILE
               value: /etc/nightfix/allowlist.yaml

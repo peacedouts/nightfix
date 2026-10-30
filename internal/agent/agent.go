@@ -134,15 +134,13 @@ func New(cfg Config) (*Agent, error) {
 	switch cfg.AllowlistMode {
 	case "off", "":
 	case "warn", "enforce":
-		var b []byte
+		// A file, when given, wins over the inline list.
+		var al *allowlist
 		if cfg.AllowlistFile != "" {
-			if b, err = os.ReadFile(cfg.AllowlistFile); err != nil {
-				return nil, fmt.Errorf("allowlist: %w", err)
-			}
+			al, err = loadAllowlist(cfg.AllowlistFile)
 		} else {
-			b = []byte(cfg.AllowlistYAML)
+			al, err = parseAllowlist([]byte(cfg.AllowlistYAML))
 		}
-		al, err := parseAllowlist(b)
 		if err != nil {
 			return nil, err
 		}

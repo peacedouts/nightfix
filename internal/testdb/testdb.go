@@ -17,7 +17,9 @@ import (
 	"github.com/peacedouts/nightfix/internal/ids"
 )
 
-const appPassword = "nfx_app_test"
+// AppPassword is the nfx_app password every test database uses. Migrate sets it
+// server-wide, so a test that migrates by hand must use it too.
+const AppPassword = "nfx_app_test"
 
 // A database per test, all on one server.
 func init() { db.AllowSharedServer = true }
@@ -45,10 +47,10 @@ func New(t testing.TB) *db.DB {
 	})
 
 	adminForDB := withDatabase(t, adminDSN, name, "")
-	if err := db.Migrate(ctx, adminForDB, appPassword); err != nil {
+	if err := db.Migrate(ctx, adminForDB, AppPassword); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	appDSN := withDatabase(t, adminDSN, name, "nfx_app:"+appPassword)
+	appDSN := withDatabase(t, adminDSN, name, "nfx_app:"+AppPassword)
 	pool, err := db.Open(ctx, appDSN)
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +78,7 @@ func withDatabase(t testing.TB, dsn, name, userinfo string) string {
 func AppDSNFor(adminDSN, name string) string {
 	u, _ := url.Parse(adminDSN)
 	u.Path = "/" + name
-	u.User = url.UserPassword("nfx_app", appPassword)
+	u.User = url.UserPassword("nfx_app", AppPassword)
 	return u.String()
 }
 
