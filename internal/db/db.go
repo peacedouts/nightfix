@@ -249,7 +249,16 @@ func Migrate(ctx context.Context, adminDSN, appPassword string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := conn.ExecContext(ctx, "ALTER ROLE nfx_app PASSWORD "+quoteLiteral(v)); err != nil {
+		// The role is server-wide, so migrators of different databases on one
+		// server (parallel tests) can set it at the same moment and get
+		// "tuple concurrently updated": retry, as for the setup statements.
+		for attempt := 0; attempt < 5; attempt++ {
+			if _, err = conn.ExecContext(ctx, "ALTER ROLE nfx_app PASSWORD "+quoteLiteral(v)); err == nil || !strings.Contains(err.Error(), "concurrently") {
+				break
+			}
+			time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
+		}
+		if err != nil {
 			return errors.New("set nfx_app password: " + strings.SplitN(err.Error(), "PASSWORD", 2)[0])
 		}
 	}
