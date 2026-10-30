@@ -1,9 +1,11 @@
 // Deploy config used when Workers Builds runs from the repository root.
 //
 // PRE-LAUNCH: the only public site is the teaser in teaser/public. The full
-// marketing site and docs were removed from main and are kept on the branch
-// `archive/full-site`. To bring them back at launch:
-//   git checkout origin/archive/full-site -- website
+// marketing site and docs were removed from main; they're kept in the
+// private archive repository (peacedouts/nightfix-private, branch
+// `archive/full-site`). To bring them back at launch, copy `website/` from
+// there:
+//   git fetch <archive> archive/full-site && git checkout FETCH_HEAD -- website
 // then restore this config to build it:
 //   "build": { "command": "npm ci && npm run build", "cwd": "website" },
 //   "assets": { "directory": "./website/dist", "not_found_handling": "404-page" }
