@@ -1,4 +1,5 @@
-Contact: mailto:security@nightfix.dev
+Contact: https://github.com/peacedouts/nightfix/security/advisories/new
+Policy: https://github.com/peacedouts/nightfix/blob/main/SECURITY.md
 Expires: 2027-04-20T00:00:00.000Z
 Preferred-Languages: en
 Canonical: https://nightfix.dev/.well-known/security.txt
