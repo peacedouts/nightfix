@@ -2,7 +2,7 @@
 
 By [Zachary Adams](https://github.com/peacedouts)
 
-Opensource incident response for teams on AWS. Alerts become incidents, and runbooks fix the problem before anyone is paged. It all runs in your own AWS account: the control plane, its database and keys, and an agent in your VPC or cluster that runs signed runbooks under an IAM role you scope.
+Opensource incident response for your AWS account. It tries the obvious fix first and only pages you when that fails. Everything runs in your account, including the control plane, its database, and an agent in your VPC that can only do what its IAM role allows.
 
 ## Try it locally
 
@@ -13,7 +13,7 @@ make demo        # the alarm fixes itself; nobody is paged
 make demo-fail   # the fix fails; on-call is paged, then the page resolves
 ```
 
-The demo runs a throwaway Postgres, the control plane, a real agent over mutual TLS, and stubs for ECS, SNS, Slack and PagerDuty, then prints the incident timeline and what Slack and PagerDuty received.
+Each demo spins up a temporary Postgres, the control plane and a real agent, with fake ECS, SNS, Slack and PagerDuty. When it's done, it prints the incident timeline and what Slack and PagerDuty would have seen.
 
 ## How it works
 
@@ -30,8 +30,8 @@ The demo runs a throwaway Postgres, the control plane, a real agent over mutual 
 ```
 
 - **Alerts** from CloudWatch (through SNS, signature-checked) or signed webhooks are deduplicated and grouped into incidents.
-- **Runbooks** are YAML, linted and signed on publish. One that may run before paging holds the page while it works; if the alert clears, nobody is woken. Risky steps wait for approval in Slack.
-- **Agents** connect out over mutual TLS, enroll with their IAM role (no tokens), check every step against the runbook's signature and their own allowlist, and redact secrets from what they send back.
+- **Runbooks** are YAML, linted and signed on publish. If a runbook is allowed to run before paging, Nightfix holds the page while it works. If the alert clears, nobody gets woken up. Risky steps wait for approval in Slack.
+- **Agents** only connect outbound, over mutual TLS. They sign in with their IAM role instead of a token, refuse any step that isn't in the signed runbook or their allowlist, and strip secrets from their output.
 - **Tenancy and audit:** row-level security on every table, credentials sealed with KMS, and a hash-chained audit log.
 
 The full list of what's built, and what isn't yet, is in [docs/capabilities.md](docs/capabilities.md). Design docs are in [docs/design/](docs/design).
@@ -63,16 +63,15 @@ make test        # starts a throwaway Postgres unless NIGHTFIX_TEST_ADMIN_DSN is
 make test-race   # what CI runs: race detector, shuffled order, coverage floor of 80%
 ```
 
-Run them as a non-superuser admin (`CREATEROLE CREATEDB`), as CI does: a superuser bypasses row-level security. CI also runs govulncheck, gitleaks over the full history, Terraform validate, Helm lint, and both demos with a check that their story happened.
+Run them as a non-superuser admin (`CREATEROLE CREATEDB`), as CI does: a superuser bypasses row-level security. CI also runs govulncheck, gitleaks over the full history, Terraform validate, Helm lint, and both demos, checking that each one plays out as expected.
 
 Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## How it's built
 
-Nightfix is designed and driven by one engineer, using AI (Claude) as a pair programmer to build faster. The guardrails are the ones any production system should have:
-- the design is written down in [docs/design](docs/design) before it's built;
-- every change runs through CI: the race detector, shuffled test order, an 80% coverage floor, both end-to-end demos, Terraform and Helm validation, secret scanning over the full history, and a vulnerability check;
-- the security-sensitive parts (signing, enrollment, sign-in, tenancy, the agent's sandboxing and redaction) have had several independent adversarial reviews, with every finding fixed and covered by a regression test.
+- The design is written down in [docs/design](docs/design) before it's built.
+- Every change runs through CI: the race detector, shuffled test order, an 80% coverage floor, both end-to-end demos, Terraform and Helm validation, secret scanning over the full history, and a vulnerability check.
+- The security-sensitive parts (signing, enrollment, sign-in, tenancy, the agent's sandboxing and redaction) have had several independent adversarial reviews, with every finding fixed and covered by a regression test.
 
 ## License
 
