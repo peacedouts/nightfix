@@ -143,7 +143,7 @@
   .otherwise { margin: 40px 0 0 11.5rem; max-width: var(--measure); color: var(--muted); border-left: 2px solid var(--moon); padding-left: 16px; }
 
   /* How it works: a real sequence, so it's numbered. */
-  .steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px; counter-reset: step; }
+  .steps { list-style: none; margin: 40px 0 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px; counter-reset: step; }
   .steps li { counter-increment: step; }
   .steps li::before {
     content: counter(step); display: block; margin-bottom: 14px;
@@ -241,13 +241,13 @@
     <img class="mark rise" src="/favicon.svg" width="36" height="36" alt="">
     <p class="name rise d1">Nightfix</p>
     <h1 class="rise d2">Quieter nights<br><em>are coming.</em></h1>
-    <p class="lede rise d3">Opensource incident response that runs in your own AWS account. When an alert fires, Nightfix runs the fix you'd have run at 3 a.m., and only wakes someone up if it doesn't work.</p>
+    <p class="lede rise d3">Opensource incident response that runs in your own AWS account. It runs the fix you'd run at 3 a.m., and only wakes you up if that doesn't work.</p>
     <div class="actions rise d4">
       <a class="button primary" href="https://github.com/peacedouts/nightfix">
         <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
         View on GitHub
       </a>
-      <a class="button" href="#night">See a night with Nightfix</a>
+      <a class="button" href="#night">See how a night goes</a>
     </div>
   </header>
 
@@ -255,45 +255,44 @@
     <section id="night">
       <div class="wrap">
         <h2>3:07 a.m., and nobody wakes up</h2>
-        <p class="intro">A CloudWatch alarm fires on checkout-api. This is the incident's own timeline, the way Nightfix records it.</p>
+        <p class="intro">Here's what an alert looks like with Nightfix, taken from the incident's timeline.</p>
         <ol class="night">
           <li>
             <time>03:07<small>:12</small></time><span class="dot"></span>
-            <div class="body"><h3>The alarm fires</h3><p>ecs-unhealthy-checkout crosses its threshold, and an incident opens on checkout-api.</p></div>
+            <div class="body"><h3>The alarm fires</h3><p>checkout-api goes unhealthy and an incident opens.</p></div>
           </li>
           <li>
             <time>03:07<small>:12</small></time><span class="dot"></span>
-            <div class="body"><h3>The known fix starts</h3><p>The ecs-service-restart runbook matches the alarm. The page is held for up to two minutes while it runs.</p></div>
+            <div class="body"><h3>The fix starts</h3><p>Nightfix finds the restart runbook and holds the page while it runs.</p></div>
           </li>
           <li>
             <time>03:07<small>:13</small></time><span class="dot"></span>
-            <div class="body"><h3>The agent checks before it acts</h3><p>The agent in your VPC verifies the runbook's signature, then forces a new deployment of the service under its own IAM role.</p></div>
+            <div class="body"><h3>The agent checks first</h3><p>The agent in your account confirms the runbook is signed, then restarts the service.</p></div>
           </li>
           <li>
             <time>03:08<small>:41</small></time><span class="dot"></span>
-            <div class="body"><h3>The service is healthy again</h3><p>The runbook's last step waits until ECS reports the service stable.</p></div>
+            <div class="body"><h3>The service recovers</h3><p>It settles back to healthy.</p></div>
           </li>
           <li>
             <time>03:09<small>:40</small></time><span class="dot"></span>
-            <div class="body"><h3>The alarm clears</h3><p>CloudWatch reports OK, the incident resolves itself, and Slack gets a summary for the morning.</p></div>
+            <div class="body"><h3>The alarm clears</h3><p>The incident closes itself, and there's a summary waiting in Slack in the morning.</p></div>
           </li>
           <li class="end">
             <span></span><span class="dot"></span>
             <p class="nobody"><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Nobody was paged.</p>
           </li>
         </ol>
-        <p class="otherwise">If the fix doesn't work, on-call is paged straight away through PagerDuty, with what was tried. When the alarm clears, the page resolves itself.</p>
+        <p class="otherwise">If the fix doesn't work, your pager goes off right away, with everything Nightfix already tried.</p>
       </div>
     </section>
 
     <section id="how">
       <div class="wrap">
         <h2>How it works</h2>
-        <p class="intro">Three parts, all running in your account.</p>
         <ol class="steps">
-          <li><h3>Alerts come in</h3><p>From CloudWatch through SNS, or from any tool that can send a signed webhook. Repeats of the same problem fold into one incident.</p></li>
-          <li><h3>Runbooks do the known fix</h3><p>Runbooks are YAML you review like code. Every version is signed, and risky steps wait for a teammate to approve them in Slack.</p></li>
-          <li><h3>People get paged when it matters</h3><p>If the fix fails or the alert doesn't clear, Nightfix pages through PagerDuty with what it tried. Critical incidents page straight away.</p></li>
+          <li><h3>Alerts come in</h3><p>From CloudWatch, or anything that can send a webhook. Repeats become one incident.</p></li>
+          <li><h3>Runbooks run the fix</h3><p>Runbooks are files you review like code. Risky steps wait for a teammate's OK in Slack.</p></li>
+          <li><h3>You're paged when it matters</h3><p>If the fix fails, Nightfix pages you through PagerDuty and tells you what it tried.</p></li>
         </ol>
       </div>
     </section>
@@ -301,14 +300,14 @@
     <section id="account">
       <div class="wrap">
         <h2>Everything stays in your account</h2>
-        <p class="intro">Nightfix is built to run code in production safely, so it assumes the worst about everything around it, itself included.</p>
+        <p class="intro">It runs code in production, so it's careful about it.</p>
         <ul class="facts">
-          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Nothing calls home.</strong> The control plane, its database and its keys run in your AWS account.</p></li>
-          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Outbound only.</strong> The agent connects out over mutual TLS. You open no inbound ports.</p></li>
-          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>No tokens to leak.</strong> Agents enroll by proving their IAM role.</p></li>
-          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Signed runbooks only.</strong> You can also limit an agent to the exact runbooks you've approved.</p></li>
-          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Secrets stay put.</strong> They're read from Secrets Manager or SSM at run time and scrubbed from output.</p></li>
-          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Every action is recorded</strong> in a tamper-evident audit log.</p></li>
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Nothing calls home.</strong> It all runs in your AWS account.</p></li>
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Outbound only.</strong> No inbound ports to open.</p></li>
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>No tokens to leak.</strong> Agents sign in with their IAM role.</p></li>
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Signed runbooks only.</strong> You can limit each agent to the ones you've approved.</p></li>
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Secrets stay put.</strong> They're read when needed and scrubbed from output.</p></li>
+          <li><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.2L13 4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p><strong>Everything is on record</strong> in an audit log that can't be quietly edited.</p></li>
         </ul>
       </div>
     </section>
@@ -316,7 +315,7 @@
     <section id="fits">
       <div class="wrap">
         <h2>Fits what you already run</h2>
-        <p class="intro">Bring your own VPC, DNS, database, KMS keys and permissions boundary. Nightfix uses them instead of creating its own.</p>
+        <p class="intro">It can use the network, DNS, database and keys you already have.</p>
         <dl class="fits">
           <dt>Alerts</dt><dd>CloudWatch, signed webhooks</dd>
           <dt>Paging and chat</dt><dd>PagerDuty, Slack</dd>
@@ -331,9 +330,9 @@
         <h2>Where it is today</h2>
         <p class="intro">An early project, built in the open.</p>
         <ol class="status">
-          <li><h3>Now</h3><p>Runs end to end locally against simulated AWS, Slack and PagerDuty, with tests and both demos on every change.</p></li>
-          <li><h3>Next</h3><p>The first run on real AWS, then the v0.1 release.</p></li>
-          <li><h3>Later</h3><p>Native paging and a web UI.</p></li>
+          <li><h3>Now</h3><p>Works end to end on your machine, against stand-ins for AWS, Slack and PagerDuty.</p></li>
+          <li><h3>Next</h3><p>First run on real AWS, then v0.1.</p></li>
+          <li><h3>Later</h3><p>Built-in paging and a web dashboard.</p></li>
         </ol>
       </div>
     </section>
@@ -342,8 +341,8 @@
       <div class="wrap try">
         <div>
           <h2>Try it in a minute</h2>
-          <p>The demo runs the whole loop on your machine: a real agent, a throwaway database, and stand-ins for AWS, Slack and PagerDuty.</p>
-          <p>Needs Go and PostgreSQL. To run it in AWS, start with the <a href="https://github.com/peacedouts/nightfix/blob/main/deploy/README.md">deployment guide</a>.</p>
+          <p>The demo runs the whole thing on your machine. You'll need Go and PostgreSQL.</p>
+          <p>Ready for AWS? Start with the <a href="https://github.com/peacedouts/nightfix/blob/main/deploy/README.md">deployment guide</a>.</p>
         </div>
         <pre><code>git clone https://github.com/peacedouts/nightfix
 cd nightfix
