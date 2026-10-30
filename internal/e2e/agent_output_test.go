@@ -11,7 +11,7 @@ import (
 	"github.com/peacedouts/nightfix/internal/agent"
 )
 
-func v3bShellRunbook(name, env, script string) string {
+func shellRunbook(name, env, script string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `apiVersion: nightfix.dev/v1alpha1
 kind: Runbook
@@ -41,7 +41,7 @@ spec:
 	return b.String()
 }
 
-func (e *env) v3bTokenAgent(env, stateDir, endpoint string, logs *syncBuf) (context.CancelFunc, chan struct{}) {
+func (e *env) tokenAgent(env, stateDir, endpoint string, logs *syncBuf) (context.CancelFunc, chan struct{}) {
 	var enr map[string]string
 	e.call("POST", "/v1/enrollment-rules", map[string]any{"method": "token", "labels": map[string]string{"env": env}}, &enr)
 	ag, err := agent.New(agent.Config{Endpoint: endpoint, CAPEM: e.caPEM, EnrollMethod: "token",
@@ -55,13 +55,13 @@ func (e *env) v3bTokenAgent(env, stateDir, endpoint string, logs *syncBuf) (cont
 	return cancel, done
 }
 
-func (e *env) v3bStart(runbook string) string {
+func (e *env) startRunbook(runbook string) string {
 	out := e.expect("starter", e.key, "POST", "/v1/runs", map[string]any{"runbook": runbook, "params": map[string]string{}}, 200, "run_")
 	id := out[strings.Index(out, "run_"):]
 	return id[:strings.IndexAny(id, `"`)]
 }
 
-func (e *env) v3bAttemptState(runID string) string {
+func (e *env) attemptState(runID string) string {
 	atts, _ := e.run(runID)["attempts"].([]any)
 	if len(atts) == 0 {
 		return ""
@@ -76,14 +76,14 @@ func (e *env) v3bAttemptState(runID string) string {
 // that for outputRetryFor (2 min) before the result is sent, so the run
 // sits for 2 minutes (and on shutdown, the 40s grace expires and the result
 // is never sent).
-func TestV3BBinaryOutputDelaysResult(t *testing.T) {
+func TestBinaryOutputDelaysResult(t *testing.T) {
 	e := setup(t, runbookYAML(t, "2m"))
 	var pub map[string]any
-	e.callRaw("PUT", "/v1/runbooks/v3b-bin", []byte(v3bShellRunbook("v3b-bin", "bin", "head -c 1000000 /dev/zero\necho done")), &pub)
+	e.callRaw("PUT", "/v1/runbooks/out-bin", []byte(shellRunbook("out-bin", "bin", "head -c 1000000 /dev/zero\necho done")), &pub)
 	logs := &syncBuf{}
-	e.v3bTokenAgent("bin", t.TempDir(), e.gwURL, logs)
+	e.tokenAgent("bin", t.TempDir(), e.gwURL, logs)
 	time.Sleep(3 * time.Second)
-	runID := e.v3bStart("v3b-bin")
+	runID := e.startRunbook("out-bin")
 	start := time.Now()
 	var status any
 	for time.Since(start) < 25*time.Second {
@@ -95,7 +95,7 @@ func TestV3BBinaryOutputDelaysResult(t *testing.T) {
 	}
 	l := logs.String()
 	t.Logf("after %v: run %v, attempt %s; output upload failures in agent log: %d",
-		time.Since(start).Round(time.Second), status, e.v3bAttemptState(runID), strings.Count(l, "output upload failed"))
+		time.Since(start).Round(time.Second), status, e.attemptState(runID), strings.Count(l, "output upload failed"))
 	if i := strings.Index(l, "output upload failed"); i >= 0 {
 		t.Logf("first failure: %.300s", l[i:])
 	}
@@ -110,17 +110,17 @@ func TestV3BBinaryOutputDelaysResult(t *testing.T) {
 // through within the shutdown grace) and restarted with the same identity.
 // Its Hello lists nothing in flight, yet the control plane keeps the attempt
 // "running" until the running lease (now 5 minutes, was 30s) expires.
-func TestV3BRestartedAgentDoesNotFreeItsAttempt(t *testing.T) {
+func TestRestartedAgentDoesNotFreeItsAttempt(t *testing.T) {
 	e := setup(t, runbookYAML(t, "2m"))
 	var pub map[string]any
-	e.callRaw("PUT", "/v1/runbooks/v3b-long", []byte(v3bShellRunbook("v3b-long", "restart", "sleep 300")), &pub)
+	e.callRaw("PUT", "/v1/runbooks/out-long", []byte(shellRunbook("out-long", "restart", "sleep 300")), &pub)
 	cut := newCutter(t, strings.TrimPrefix(e.gwURL, "https://"))
 	state := t.TempDir()
 	logs := &syncBuf{}
-	cancel, done := e.v3bTokenAgent("restart", state, "https://"+cut.ln.Addr().String(), logs)
+	cancel, done := e.tokenAgent("restart", state, "https://"+cut.ln.Addr().String(), logs)
 	time.Sleep(3 * time.Second)
-	runID := e.v3bStart("v3b-long")
-	e.waitFor("step running", 20*time.Second, func() bool { return e.v3bAttemptState(runID) == "running" })
+	runID := e.startRunbook("out-long")
+	e.waitFor("step running", 20*time.Second, func() bool { return e.attemptState(runID) == "running" })
 
 	cut.setDown(true)
 	cancel()
@@ -139,7 +139,7 @@ func TestV3BRestartedAgentDoesNotFreeItsAttempt(t *testing.T) {
 	}
 	go ag.Run(e.ctx)
 	time.Sleep(30 * time.Second)
-	st := e.v3bAttemptState(runID)
+	st := e.attemptState(runID)
 	t.Logf("%v after the agent stopped and 30s after it restarted with nothing in flight: attempt %s, run %v",
 		time.Since(stoppedAt).Round(time.Second), st, e.run(runID)["status"])
 	if st == "running" {

@@ -19,7 +19,7 @@ COPY --from=build /out/nightfix /usr/local/bin/nightfix
 ENTRYPOINT ["nightfix"]
 CMD ["serve"]
 
-# The agent image is "batteries-included" for shell steps (decision #24):
+# The agent image is "batteries-included" for shell steps:
 # aws CLI, psql, mysql, redis-cli, jq, curl, Python 3.
 FROM debian:bookworm-slim AS agent
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -1,8 +1,8 @@
 // Package auth0 verifies sign-in tokens (RS256 JWTs) from Auth0 or any
 // OpenID Connect provider (Okta, Google, Entra ID, Keycloak…) against the
 // issuer's JWKS. The identity provider handles authentication only;
-// authorization is evaluated in the control plane (decision: plop.md,
-// Identity and RBAC). The package keeps its first provider's name.
+// authorization is evaluated in the control plane (see docs/design/data-model.md §5,
+// RBAC). The package keeps its first provider's name.
 package auth0
 
 import (

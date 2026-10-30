@@ -2,7 +2,7 @@ package e2e
 
 import "testing"
 
-// Regression tests for approvals found in QA round 2.
+// Regression tests for approval-gate edge cases.
 
 // A run parked at an approval gate still holds its concurrency slot;
 // otherwise approving two parked runs would run both at once.

@@ -1,6 +1,6 @@
 package e2e_test
 
-// Regression tests for alert ingest and incident handling found in QA review:
+// Regression tests for alert ingest and incident handling:
 // events that used to stall processing for every org, a reopen that collided
 // with a newer incident, out-of-order PagerDuty delivery, and alerts that went
 // quiet after a human resolve.

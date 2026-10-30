@@ -121,7 +121,7 @@ spec:
 // reconnect, and gets 200 OK. But the 30s lease expired meanwhile, the
 // attempt was marked lost, and Result treats a result for a lost attempt as a
 // duplicate: the real outcome is discarded and the run waits on a human.
-func TestReviewResultHeldThroughOutageIsHonoured(t *testing.T) {
+func TestResultHeldThroughOutageIsHonoured(t *testing.T) {
 	e := setup(t, runbookYAML(t, "2m"))
 	var pub map[string]any
 	e.callRaw("PUT", "/v1/runbooks/outage-shell", []byte(outageRunbook), &pub)

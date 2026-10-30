@@ -15,7 +15,7 @@ import (
 // transaction updates the org; the runbook's `from:` parameters then resolve
 // against an already-expired budget and auto-remediation is skipped, although
 // the CEL itself took microseconds.
-func TestVerify4CELBudgetChargedForDatabaseWaits(t *testing.T) {
+func TestCELBudgetChargedForDatabaseWaits(t *testing.T) {
 	g := setupGuard(t, nil, autoRunbook{Name: "orders-fix", BeforePaging: true})
 
 	locked := make(chan struct{})
@@ -56,7 +56,7 @@ func TestVerify4CELBudgetChargedForDatabaseWaits(t *testing.T) {
 // Same root cause, advance(): a run that did start fails outright because its
 // first step's trivial `when` is evaluated after the budget ran out waiting
 // on the org row lock.
-func TestVerify4CELBudgetFailsStartedRunAfterDatabaseWait(t *testing.T) {
+func TestCELBudgetFailsStartedRunAfterDatabaseWait(t *testing.T) {
 	g := setupGuard(t, nil)
 	rb := `apiVersion: nightfix.dev/v1alpha1
 kind: Runbook

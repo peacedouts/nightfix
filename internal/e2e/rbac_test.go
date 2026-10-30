@@ -7,7 +7,7 @@ import (
 	"github.com/peacedouts/nightfix/internal/db"
 )
 
-// Regression tests for RBAC and publishing found in QA review.
+// Regression tests for RBAC and publishing.
 func TestRBACHardening(t *testing.T) {
 	e := setup(t, runbookYAML(t, "2m"))
 	e.call("PUT", "/v1/org/auth0", map[string]string{"auth0_org_id": "org_acme"}, nil)

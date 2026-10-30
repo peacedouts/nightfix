@@ -1,4 +1,4 @@
-# Optional pieces a client account may want: an existing cluster, VPC
+# Optional pieces your account may want: an existing cluster, VPC
 # endpoints, WAF, and log export.
 
 locals {

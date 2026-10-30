@@ -1,7 +1,6 @@
 package controlplane
 
-// Regression tests for runs, dispatch and agent certificates found in QA
-// review. runHarness drives the server directly with a fake agent identity.
+// Regression tests for runs, dispatch and agent certificates. runHarness drives the server directly with a fake agent identity.
 
 import (
 	"bytes"

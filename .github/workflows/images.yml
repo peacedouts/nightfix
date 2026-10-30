@@ -9,7 +9,7 @@ name: images
 #   control plane: ghcr.io/<owner>/nightfix-controlplane:sha-<commit> (arm64),
 #                  the release self-hosted deployments roll out with
 #                  deploy/scripts/rollout.sh (make the package public too); and
-#                  ECR :<commit> for Nightfix's own deployment, once the
+#                  ECR :<commit> for the reference deployment, once the
 #                  AWS_PUSH_ROLE_ARN and ECR_REPOSITORY repository variables
 #                  are set (outputs of deploy/terraform/control-plane).
 #

@@ -1,4 +1,4 @@
-// Package controlplane is the hosted side of Nightfix: alert ingest, the
+// Package controlplane is the server side of Nightfix: alert ingest, the
 // incident engine, runbook runs, agent dispatch, notifications and the REST
 // API. It runs as one binary (a modular monolith) with each role on its own
 // listener.

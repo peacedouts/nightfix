@@ -29,7 +29,7 @@ The detail behind the root README: what each part of Nightfix does today, and wh
 - **Keys**: the credential-sealing key is a KMS-wrapped data key; the agent CA and the per-org runbook signing keys live in Postgres, sealed by it, rather than in AWS Private CA or KMS. Signing-key rotation chaining isn't built, so pin the key in the agent (`required_signers`).
 - **RBAC on reads**: scopes restrict writes (runs, publishing, incident actions); list endpoints aren't filtered by scope, so any member can view every incident and runbook. SCIM and custom roles come later.
 - **Sign-in isn't cached**: each request with a user token re-syncs the user and their IdP teams.
-- **Critical-hold grants** (decision #29) aren't built, so critical incidents always page in parallel, the documented default.
+- **Critical-hold grants** aren't built, so critical incidents always page in parallel, the documented default.
 - `when:` is evaluated on the control plane, so it can't reference `target` yet (the linter rejects it).
 - **API keys** don't expire and have one role, org-wide, until revoked (a role binding can add scoped roles to a key).
 - **Notifications**: a page for a resolved incident stops after 8 failed attempts or 10 minutes; no 4xx is treated as permanent, so a page with a bad routing key retries for up to 24h. The notification client ignores `HTTPS_PROXY` (the address check must see the real destination).

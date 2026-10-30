@@ -18,7 +18,7 @@ import (
 // push real events out of GET /v1/audit-events (last 200), and make every
 // later ?verify=true walk longer. The text stored includes attacker input
 // (the region string, via verifyIAM's error).
-func TestV3BUnauthenticatedCallerFloodsOrgAudit(t *testing.T) {
+func TestUnauthenticatedCallerFloodsOrgAudit(t *testing.T) {
 	e := setup(t, runbookYAML(t, "2m"))
 	count := func() (n int) {
 		if err := e.db.WithOrg(e.ctx, e.rawOrg, func(tx *db.Tx) error {
@@ -58,7 +58,7 @@ func TestV3BUnauthenticatedCallerFloodsOrgAudit(t *testing.T) {
 
 // The 16 KiB audit data cap replaces oversized data with a stub before
 // nfx_audit hashes it, so the chain must still verify.
-func TestV3BAuditCapKeepsChainVerifiable(t *testing.T) {
+func TestAuditCapKeepsChainVerifiable(t *testing.T) {
 	e := setup(t, runbookYAML(t, "2m"))
 	if err := e.db.WithOrg(e.ctx, e.rawOrg, func(tx *db.Tx) error {
 		if err := tx.Audit(e.ctx, "user", "u", "test.big", "x", "y", map[string]string{"blob": strings.Repeat("é\u0000<", 9000)}); err != nil {

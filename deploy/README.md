@@ -6,20 +6,20 @@ Nightfix is built to be dropped into an AWS account: the control plane and the a
 |---|---|
 | `terraform/modules/nightfix-control-plane` | The control plane: VPC, Postgres, KMS, ECS Fargate, load balancers, certificate, DNS, alarms. AWS provider only |
 | `terraform/modules/nightfix-agent` | The agent: an IAM role, two Fargate tasks, an outbound-only security group |
-| `terraform/examples/self-hosted` | **Start here for a client deployment:** the control plane in the client's own account (Route 53 or any DNS) |
+| `terraform/examples/self-hosted` | **Start here:** the control plane in your own AWS account (Route 53 or any DNS) |
 | `terraform/examples/agent` | An agent, next to the control plane or in another account |
-| `terraform/control-plane` | Nightfix's own deployment: the module, plus Cloudflare DNS and GitHub OIDC rollouts |
+| `terraform/control-plane` | A reference deployment: the module, plus Cloudflare DNS and rollouts from this repository's GitHub workflows |
 | `terraform/examples/demo-target` | A throwaway ECS service that breaks on cue, for demos and the smoke test |
 
-## Self-hosted: a client's own account
+## Self-hosted: your own AWS account
 
-The usual engagement: the whole thing runs in the client's account, under their IAM, keys and logs, and nothing calls back to Nightfix.
+The whole thing runs in your account, under your IAM, keys and logs, and nothing calls back to anyone else.
 
-1. Copy `terraform/examples/self-hosted` into the client's infrastructure repository and pin the module `source` to a commit of this repository. Set `domain`, and `route53_zone_id` if the zone is in Route 53 (otherwise create the records from the `dns_records` and `acm_validation_records` outputs; `apply` waits at certificate validation until they resolve). Configure a state backend in their account.
+1. Copy `terraform/examples/self-hosted` into your infrastructure repository and pin the module `source` to a commit of this repository. Set `domain`, and `route53_zone_id` if the zone is in Route 53 (otherwise create the records from the `dns_records` and `acm_validation_records` outputs; `apply` waits at certificate validation until they resolve). Configure a state backend in your account.
 2. `terraform apply`. The service starts with no image; that's expected.
 3. Roll out a signed release with the image and commit from its release notes: `NIGHTFIX_TF_DIR=<their root> deploy/scripts/rollout.sh ghcr.io/peacedouts/nightfix-controlplane@sha256:… <commit>`. It checks the Sigstore signature names this repository's `images.yml` on `main` at that commit, copies the image unchanged into the client's ECR (so task replacements never depend on GHCR), runs migrations, and rolls the service, failing if ECS rolls back. It needs the AWS CLI, `jq`, `cosign`, and `crane` or `skopeo`. Upgrades are the same command with a newer digest.
 4. `NIGHTFIX_TF_DIR=… deploy/scripts/create-org.sh "Acme" acme`, then install the agent (below) pointed at the `agent_endpoint` output.
-5. Subscribe the client's pager to the `alarm_topic_arn` output (or pass their existing topic as `alarm_topic_arn`).
+5. Subscribe your pager to the `alarm_topic_arn` output (or pass your existing topic as `alarm_topic_arn`).
 
 **Bring your own.** Each of these replaces something the module would otherwise create:
 
@@ -41,7 +41,7 @@ The usual engagement: the whole thing runs in the client's account, under their 
 | `log_subscription` | Logs only in CloudWatch: a subscription filter to their SIEM's Kinesis stream, Firehose or Lambda |
 | `oidc` / `auth0_domain` | API keys only: sign-in through their identity provider (below) |
 
-**Sign-in with the client's identity provider.** `oidc` takes any OpenID Connect provider. Every user of that issuer joins the one org named by `org_id`, so create the org first, then apply again with `oidc` set and roll out. Two settings are required:
+**Sign-in with your identity provider.** `oidc` takes any OpenID Connect provider. Every user of that issuer joins the one org named by `org_id`, so create the org first, then apply again with `oidc` set and roll out. Two settings are required:
 - **`client_ids`**: Nightfix's application in the IdP. Tokens issued to any other application are refused, because every application on an authorization server can get tokens with the same audience.
 - **Who may sign in**, with at least one of `allowed_groups` (any one), `email_domains`, or `required_claims` (all must match). Without one, anyone the IdP lets sign up would become a member. Also assign the app only to the people who should use it.
 
@@ -59,16 +59,16 @@ Members start as viewers until an owner grants roles, either by email or through
 
 Not yet pluggable: the control plane runs on ECS Fargate.
 
-**Access during an engagement.** Use a time-boxed role in the client's account, and at handover:
-- rotate the org's owner key (`POST /v1/api-keys` with the client, then revoke the old one);
+**If someone else sets it up for you** (a contractor, another team), give them a time-boxed role, and when they're done:
+- rotate the org's owner key (`POST /v1/api-keys`, then revoke the old one);
 - revoke every key created during setup;
 - remove the role.
 
-Anyone who can roll out (register task definitions and pass the task roles) can run any code as the control plane, including reading the database admin secret. Keep that ability to the client's deployers once you've handed over.
+Anyone who can roll out (register task definitions and pass the task roles) can run any code as the control plane, including reading the database admin secret. Keep that ability to your own deployers.
 
 The module layout is new as of October 2026. Nothing had been applied before, so there are no `moved` blocks: an older state of `terraform/control-plane` would plan to replace everything.
 
-The rest of this document describes Nightfix's own deployment (`terraform/control-plane`); the layout, secrets and operations are the same for a self-hosted one, with `rollout.sh` in place of the deploy workflow.
+The rest of this document walks through the reference deployment (`terraform/control-plane`), which rolls out from this repository's GitHub workflows; the layout, secrets and operations are the same for yours, with `rollout.sh` in place of the deploy workflow.
 
 ## How the control plane is laid out
 
@@ -188,7 +188,7 @@ If an org loses its owner key, or one leaks and nobody can rotate it through the
 
 ### 6. Make the agent image public
 
-Under GitHub → **Packages** → `nightfix-agent` → **Package settings**, set visibility to **Public** so customers can pull it. The repository itself stays private.
+Under GitHub → **Packages** → `nightfix-agent` → **Package settings**, set visibility to **Public** so anyone can pull it.
 
 Every push to `main` publishes `:sha-<commit>` and nothing else: no `:latest` and no `:main`. The agent runs under the customer's IAM role and decides what to execute, so anything that can change would let a new build reach every customer on their next restart. GHCR tags, `sha-` tags included, can be re-pushed by anyone with write access to the package, so the agent module accepts only a digest. Use the tag to find the digest, then check its signature with cosign v3 or later. Images are signed with cosign v3, which stores signatures as OCI 1.1 referrers that older cosign releases don't look for:
 
@@ -235,7 +235,7 @@ module "nightfix_agent" {
 }
 ```
 
-`deploy/terraform/examples/agent` is a complete example. The repository is private until launch, so customers can't fetch the module from it yet: hand them a copy, or publish the module (a public repo or registry) first. Always pin `?ref=` to a commit, so a later change to the module can't change their IAM.
+`deploy/terraform/examples/agent` is a complete example. Always pin `?ref=` to a commit (or a release tag), so a later change to the module can't change your IAM.
 
 **Publishing a runbook runs code.** A published runbook runs on every agent whose labels match its scope, under that agent's IAM role. Anyone who can publish one (an Admin, or a Responder whose scope covers the agent's labels) can therefore run code in that account, and with shell steps, any command. Three controls on the agent side limit that, and production agents should use all three:
 - `allowlist_mode = "enforce"` with `allowlist_yaml`: the agent runs only the runbooks listed, pinned by digest. A new runbook, or a changed one, needs a change to the agent's configuration, which is the customer's own change process.
@@ -391,7 +391,7 @@ CI validates the Terraform against the real providers and builds both images, bu
 - **One person, two Auth0 accounts.** Approvals count distinct users. Someone with two accounts in the org (say, two logins with the same verified email) that both hold a qualifying binding counts twice toward `count > 1` and can approve their own run. Keep one account per person in the IdP; dedupe by verified email if that ever isn't enforceable.
 - **A compromised control plane decides when steps run.** Pinned signers stop it running new code, but it can dispatch any step of a signed runbook directly (skipping `when:` and approval gates) with parameters that pass their patterns. See agent-protocol.md §3.3.
 - **Leaving the identity provider doesn't remove a member.** Someone removed from the IdP (or from `allowed_groups`) can't sign in once their last token expires (at most the token lifetime, typically an hour), but their user and role bindings stay. They still appear in `GET /v1/members`, and an owner binding still counts toward the last-owner check. Offboarding is: remove them in the IdP, then `DELETE /v1/role-bindings/{id}` for each of theirs (`GET /v1/role-bindings` lists them). SCIM, or deactivating users the IdP no longer knows, is a candidate feature.
-- **API keys don't expire,** and an org's first owner key is shown to whoever runs `create-org.sh` (during an engagement, the consultant). Rotate it at handover (above). Expiry dates on keys are a candidate feature.
+- **API keys don't expire,** and an org's first owner key is shown to whoever runs `create-org.sh`. Rotate it if someone else set things up (above). Expiry dates on keys are a candidate feature.
 - **The API and ingest share one load balancer and one allow-list** (`ingest_ingress_cidrs`), because SNS and Slack must reach them from their own address ranges. Limiting the API to a VPN means moving Slack's callbacks to the ingest host first.
 - **Build tooling images** (`tonistiigi/binfmt` for the agent's QEMU, `moby/buildkit`) are pulled by tag in the jobs that sign. Pin them by digest along with the base images (see "Supply-chain items").
 

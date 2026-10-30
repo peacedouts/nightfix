@@ -18,7 +18,7 @@ import (
 	"github.com/peacedouts/nightfix/internal/ids"
 )
 
-// IAM enrollment (agent-protocol.md §3.1, decision #21). The agent proves its
+// IAM enrollment (docs/design/agent-protocol.md §3.1). The agent proves its
 // AWS identity with a SigV4-signed sts:GetCallerIdentity request it builds but
 // doesn't send — the same pattern as Vault's AWS IAM auth method. There is no
 // long-lived secret to leak, and nothing needs persistent disk.

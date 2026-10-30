@@ -19,7 +19,7 @@ var (
 
 // False positives: ordinary output (this repo's Go, docs and SQL, ~MBs, plus
 // typical base64/hex-heavy output) against many random 7-64 byte secrets.
-func TestVerify4FalsePositives(t *testing.T) {
+func TestFalsePositives(t *testing.T) {
 	var corpus strings.Builder
 	files, _ := filepathGlob("../../internal/*/*.go")
 	more, _ := filepathGlob("../../docs/design/*.md")
@@ -60,7 +60,7 @@ func TestVerify4FalsePositives(t *testing.T) {
 // Streaming cost with a large secret (a PEM key, a service-account JSON):
 // every Write copies and keeps the held-back tail (max-1 bytes), and max is
 // now ~3x the longest base64 needle.
-func TestVerify4StreamCostLargeSecret(t *testing.T) {
+func TestStreamCostLargeSecret(t *testing.T) {
 	for _, size := range []int{256, 3243, 16 << 10} {
 		raw := make([]byte, size)
 		rand.Read(raw)

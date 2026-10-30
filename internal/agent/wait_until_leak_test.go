@@ -1,12 +1,10 @@
 package agent
 
-// Security review: a wait step's `until` is evaluated against the check's
-// response, and an evaluation error is streamed as a log line through the
-// redactor built from the step's *declared* secrets only. Secret material in
-// the response (GetSecretValue, SSM SecureString, KMS Decrypt) is added to
-// the redactor only after the wait returns, so a CEL error that quotes a
-// value ("no such key: <value>", a regexp error quoting the pattern) goes to
-// the control plane in clear.
+// A wait step's `until` is evaluated against the check's response, and an
+// evaluation error is streamed as a log line. Secret material in the response
+// (GetSecretValue, SSM SecureString, KMS Decrypt) must be redacted from that
+// line too, not only the step's declared secrets: a CEL error can quote a
+// value ("no such key: <value>", a regexp error quoting the pattern).
 
 import (
 	"context"
@@ -16,7 +14,7 @@ import (
 	"github.com/peacedouts/nightfix/internal/runbook"
 )
 
-func TestSecWaitUntilErrorDoesNotLeakSecretMaterial(t *testing.T) {
+func TestWaitUntilErrorDoesNotLeakSecretMaterial(t *testing.T) {
 	const secret = "db-master-password-7f3a91"
 	calls := 0
 	h := newVHarness(t, awsFunc(func(context.Context, string, string, map[string]any) (map[string]any, error) {

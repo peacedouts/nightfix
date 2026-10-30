@@ -73,7 +73,7 @@ jobs:
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
   demo:
-    # The demos are what design partners see; make sure both still tell
+    # The demos are the first thing people run; make sure both still tell
     # the story they claim (DEMO_CHECK fails the job if not).
     runs-on: ubuntu-24.04
     env:

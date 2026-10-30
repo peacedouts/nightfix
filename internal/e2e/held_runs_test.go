@@ -1,6 +1,7 @@
 package e2e
 
-// Independent review (round 5): failing tests for bugs found in review.
+// Held auto-remediations: approvals, immediate failures, freezes and flap
+// guards around a page that's being held.
 
 import (
 	"fmt"
@@ -24,7 +25,7 @@ const approveFirst = `    - id: approve
 // is marked remediating, so openGate's "page if this run holds the page"
 // check sees a triggered incident and doesn't page; decideRemediation then
 // sets remediating and holds the page until max_hold expires.
-func TestReviewHeldRunWhoseFirstStepIsAnApprovalPagesAtOnce(t *testing.T) {
+func TestHeldRunWhoseFirstStepIsAnApprovalPagesAtOnce(t *testing.T) {
 	rb := held("orders-gated")
 	rb.Steps = approveFirst
 	g := setupGuard(t, map[string]any{"max_hold": "30m"}, rb)
@@ -65,7 +66,7 @@ const whenErrors = `    - id: restart
 // time when the hold expires, and if its alert clears meanwhile it never
 // resolves: checkAlertsCleared ignores a remediating incident whose run
 // failed.
-func TestReviewHeldRunThatFailsImmediatelyLeavesIncidentConsistent(t *testing.T) {
+func TestHeldRunThatFailsImmediatelyLeavesIncidentConsistent(t *testing.T) {
 	rb := held("orders-when")
 	rb.Steps = whenErrors
 	g := setupGuard(t, map[string]any{"max_hold": "30m"}, rb)
@@ -93,7 +94,7 @@ func TestReviewHeldRunThatFailsImmediatelyLeavesIncidentConsistent(t *testing.T)
 // without a lock (apiStartRun takes FOR SHARE), so an auto run that starts
 // while a freeze commits isn't seen by the freeze's cancel sweep: the org
 // is frozen with a live run that executes as soon as someone unfreezes.
-func TestReviewFreezeRacingAnAutoRunLeavesNoLiveRun(t *testing.T) {
+func TestFreezeRacingAnAutoRunLeavesNoLiveRun(t *testing.T) {
 	rb := held("orders-restart")
 	g := setupGuard(t, nil, rb)
 
@@ -150,7 +151,7 @@ func TestReviewFreezeRacingAnAutoRunLeavesNoLiveRun(t *testing.T) {
 // An auto runbook without beforePaging never becomes the incident's
 // remediation_run_id, so checkAlertsCleared never marks it verified and the
 // flap guard never counts it: it restarts a flapping service forever.
-func TestReviewFlapGuardCountsParallelAutoFixes(t *testing.T) {
+func TestFlapGuardCountsParallelAutoFixes(t *testing.T) {
 	g := setupGuard(t, map[string]any{"reopen_window": "1s"}, autoRunbook{Name: "orders-restart"})
 	for n := 1; n <= 3; n++ {
 		g.fire("flappy", "high", ordersSvc)
@@ -189,7 +190,7 @@ const failsFast = quickFix + `    - id: wait-stable
 // held remediation (nothing paged yet) owns the incident, but when the run
 // then fails, page() sends a PagerDuty trigger and nothing acknowledges it:
 // PagerDuty escalates to people while the incident is acknowledged here.
-func TestReviewPageAfterAcknowledgeIsAcknowledgedUpstream(t *testing.T) {
+func TestPageAfterAcknowledgeIsAcknowledgedUpstream(t *testing.T) {
 	rb := held("orders-restart")
 	rb.Steps = failsFast
 	g := setupGuard(t, nil, rb)

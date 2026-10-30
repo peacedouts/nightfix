@@ -14,7 +14,7 @@ import (
 // note steps whose `when` takes ~130ms and is false holds the instance's
 // single alert loop for ~13s per alert event (and the run then succeeds at
 // once, so concurrency doesn't stop the next event).
-func TestV3BStepWhenEscapesPerEventCELBudget(t *testing.T) {
+func TestStepWhenEscapesPerEventCELBudget(t *testing.T) {
 	l := "[" + strings.TrimSuffix(strings.Repeat("1,", 40), ",") + "]"
 	slowFalse := fmt.Sprintf("!%s.all(a, %s.all(b, %s.all(c, a + b + c > 0)))", l, l, l)
 	var steps strings.Builder

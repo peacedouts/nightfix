@@ -41,7 +41,7 @@ func partitionShape(t *testing.T, c *sql.DB, rel string) map[string]string {
 	return out
 }
 
-func TestV3BAttachedPartitionEquivalentToPartitionOf(t *testing.T) {
+func TestAttachedPartitionEquivalentToPartitionOf(t *testing.T) {
 	pool := testdb.New(t)
 	ctx := context.Background()
 	admin := adminConn(t, pool)
@@ -75,7 +75,7 @@ func TestV3BAttachedPartitionEquivalentToPartitionOf(t *testing.T) {
 // an open ingest transaction (inserting into alert_events) or on a claim
 // (UPDATE ... processed_at), and that nfx_drop_expired_partitions drops an
 // attached partition.
-func TestV3BEnsurePartitionsDoesNotWaitOnIngest(t *testing.T) {
+func TestEnsurePartitionsDoesNotWaitOnIngest(t *testing.T) {
 	pool := testdb.New(t)
 	ctx := context.Background()
 	org := testdb.CreateOrg(t, pool, "acme")

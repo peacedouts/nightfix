@@ -1,6 +1,7 @@
 package e2e_test
 
-// Independent review (round 5): per-event lookups that scan whole indexes.
+// Per-event lookups use their indexes instead of scanning them, so
+// processing time doesn't grow with table size.
 
 import (
 	"context"
@@ -54,7 +55,7 @@ func (x *ingestHarness) buffers(query string, args ...any) int {
 // with id at all. The cost of processing one event therefore grows with
 // every alert and every retained event in the database (all orgs), and
 // events are processed one at a time per org.
-func TestReviewPerEventLookupsGrowWithTableSize(t *testing.T) {
+func TestPerEventLookupsGrowWithTableSize(t *testing.T) {
 	x := setupIngest(t, nil)
 	ctx := context.Background()
 	var integ, svc string

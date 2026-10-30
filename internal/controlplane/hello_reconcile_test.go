@@ -22,7 +22,7 @@ import (
 // soon as the gateway is back, listing nothing in flight. loseUnlisted then
 // marks the attempt lost before the "not started" result arrives, and that
 // result is only noted as late.
-func TestVerify4HelloLosesAttemptWhoseAckResponseWasLost(t *testing.T) {
+func TestHelloLosesAttemptWhoseAckResponseWasLost(t *testing.T) {
 	e := setupRunHarness(t)
 	ctx := context.Background()
 	inc := e.dsIncident()
@@ -59,7 +59,7 @@ func TestVerify4HelloLosesAttemptWhoseAckResponseWasLost(t *testing.T) {
 // can't poll until a hello succeeds, so it is out of service, for all its
 // work, indefinitely (the lease worker hits the same error and only backs
 // off). The lease worker isolates such a row with a savepoint; Hello doesn't.
-func TestVerify4HelloFailsWhenLosingAnAttemptFails(t *testing.T) {
+func TestHelloFailsWhenLosingAnAttemptFails(t *testing.T) {
 	e := setupRunHarness(t)
 	ctx := context.Background()
 	id := e.dsStart(dsRB{steps: dsShell}, "")

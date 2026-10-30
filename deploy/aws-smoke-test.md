@@ -5,7 +5,7 @@ A checklist for the first time Nightfix runs on AWS. It stands up the control pl
 - **Auto-fixed:** the alarm fires, the restart fixes it, and nobody is paged.
 - **Paged:** the restart doesn't help, so on-call is paged. When the alarm clears, the page resolves.
 
-Then it tears everything down. Plan on a few hours of wall-clock time, mostly waiting on RDS and DNS. It costs tens of dollars if you tear down the same day.
+It uses the reference deployment (`terraform/control-plane`, with DNS in Cloudflare) on `nightfix.dev`; substitute your own domain. Then it tears everything down. Plan on a few hours of wall-clock time, mostly waiting on RDS and DNS. It costs tens of dollars if you tear down the same day.
 
 Each step says what you should see. If you see something else, stop and check **If something goes wrong** at the end.
 
@@ -15,7 +15,7 @@ Commands run from the repository root unless a step says otherwise. Terraform co
 
 You need:
 - [ ] A **sandbox AWS account**, separate from what will become production. Turn on billing alerts in it.
-- [ ] AWS CLI v2, Terraform ≥ 1.11, `jq`, `curl` and `cosign` on your machine. Your AWS credentials must be able to create VPCs, RDS, ECS, IAM roles, KMS keys and SNS topics.
+- [ ] AWS CLI v2, Terraform ≥ 1.12, `jq`, `curl` and `cosign` on your machine. Your AWS credentials must be able to create VPCs, RDS, ECS, IAM roles, KMS keys and SNS topics.
 - [ ] A **Cloudflare API token** with Zone → DNS → Edit and Zone → Zone → Read on `nightfix.dev` only.
 - [ ] A **Slack incoming webhook** (`https://hooks.slack.com/services/…`) for a test channel.
 - [ ] A **PagerDuty** account (a free developer account works) with a service using the **Events API v2** integration, so you have its routing key.

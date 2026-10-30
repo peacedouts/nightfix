@@ -818,7 +818,7 @@ func TestNotifyClaimScalesWithBlockedBacklog(t *testing.T) {
 	}
 }
 
-// From the independent review of the outbox. A page delivered just as
+// A page delivered just as
 // shutdown begins is recorded (not left leased, to be sent again).
 func TestNotifySuccessAtShutdownIsRecorded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

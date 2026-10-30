@@ -67,6 +67,13 @@ Run them as a non-superuser admin (`CREATEROLE CREATEDB`), as CI does: a superus
 
 Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
+## How it's built
+
+Nightfix is designed and driven by one engineer, using AI (Claude) as a pair programmer to build faster. The guardrails are the ones any production system should have:
+- the design is written down in [docs/design](docs/design) before it's built;
+- every change runs through CI: the race detector, shuffled test order, an 80% coverage floor, both end-to-end demos, Terraform and Helm validation, secret scanning over the full history, and a vulnerability check;
+- the security-sensitive parts (signing, enrollment, sign-in, tenancy, the agent's sandboxing and redaction) have had several independent adversarial reviews, with every finding fixed and covered by a regression test.
+
 ## License
 
 Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). Contributions are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
