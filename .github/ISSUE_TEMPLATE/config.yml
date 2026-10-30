@@ -3,6 +3,3 @@ contact_links:
   - name: Report a security vulnerability
     url: https://github.com/peacedouts/nightfix/security/advisories/new
     about: Report privately; see SECURITY.md.
-  - name: Questions and help setting it up
-    url: mailto:hello@nightfix.dev
-    about: Ask us directly.
