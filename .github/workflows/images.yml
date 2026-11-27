@@ -120,7 +120,7 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_PUSH_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+      - uses: aws-actions/amazon-ecr-login@7290e214a610b32bc0eef81748948b6d466a8783 # v2
       # ECR tags are immutable: a re-run for a commit that's already pushed
       # keeps the existing image, and signs it if an earlier run pushed it
       # but failed to sign (deploys refuse unsigned images).
